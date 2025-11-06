@@ -5,7 +5,7 @@
 
 # 環境の起動
 ```shell
-nix develop <br>
+nix develop
 ```
 立ちあがったshellで以下を実行
 ```shell
