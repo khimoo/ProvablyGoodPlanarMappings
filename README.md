@@ -1,5 +1,5 @@
 wip\
-tinymistの数式をmarkdownに直せてないです
+typstの数式をmarkdownに直せてないです
 
 ## 概要
 
