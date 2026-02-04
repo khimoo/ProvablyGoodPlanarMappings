@@ -1,7 +1,10 @@
-wip
+wip\
+tinymistの数式をmarkdownに直せてないです
+
 ## 概要
 
 ある企業のサマーインターンでRoiらによるリアルタイム画像変形のアルゴリズムを実装した
+
 論文： https://scholar.google.com/citations?view_op=view_citation&hl=en&user=xC6XLaYAAAAJ&citation_for_view=xC6XLaYAAAAJ:UeHWp8X0CEIC
 
 ## 実行方法
