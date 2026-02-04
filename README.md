@@ -1,12 +1,8 @@
----
-created: 2026-02-05 04:24:04
-modified: 2026-02-05 04:27:17
----
 wip
 ## 概要
 
 ある企業のサマーインターンでRoiらによるリアルタイム画像変形のアルゴリズムを実装した
-論文：[] [https://scholar.google.com/citations?view\_op=view\_citation&hl=en&user=xC6XLaYAAAAJ&citation\_for\_view=xC6XLaYAAAAJ:UeHWp8X0CEIC](https://scholar.google.com/citations?view_op=view_citation&hl=en&user=xC6XLaYAAAAJ&citation_for_view=xC6XLaYAAAAJ:UeHWp8X0CEIC)
+論文： https://scholar.google.com/citations?view_op=view_citation&hl=en&user=xC6XLaYAAAAJ&citation_for_view=xC6XLaYAAAAJ:UeHWp8X0CEIC
 
 ## 実行方法
 ```shell
