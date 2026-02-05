@@ -9,12 +9,9 @@ typstの数式をmarkdownに直せてないです
 
 ## 実行方法
 ```shell
-nix develop
+nix run github:khimoo/ProvablyGoodPlanarMappings
 ```
-立ちあがったshellで以下を実行
-```shell
-python ui-for-refactored2.py
-```
+リポジトリをcloneしてnix runでも可
 
 ## 成果
 
