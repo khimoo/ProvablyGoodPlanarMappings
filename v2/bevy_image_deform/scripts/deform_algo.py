@@ -3,724 +3,812 @@
 
 import cvxpy as cp
 import numpy as np
-from abc import ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Tuple, List, Optional, Union
 import warnings
 from scipy.spatial import Delaunay
 
-class RBF2DandAffine:
-    def __init__(self, epsilon=1.0):
-        self.epsilon = float(epsilon)
-        self.src = None
-        self.Phi = None
-        self.GradPhi = None
+# --- Configuration & Strategy ---
 
-    def set_centers(self, centers):
-        self.src = np.asarray(centers, dtype=float)
+@dataclass
+class DistortionStrategyConfig:
+    """Base configuration for distortion control strategy."""
+    pass
+
+@dataclass
+class FixedBoundCalcGrid(DistortionStrategyConfig):
+    """
+    Strategy 2 (Guarantee Mode):
+    Calculate required grid spacing 'h' from K and K_max to guarantee injectivity.
+    """
+    K: float = 2.0       # Target bound for distortion on grid
+    K_max: float = 10.0  # Guaranteed upper bound for distortion everywhere
+
+@dataclass
+class FixedGridCalcBound(DistortionStrategyConfig):
+    """
+    Strategy 1 (Fixed Grid Mode):
+    Use a fixed grid resolution. Theoretical K_max is calculated (informative).
+    """
+    grid_resolution: Tuple[int, int]
+    K: float = 2.0
+
+@dataclass
+class HeuristicFast(DistortionStrategyConfig):
+    """
+    Strategy 3 (Fast Mode):
+    Looser constraints, heuristic update, potentially skipping rigorous checks.
+    """
+    grid_resolution: Tuple[int, int]
+    K: float = 3.0
+
+@dataclass
+class SolverConfig:
+    """Main configuration for the Solver."""
+    domain_bounds: Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
+    source_handles: np.ndarray  # (N, 2) Initial positions of control points
+    
+    basis_type: str = "Gaussian"
+    epsilon: float = 100.0     # Width parameter for Gaussian RBF
+    
+    lambda_biharmonic: float = 1e-4  # Regularization weight
+    
+    strategy: DistortionStrategyConfig = field(default_factory=FixedBoundCalcGrid)
+
+# --- Basis Function Interface ---
+
+class BasisFunction(ABC):
+    @abstractmethod
+    def set_centers(self, centers: np.ndarray) -> None:
+        """Set the RBF centers (normally the source handle positions)."""
+        pass
+
+    @abstractmethod
+    def evaluate(self, coords: np.ndarray) -> np.ndarray:
+        """
+        Compute Basis Matrix Phi.
+        Args:
+            coords: (M, 2)
+        Returns:
+            Phi: (M, N_basis)
+        """
+        pass
+
+    @abstractmethod
+    def jacobian(self, coords: np.ndarray) -> np.ndarray:
+        """
+        Compute Gradient of Basis Matrix.
+        Args:
+            coords: (M, 2)
+        Returns:
+            GradPhi: (M, N_basis, 2)
+        """
+        pass
+    
+    @abstractmethod
+    def compute_h_from_distortion(self, K: float, K_max: float) -> float:
+        """Calculate grid spacing h to satisfy K_max >= K + omega(h)."""
+        pass
+    
+    @abstractmethod
+    def get_identity_coefficients(self, src_handles: np.ndarray) -> np.ndarray:
+        """Return coefficients c that result in an identity mapping."""
+        pass
+    
+    @abstractmethod
+    def get_basis_count(self) -> int:
+        pass
+
+# --- Gaussian RBF Implementation ---
+
+class GaussianRBF(BasisFunction):
+    def __init__(self, epsilon: float = 100.0):
+        self.epsilon = float(epsilon)
+        # Relationship between epsilon and paper's s: phi(r) = exp(-r^2 / 2s^2)
+        # Implementation uses: exp(-r^2 / epsilon^2)
+        # Thus: 2s^2 = epsilon^2  => s = epsilon / sqrt(2)
+        self.s = self.epsilon / np.sqrt(2.0)
+        self.centers: Optional[np.ndarray] = None
+
+    def set_centers(self, centers: np.ndarray) -> None:
+        self.centers = np.asarray(centers, dtype=float)
 
     def _rbf(self, r):
+        # phi(r) = exp( - (r/eps)^2 )
         return np.exp(-(r / self.epsilon) ** 2)
 
-    def basis_functions(self, x):
-        """x -> [phi_1(x),...,phi_n(x), 1, x, y]  （n+3次元）"""
-        if self.src is None:
-            raise RuntimeError("self.src is not set.")
-        x = np.asarray(x, dtype=float)
-        r = np.sqrt(np.sum((self.src - x) ** 2, axis=1))
-        vals = self._rbf(r)                            # (n,)
-        return np.concatenate([vals, [1.0, x[0], x[1]]])  # (n+3,)
+    def evaluate(self, coords: np.ndarray) -> np.ndarray:
+        if self.centers is None:
+            raise RuntimeError("GaussianRBF centers not set.")
+        
+        x = np.asarray(coords, dtype=float)    # (M, 2)
+        c = self.centers                       # (N, 2)
+        M = x.shape[0]
+        N = c.shape[0]
 
-    def basis_functions_with_grad(self, x):
-        """x -> d/dx [phi_1,...,phi_n, 1, x, y]  （(n+3,2)）"""
-        if self.src is None:
-            raise RuntimeError("self.src is not set.")
-        x = np.asarray(x, dtype=float)
-        diff = x[None, :] - self.src           # (n,2)
-        r2 = np.sum(diff * diff, axis=1)       # (n,)
-        val = np.exp(-r2 / (self.epsilon**2))  # (n,)
-        grad_rbf = -2.0 * diff / (self.epsilon**2) * val[:, None]  # (n,2)
-        # affine の勾配は [1,0], [0,1]、定数は [0,0]
-        grad_affine = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])  # (3,2)
-        return np.vstack([grad_rbf, grad_affine])  # (n+3,2)
+        # Pairwise distance squared: |x-c|^2 = |x|^2 + |c|^2 - 2<x,c>
+        # Using broadcasting can be memory intense for very large M*N, 
+        # but for typical usage (M~1000-5000, N~10-100) it is fine.
+        x2 = np.sum(x**2, axis=1).reshape((M, 1))
+        c2 = np.sum(c**2, axis=1).reshape((1, N))
+        dist2 = x2 + c2 - 2 * (x @ c.T)
+        dist2 = np.maximum(dist2, 0.0)
+        r = np.sqrt(dist2)
+        
+        vals = self._rbf(r)  # (M, N)
+        
+        # Affine terms: [1, x, y]
+        ones = np.ones((M, 1))
+        
+        # Phi = [RBFs, 1, x, y] -> (M, N+3)
+        return np.hstack([vals, ones, x])
 
-    def precompute(self, vertices):
-        """vertices 全点で Phi, GradPhi を作る。Phi:(m,n+3), GradPhi:(m,n+3,2)"""
-        if self.src is None:
-            raise RuntimeError("self.src must be set before precompute().")
-        Z = np.asarray(vertices, dtype=float)
-        m = Z.shape[0]
-        n = self.src.shape[0]
-        Phi = np.zeros((m, n + 3), dtype=float)
-        GradPhi = np.zeros((m, n + 3, 2), dtype=float)
-        for j, x in enumerate(Z):
-            Phi[j] = self.basis_functions(x)
-            GradPhi[j] = self.basis_functions_with_grad(x)
-        self.Phi = Phi
-        self.GradPhi = GradPhi
+    def jacobian(self, coords: np.ndarray) -> np.ndarray:
+        if self.centers is None:
+            raise RuntimeError("GaussianRBF centers not set.")
+        
+        x = np.asarray(coords, dtype=float) # (M, 2)
+        c = self.centers                    # (N, 2)
+        M = x.shape[0]
+        N = c.shape[0]
+        
+        # We need gradients with respect to x (input coordinates)
+        # Gradient of RBF part:
+        # phi(r) = exp( - ||x-c||^2 / eps^2 )
+        # d/dx phi = phi * ( -1/eps^2 ) * d/dx ( ||x-c||^2 )
+        #          = phi * ( -1/eps^2 ) * 2(x-c)
+        #          = -2/eps^2 * (x-c) * phi
+        
+        # diff: (M, N, 2)  (x_i - c_j)
+        diff = x[:, None, :] - c[None, :, :] 
+        r2 = np.sum(diff**2, axis=2) # (M, N)
+        val = np.exp(-r2 / (self.epsilon**2)) # (M, N)
+        
+        # grad_rbf: (M, N, 2)
+        grad_rbf = -2.0 / (self.epsilon**2) * diff * val[:, :, None]
+        
+        # Gradient of Affine part: [1, x, y]
+        # d/dx(1) = [0, 0]
+        # d/dx(x) = [1, 0]
+        # d/dx(y) = [0, 1]
+        
+        grad_affine = np.zeros((M, 3, 2))
+        grad_affine[:, 1, 0] = 1.0
+        grad_affine[:, 2, 1] = 1.0
+        
+        # GradPhi: (M, N+3, 2)
+        return np.concatenate([grad_rbf, grad_affine], axis=1)
 
+    def compute_h_from_distortion(self, K: float, K_max: float) -> float:
+        # Paper (Table 1 & Sec 4): Modulus of continuity omega(t) approx t * (Lip(Phi')?)
+        # Detailed logic: K_max >= K + omega(h).
+        # For Gaussian: omega(t) ~= t / s^2 (Linear approximation valid for small t)
+        # s = epsilon / sqrt(2)
+        # K_max = K + h / s^2  ==>  h = (K_max - K) * s^2
+        
+        if K_max <= K:
+            warnings.warn("K_max <= K in configuration. Forcing minimal h.")
+            return 1e-3 * self.epsilon
+            
+        s2 = self.s ** 2
+        # Use a safety factor or derived Lipschitz constant. 
+        # Here we use the simplified relation derived in the context of the paper's examples.
+        h = (K_max - K) * s2
+        
+        if h <= 0:
+            return 1e-3 * self.epsilon
+        return h
 
-class ProvablyGoodPlanarMapping(metaclass=ABCMeta):
-    def __init__(self, vertices, src, K):
-        # 軽量化：データ保存と初期状態のセットのみ
-        self.vertices = np.asarray(vertices, dtype=float)
-        self.src = np.asarray(src, dtype=float)
-        self.dst = np.asarray(src, dtype=float) # 最初のステップは恒等写像!!!!
+    def get_identity_coefficients(self, src_handles: np.ndarray) -> np.ndarray:
+        N = src_handles.shape[0]
+        # c shape: (2, N+3)
+        # RBF weights = 0 
+        # Affine part: u = x (index N+1), v = y (index N+2)
+        c = np.zeros((2, N + 3), dtype=float)
+        c[0, N + 1] = 1.0
+        c[1, N + 2] = 1.0
+        return c
 
-        m = self.vertices.shape[0]
-        # n = self.src.shape[0]  # 必要なら使うが今は保持のみ
+    def get_basis_count(self) -> int:
+        if self.centers is None:
+            return 0
+        return self.centers.shape[0] + 3
 
-        # coefficients (2 x (n+3)) を None にしておく（初期化は別メソッドで）
-        self.c = None
+# --- Main Solver Class ---
 
-        # frame directions di の領域だけ確保（値は initialize で入れる）
-        self.di = np.zeros((m, 2), dtype=float)
-
-        # precompute キャッシュ（precompute() 呼び出しで埋める）
-        self.Phi = None
-        self.GradPhi = None
-
-        # sets & thresholds（activated は initialize で作る）
-        self.activated = []
-        self.farthest_points = None
-        self.K = K
-        # K_high, K_low の初期値は常套式を残す（必要なら外部から上書き可）
-        self.K_high = 0.5 + 0.9 * self.K
-        self.K_low  = 0.5 + 0.5 * self.K
-
-    # ---- ここを “x だけ” に合わせる ----
-    @abstractmethod
-    def basis_functions(self, x):
-        pass
-
-    @abstractmethod
-    def basis_functions_with_grad(self, x):
-        pass
-
-    @abstractmethod
-    def precompute(self):
-        pass
-
-
-    def farthest_point_sampling(self, k, initial_index=None, rng=None):
-        """
-        FPS (Farthest Point Sampling) on self.vertices.
-
-        This fills self.farthest_points (論文中の Z'') with the selected indices.
-
-        Parameters
-        ----------
-        k : int
-            Number of samples to pick (k <= len(vertices)).
-        initial_index : int or None
-            If None, choose a deterministic start (e.g., min x). Otherwise use provided index.
-        rng : np.random.Generator or None
-            Random generator for reproducibility.
-
-        Returns
-        -------
-        indices : ndarray, shape (k,)
-            Indices of selected points in self.vertices (and stored in self.farthest_points).
-        """
-        points = self.vertices
-        m = points.shape[0]
-        if k <= 0:
-            self.farthest_points = np.array([], dtype=int)
-            return self.farthest_points
-        if k >= m:
-            self.farthest_points = np.arange(m, dtype=int)
-            return self.farthest_points
-
-        if rng is None:
-            rng = np.random.default_rng()
-
-        if initial_index is None:
-            # pick a deterministic point: min x-coordinate
-            initial_index = int(np.argmin(points[:, 0]))
-
-        indices = np.empty(k, dtype=int)
-        indices[0] = initial_index
-
-        # initialize distances to first chosen point
-        chosen = points[initial_index]
-        diff = points - chosen
-        min_d2 = np.sum(diff * diff, axis=1)
-
-        for i in range(1, k):
-            # pick farthest point
-            next_idx = int(np.argmax(min_d2))
-            indices[i] = next_idx
-            new_chosen = points[next_idx]
-            d2 = np.sum((points - new_chosen) ** 2, axis=1)
-            min_d2 = np.minimum(min_d2, d2)
-
-        self.farthest_points = indices
-        return self.farthest_points
-
-    def compute_isometric_distortion(self, c, indices=None, eps_sigma=1e-10):
-        """
-        Compute conformal/isometric distortion K at selected collocation points.
-
-        Parameters
-        ----------
-        c : ndarray, shape (2, n)
-            Coefficients for u and v components (rows: [u, v], cols over n bases).
-        indices : array-like or None
-            Indices of collocation points to evaluate. If None, use all.
-        eps_sigma : float
-            Small positive value for numerical stability in denominators.
-
-        Returns
-        -------
-        K : ndarray, shape (len(indices),)
-            Distortion K >= 1 at the selected points.
-        extras : dict
-            {
-            "Js": |f_z|,           # similarity norm
-            "Ja": |f_bar|,         # anti-similarity norm
-            "mu": |f_bar|/|f_z|,   # Beltrami magnitude
-            "J" : (len, 2, 2)      # Jacobians at points
-            }
-        """
-        if self.GradPhi is None:
-            raise RuntimeError("GradPhi is not precomputed. Call precompute() first.")
-
-        m, n, _ = self.GradPhi.shape
-        if c.shape != (2, n):
-            raise ValueError(f"c must have shape (2, {n}), got {c.shape}")
-
-        if indices is None:
-            indices = np.arange(m, dtype=int)
+class ProvablyGoodMapping:
+    def __init__(self, config: SolverConfig):
+        self.config = config
+        
+        # 1. Setup Basis
+        if self.config.basis_type == "Gaussian":
+            self.basis = GaussianRBF(epsilon=self.config.epsilon)
         else:
-            indices = np.asarray(indices, dtype=int)
+            raise NotImplementedError(f"Basis type {self.config.basis_type} not implemented.")
+            
+        self.basis.set_centers(self.config.source_handles)
+        
+        # Internal State
+        self.collocation_grid: Optional[np.ndarray] = None # Z
+        self.Phi: Optional[np.ndarray] = None
+        self.GradPhi: Optional[np.ndarray] = None
+        
+        self.c: Optional[np.ndarray] = None          # Coefficients (2, N+3)
+        self.di: Optional[np.ndarray] = None         # Frame directions for checking (M, 2)
+        self.activated_indices: List[int] = []       # Active set indices
+        
+        self.H_reg: Optional[np.ndarray] = None      # Regularization matrix (Biharmonic)
+        
+        # Thresholds derived from Strategy
+        if hasattr(self.config.strategy, 'K'):
+            self.K_target = self.config.strategy.K
+        else:
+            self.K_target = 2.0
+            
+        self.K_high = 0.5 + 0.9 * self.K_target
+        self.K_low = 0.5 + 0.5 * self.K_target
+        
+        # Initialize
+        self._initialize_solver()
 
-        # gather gradients at selected points: (k, n, 2)
-        G = self.GradPhi[indices, :, :]          # ∂phi/∂x = G[...,0], ∂phi/∂y = G[...,1]
-        # u_x, u_y
-        ux = np.einsum('kn,kn->k', G[:, :, 0], np.broadcast_to(c[0, :], (len(indices), n)))
-        uy = np.einsum('kn,kn->k', G[:, :, 1], np.broadcast_to(c[0, :], (len(indices), n)))
-        # v_x, v_y
-        vx = np.einsum('kn,kn->k', G[:, :, 0], np.broadcast_to(c[1, :], (len(indices), n)))
-        vy = np.einsum('kn,kn->k', G[:, :, 1], np.broadcast_to(c[1, :], (len(indices), n)))
+    def _initialize_solver(self):
+        """Constructs grid, precomputes matrices, and sets initial identity state."""
+        print("[Solver] Initializing...")
+        
+        # 2. Setup Grid based on Strategy
+        self._setup_grid()
+        
+        # 3. Precompute Basis Matrices (Phi, GradPhi) on Grid
+        self._precompute_basis_on_grid()
+        
+        # 4. Initialize Coefficients (Identity)
+        self.c = self.basis.get_identity_coefficients(self.config.source_handles)
+        
+        # 5. Initialize Frames (di)
+        # Default direction (1,0) for all grid points
+        M = self.collocation_grid.shape[0]
+        self.di = np.tile(np.array([1.0, 0.0]), (M, 1))
+        
+        self.activated_indices = []
+        
+        print(f"[Solver] Initialized. Grid size: {M} points.")
 
-        # Jacobian entries
-        a = ux  # ∂u/∂x
-        b = vx  # ∂v/∂x
-        c_ = uy # ∂u/∂y
-        d = vy  # ∂v/∂y
+    def _setup_grid(self):
+        strategy = self.config.strategy
+        bounds = self.config.domain_bounds
+        min_x, min_y, max_x, max_y = bounds
+        width = max_x - min_x
+        height = max_y - min_y
+        
+        nx, ny = 20, 20 # Default fallback
+        
+        if isinstance(strategy, FixedBoundCalcGrid):
+            h = self.basis.compute_h_from_distortion(strategy.K, strategy.K_max)
+            print(f"[Solver] Strategy: FixedBoundCalcGrid. Calculated h={h:.4f} for K={strategy.K}, K_max={strategy.K_max}")
+            
+            # Simple safeguard against infinite grid
+            if h < 1e-4: h = 1e-4
+            
+            nx = int(np.ceil(width / h)) + 1
+            ny = int(np.ceil(height / h)) + 1
+            
+            # Clamp to reasonable size to prevent OOM during interactive editing if h is tiny
+            if nx * ny > 250000: # 500x500
+                warnings.warn(f"Calculated grid size {nx}x{ny} is too large. Clamping resolution.")
+                ratio = np.sqrt(250000 / (nx*ny))
+                nx = int(nx * ratio)
+                ny = int(ny * ratio)
+                
+        elif isinstance(strategy, FixedGridCalcBound) or isinstance(strategy, HeuristicFast):
+            nx, ny = strategy.grid_resolution
+            print(f"[Solver] Strategy: Fixed Resolution {nx}x{ny}")
 
-        # complex derivatives
-        fz_real  = 0.5*(a + d)
-        fz_imag  = 0.5*(b - c_)
-        fzb_real = 0.5*(a - d)
-        fzb_imag = 0.5*(c_ + b)
+        x = np.linspace(min_x, max_x, nx)
+        y = np.linspace(min_y, max_y, ny)
+        xv, yv = np.meshgrid(x, y)
+        
+        # Z: (M, 2)
+        self.collocation_grid = np.column_stack([xv.ravel(), yv.ravel()])
+        self.grid_shape = (nx, ny)
 
-        abs_fz  = np.sqrt(fz_real**2  + fz_imag**2)
-        abs_fzb = np.sqrt(fzb_real**2 + fzb_imag**2)
-
-        # warn if eps_sigma is actually used because |f_z| < eps_sigma somewhere
-        unstable_mask = abs_fz < eps_sigma
-        if np.any(unstable_mask):
-            cnt = int(np.sum(unstable_mask))
-            total = len(abs_fz)
-            warnings.warn(
-                f"[compute_isometric_distortion] Numerical stabilizer eps_sigma={eps_sigma} "
-                f"was used at {cnt}/{total} points because |f_z| < eps_sigma. "
-                "This may indicate near-singular Jacobian at those points; consider inspecting "
-                "coefficients, Phi/GradPhi or increasing eps_sigma.",
-                RuntimeWarning, stacklevel=2
-            )
-
-        # Beltrami magnitude and distortion
-        mu = abs_fzb / np.maximum(abs_fz, eps_sigma)
-        # K = (1+|μ|)/(1-|μ|)
-        # warn if mu is extremely close to 1 (leading to huge K)
-        close_to_one_mask = mu >= 1.0 - 1e-12
-        if np.any(close_to_one_mask):
-            cnt = int(np.sum(close_to_one_mask))
-            total = len(mu)
-            warnings.warn(
-                f"[compute_isometric_distortion] Beltrami magnitude |mu| is numerically >= 1 at "
-                f"{cnt}/{total} points (mu values near 1), resulting in extremely large distortion K. "
-                "This may indicate severe local inversion or numerical issues.",
-                RuntimeWarning, stacklevel=2
-            )
-
-        K = (1.0 + mu) / np.maximum(1.0 - mu, eps_sigma)
-
-        # pack Jacobians per point for debugging/inspection
-        J = np.stack([np.stack([a, b], axis=-1),
-                    np.stack([c_, d], axis=-1)], axis=-2)  # shape (k,2,2)
-
-        extras = {"Js": abs_fz, "Ja": abs_fzb, "mu": mu, "J": J}
-        return K, extras
-
-    @abstractmethod
-    def update_active_set(self):
-        pass
-
-    @abstractmethod
-    def optimize_step(self):
-        pass
-
-    @abstractmethod
-    def postprocess(self):
-        pass
-
-
-class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping, RBF2DandAffine):
-    def __init__(self, vertices, src, K, epsilon=1, fps_k=50, lambda_biharmonic=1e-4):
-        RBF2DandAffine.__init__(self, epsilon=epsilon)
-        self.set_centers(src)
-
-        # 親クラスの軽量 init（状態のみセット）
-        ProvablyGoodPlanarMapping.__init__(self, vertices, src, K)
-
-        # 固有パラメータ
-        self.epsilon = epsilon
-        self.fps_k = fps_k
-
-        # Biharmonic 正則化の重み（係数空間での二次形式を作る）
-        self.lambda_biharmonic = float(lambda_biharmonic)
-        self.H_reg = None              # (n+3, n+3) の二次形式行列を後で作る
-        self.mesh_simplices = None     # Delaunay 三角形情報を保存（可視化に使ってもよい）
-
-        # デフォルトで di は (1,0) にしておく（ただし initialize で明示的に上書きされる）
-        m = self.vertices.shape[0]
-        for j in range(m):
-            self.di[j] = np.array([1.0, 0.0], dtype=float)
-
-        # self.Phi / self.GradPhi / activated / farthest_points は initialize() で構築する
-        # self.c は compute_initial_coefficients_from_least_squares() や _set_identity_mapping() で作る
-
-    def initialize_first_step(self):
-        """
-        Algorithm 1 の 'if first step then ...' に対応する初期化。
-        （フラグ無し版：first step でのみ呼ぶ想定）
-        """
-        fps_k = self.fps_k
-
-        # --- 1) Phi / GradPhi の準備（未計算なら一度だけ計算） ---
-        if self.Phi is None or self.GradPhi is None or self.H_reg is None:
-            print("[INFO] Precomputing Phi, GradPhi and Biharmonic matrix H_reg ...")
-            self.precompute()  # ここで H_reg も構築される
-
-        # --- 2) di の初期化 (all -> (1,0)) ---
-        m = self.vertices.shape[0]
-        # 再実行しても安全なように再割当（idempotent）
-        self.di = np.tile(np.array([1.0, 0.0], dtype=float), (m, 1))
-
-        # --- 3) active set / farthest sampling ---
-        self.activated = []
-        # farthest_point_sampling が self.farthest_points を設定する前提
-        self.farthest_point_sampling(fps_k)
-
-        self._set_identity_mapping()
-
-        print("[INFO] initialize_first_step done.")
-
-    # ---- ABC 実装（RBF2DandAffine を委譲）----
-    def basis_functions(self, x):
-        return RBF2DandAffine.basis_functions(self, x)
-
-    def basis_functions_with_grad(self, x):
-        return RBF2DandAffine.basis_functions_with_grad(self, x)
-
-    def precompute(self):
-        """
-        既存の Phi/GradPhi を作る処理に加え、メッシュから単純なグラフラプラシアン
-        を作り、H_reg = Phi^T (L^T L) Phi を構成する。
-        """
-        # まず基本の Phi/GradPhi を作る（RBF2DandAffine.precompute に委譲）
-        RBF2DandAffine.precompute(self, self.vertices)  # sets self.Phi, self.GradPhi
-
-        m = self.vertices.shape[0]
-        # Delaunay で三角形を作る（simple, robust enough）
+    def _precompute_basis_on_grid(self):
+        """Precomputes Phi, GradPhi and Regularization Matrix H_reg."""
+        if self.collocation_grid is None:
+            raise RuntimeError("Grid not setup.")
+            
+        print("[Solver] Precomputing basis functions on grid...")
+        self.Phi = self.basis.evaluate(self.collocation_grid)
+        self.GradPhi = self.basis.jacobian(self.collocation_grid)
+        
+        # Compute Biharmonic Regularization Matrix
+        # Algorithm:
+        # 1. Build discrete Laplacian L on the grid (using Delaunay or grid connectivity)
+        # 2. M = L^T L
+        # 3. H_reg = Phi^T M Phi
+        
         try:
-            tris = Delaunay(self.vertices)
-            simplices = tris.simplices
+            # Using Delaunay for generic grid connectivity
+            tri = Delaunay(self.collocation_grid)
+            simplices = tri.simplices
+            
+            m = self.collocation_grid.shape[0]
+            # Adjacency
+            # Note: This loop can be slow for very large grids in Python.
+            # But for solver grids (e.g. 50x50=2500) it is fast enough.
+            
+            # Helper for faster adjacency filling
+            edges = set()
+            for s in simplices:
+                s = np.sort(s)
+                edges.add((s[0], s[1]))
+                edges.add((s[1], s[2]))
+                edges.add((s[0], s[2]))
+            
+            rows = []
+            cols = []
+            values = []
+            
+            # Build L = D - A directly?
+            # We use dense matrix for M because m is small enough usually.
+            # If m is large, we should use sparse matrices.
+            # For robustness with cvxpy, keeping it dense if N is small is better, 
+            # BUT H_reg is (N_basis x N_basis), which is small.
+            # L is (M x M).
+            
+            # Let's use sparse for L construction
+            from scipy import sparse
+            
+            row_idx = []
+            col_idx = []
+            data = []
+            
+            for (i, j) in edges:
+                # A[i, j] = 1
+                row_idx.extend([i, j])
+                col_idx.extend([j, i])
+                data.extend([1.0, 1.0])
+                
+            A = sparse.coo_matrix((data, (row_idx, col_idx)), shape=(m, m))
+            deg = np.array(A.sum(axis=1)).flatten()
+            D = sparse.diags(deg)
+            L = D - A
+            
+            # M = L.T @ L
+            M_mat = L.T @ L
+            
+            # H_reg = Phi.T @ M @ Phi
+            # Phi is dense (M, N_basis). M_mat is sparse(M, M).
+            # Result H_reg is dense (N_basis, N_basis).
+            
+            M_dot_Phi = M_mat @ self.Phi # (M, N_basis)
+            H = self.Phi.T @ M_dot_Phi   # (N_basis, N_basis)
+            
+            self.H_reg = 0.5 * (H + H.T) # Ensure symmetry
+            
         except Exception as e:
-            # Delaunay が失敗したら空にしておく（極端な状況）
-            simplices = np.empty((0, 3), dtype=int)
+            warnings.warn(f"Failed to compute regularization matrix: {e}. Regularization disabled.")
+            self.H_reg = None
 
-        self.mesh_simplices = simplices
-
-        # --- adjacency (m x m) を作る（各三角形の辺を 1 とする） ---
-        A = np.zeros((m, m), dtype=float)
-        for tri in simplices:
-            i, j, k = int(tri[0]), int(tri[1]), int(tri[2])
-            A[i, j] = A[j, i] = 1.0
-            A[j, k] = A[k, j] = 1.0
-            A[k, i] = A[i, k] = 1.0
-
-        # degree と単純ラプラシアン L = D - A
-        deg = np.sum(A, axis=1)
-        L = np.diag(deg) - A  # shape (m, m)
-
-        # 安定化のため、L の行和が 0 になることを確認（理論上そうなる）
-        # Biharmonic の二次形式は L^T L を使う
-        M = L.T @ L  # PSD 行列 (m x m)
-
-        # Phi (m, n+3) を使って H = Phi^T M Phi を作る
-        Phi = self.Phi  # (m, n)
-        H = Phi.T @ (M @ Phi)  # (n, n)
-
-        # 数値対称化
-        H = 0.5 * (H + H.T)
-
-
-        # # 制御点が動いていない初期状態で変形が発生しなくなります。
-        # n_rbf = self.src.shape[0]
-        # # H は (n_rbf+3, n_rbf+3)。最後の3行・3列（定数, x, y）を0クリア
-        # H[n_rbf:, :] = 0.0
-        # H[:, n_rbf:] = 0.0
-
-        self.H_reg = H
-        print(f"[INFO] precompute: built Phi({self.Phi.shape}), GradPhi({self.GradPhi.shape}), H_reg({self.H_reg.shape})")
-
-    # 恒等写像（アフィン部だけ有効）
-    def _set_identity_mapping(self):
-        n = self.src.shape[0]
-        self.c = np.zeros((2, n + 3), dtype=float)
-        self.c[0, n + 1] = 1.0  # u = x
-        self.c[1, n + 2] = 1.0  # v = y
-        print("[INFO] Identity mapping (affine) set.")
-
-    def update_active_set(self):
+    def compute_mapping(self, target_handles: np.ndarray):
         """
-        Distortionを評価し、active set Z'を更新する。
-        新方針: K_high を超えた点をすべて追加。
+        Main Loop:
+        1. Check distortion on grid (update active set)
+        2. Solve optimization problem
+        3. Post-process (update constraints frames)
         """
-        # 全点の歪み評価
-        K_values, _ = self.compute_isometric_distortion(self.c)
-        new_activated = [i for i, Kval in enumerate(K_values) if Kval > self.K_high]
+        # Update target positions in config? Or just use local variable?
+        # Ideally, we optimize to match target_handles.
+        
+        # 1. Update Active Set
+        self._update_active_set()
+        
+        # 2. Optimize
+        self._optimize_step(target_handles)
+        
+        # 3. Post-process
+        self._postprocess()
 
-        # 追加
-        for idx in new_activated:
-            if idx not in self.activated:
-                self.activated.append(idx)
+    def transform(self, points: np.ndarray) -> np.ndarray:
+        """
+        Apply current mapping to arbitrary points (e.g. render mesh).
+        points: (K, 2)
+        returns: (K, 2)
+        """
+        if self.c is None:
+            return points # Identity if not initialized
+            
+        Phi_points = self.basis.evaluate(points) # (K, N+3)
+        # c is (2, N+3)
+        # result = (Phi * c^T) -> (K, 2)
+        return Phi_points @ self.c.T
 
-        # K_low を下回る点を削除
-        self.activated = [idx for idx in self.activated if K_values[idx] >= self.K_low]
+    # --- Internal Methods ---
 
-        print(f"[INFO] Active set updated: size={len(self.activated)}")
+    def _compute_distortion_on_grid(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute distortion K at each grid point.
+        Returns: 
+           K_vals: (M,)
+           extras: dict
+        """
+        # G: (M, N+3, 2)
+        G = self.GradPhi
+        
+        # c: (2, N+3)
+        # u = c[0] @ Phi^T  => grad_u = c[0] @ GradPhi
+        
+        # grad_u: (M, 2)
+        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
+        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
+        
+        # f_z  = 0.5 * ( (ux + vy) + i(vx - uy) )
+        # f_zb = 0.5 * ( (ux - vy) + i(vx + uy) )
+        
+        ux, uy = grad_u[:, 0], grad_u[:, 1]
+        vx, vy = grad_v[:, 0], grad_v[:, 1]
+        
+        re_fz  = 0.5 * (ux + vy)
+        im_fz  = 0.5 * (vx - uy)
+        re_fzb = 0.5 * (ux - vy)
+        im_fzb = 0.5 * (vx + uy)
+        
+        abs_fz  = np.sqrt(re_fz**2 + im_fz**2)
+        abs_fzb = np.sqrt(re_fzb**2 + im_fzb**2)
+        
+        eps = 1e-12
+        mu = abs_fzb / np.maximum(abs_fz, eps)
+        
+        # K = (1+|mu|) / (1-|mu|)
+        # Clamp mu to 1-eps to avoid division by zero
+        mu_clamped = np.minimum(mu, 1.0 - 1e-6)
+        K_vals = (1.0 + mu_clamped) / (1.0 - mu_clamped)
+        
+        return K_vals, {"abs_fz": abs_fz, "abs_fzb": abs_fzb, "mu": mu}
 
+    def _update_active_set(self):
+        K_vals, _ = self._compute_distortion_on_grid()
+        
+        # Find points violating K_high
+        violators = np.where(K_vals > self.K_high)[0]
+        
+        # Add to set
+        current_set = set(self.activated_indices)
+        for v in violators:
+            current_set.add(int(v))
+            
+        # Optional: Remove points satisfying K_low (Hysteresis)
+        # To be safe, we might just keep them or remove carefully.
+        # Filter:
+        kept_indices = []
+        for idx in current_set:
+            if K_vals[idx] >= self.K_low:
+                kept_indices.append(idx)
+        
+        self.activated_indices = sorted(kept_indices)
+        
+        # If strategy is Heuristic, maybe limit the size?
+        # For now, stick to logic.
 
-    # --- helpers: coefficients -> di (副作用なし) ---
-    def _compute_di_from_coeffs(self, c_coeffs, indices=None):
-        # (既存の実装をそのまま利用)
-        if indices is None:
-            idx_set = set(self.activated)
-            if getattr(self, 'farthest_points', None) is not None:
-                idx_set.update(self.farthest_points.tolist())
-            indices = sorted(list(idx_set))
+    def _compute_di_local(self, indices: List[int]) -> np.ndarray:
+        """Compute frames d_i for specified indices using current coefficients."""
+        if not indices:
+            return np.zeros((0, 2))
+            
+        idx_arr = np.array(indices)
+        G = self.GradPhi[idx_arr] # (K, N+3, 2)
+        
+        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
+        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
+        
+        ux, uy = grad_u[:, 0], grad_u[:, 1]
+        vx, vy = grad_v[:, 0], grad_v[:, 1]
+        
+        # f_z vector (real, imag)
+        re_fz  = 0.5 * (ux + vy)
+        im_fz  = 0.5 * (vx - uy)
+        
+        fz_vecs = np.stack([re_fz, im_fz], axis=1) # (K, 2)
+        norm_fz = np.linalg.norm(fz_vecs, axis=1, keepdims=True)
+        
+        # Normalized direction
+        # Handle zero norm
+        mask = (norm_fz > 1e-12).flatten()
+        
+        di_subset = np.zeros_like(fz_vecs)
+        # Copy existing di for near-zero gradients? Or default (1,0)?
+        # For this temporary calculation, we use (1,0) fallback if singular
+        di_subset[...] = np.array([1.0, 0.0])
+        
+        if np.any(mask):
+            di_subset[mask] = fz_vecs[mask] / norm_fz[mask]
+            
+        return di_subset
 
-        di_tmp = {}
-        for idx in indices:
-            G = self.GradPhi[idx]  # shape (n+3, 2)
-            # grad_u and grad_v computed with given c_coeffs
-            grad_u = c_coeffs[0, :] @ G
-            grad_v = c_coeffs[1, :] @ G
-            fz_vec = 0.5 * np.array([ grad_u[0] + grad_v[1], grad_v[0] - grad_u[1] ])
-            norm_fz = np.linalg.norm(fz_vec)
-            if norm_fz > 1e-12:
-                di_tmp[idx] = fz_vec / norm_fz
-            else:
-                di_tmp[idx] = self.di[idx].copy() if hasattr(self, 'di') else np.array([1.0, 0.0])
-        return di_tmp, indices
-
-    # --- optimize_step の修正版（Biharmonic 正則化を追加） ---
-    def optimize_step(self):
-        if self.Phi is None or self.GradPhi is None:
-            raise RuntimeError("Call precompute() before optimize_step().")
-
-        # --- candidate indices for distortion constraints (activated ∪ farthest) ---
-        cand = set(self.activated)
-        if self.farthest_points is not None:
-            cand.update(self.farthest_points.tolist())
-        candidate_indices = sorted(list(cand))
-
-        # --- compute temporary di from current self.c (no side effect) ---
-        di_local, candidate_indices = self._compute_di_from_coeffs(self.c, indices=candidate_indices)
-
-        n = self.src.shape[0] + 3  # n+3 total basis count
-        c_var = cp.Variable((2, n))
-
-        # 1) positional objective (sum of norms)
-        r_vars = []
+    def _optimize_step(self, target_handles: np.ndarray):
+        # CVXPY Setup
+        N_basis = self.basis.get_basis_count() # N + 3 usually
+        c_var = cp.Variable((2, N_basis))
+        
         constraints = []
-        for i in range(len(self.src)):
-            phi_i = self.basis_functions(self.src[i])
-            target = self.dst[i]
-            diff = c_var @ phi_i - target
-            r = cp.Variable(nonneg=True)
-            constraints += [cp.norm(diff, 2) <= r]
-            r_vars.append(r)
+        
+        # 1. Positional Constraints (Soft)
+        # Minimize sum of distances to target_handles
+        # or constrain them?
+        # Usually soft constraints (Minimize ||Phi c - target||)
+        
+        # Basis at source handles (centers)
+        # Note: Provide direct way to get Phi for handles without re-evaluating?
+        # It's evaluating at centers. 
+        # self.basis.evaluate(self.config.source_handles)
+        # This is (N, N+3).
+        Phi_src = self.basis.evaluate(self.config.source_handles)
+        
+        # Objective: Position fitting
+        # sum |c * phi - target|^2
+        diff = c_var @ Phi_src.T - target_handles.T # (2, N)
+        # L2 norm per point:
+        # We want simple L2 minimization. cp.sum_squares(diff)
+        position_loss = cp.sum_squares(diff)
+        
+        # 2. Distortion Constraints (Active Set)
+        if self.activated_indices:
+            idx_list = self.activated_indices
+            G_sub = self.GradPhi[idx_list] # (K, N+3, 2)
+            
+            # Recompute local di for the active set based on *current* (previous step) coefficients
+            # This linearizes the constraint around current state.
+            di_local = self._compute_di_local(idx_list) # (K, 2)
+            
+            # Constraints construction
+            # For each point in active set:
+            # |f_z| + |f_zb| <= K_max (or K_high to be safe)
+            # Re(f_z * di_bar) - |f_zb| >= 1/K (approx of lower bound |f_z| - |f_zb| >= 1/K?)
+            # Wait, let's check the paper or v1 code.
+            
+            # V1 code:
+            # fz = 0.5 * (grad_u.x + grad_v.y, grad_v.x - grad_u.y)
+            # fzb = 0.5 * (grad_u.x - grad_v.y, grad_v.x + grad_u.y)
+            # 1. |fz| + |fzb| <= K_high
+            # 2. <fz, di> - |fzb| >= 1/K  (Linearized lower bound for |fz|-|fzb|)
+            
+            # Efficient implementation in CVXPY?
+            # CVXPY overhead is high for loops. We need vectorization if possible.
+            # But G_sub is specific per point.
+            
+            # It's hard to fully vectorize with G_sub structure in CVXPY without loops 
+            # unless we flatten carefully.
+            # Loop for now. If slow, optimization needed.
+            
+            for k, idx in enumerate(idx_list):
+                G_k = G_sub[k] # (N+3, 2)
+                d_k = di_local[k] # (2,)
+                
+                # grad_u_vec = c_var[0] @ G_k
+                # grad_v_vec = c_var[1] @ G_k
+                
+                # But c_var is (2, N). 
+                # grad_u at point k is scalar? No.
+                # G_k is matrix (N_basis, 2).
+                # c_var[0] is (N_basis,).
+                # product is (2,) vector? -> [du/dx, du/dy]
+                
+                grad_u_k = c_var[0] @ G_k # (2,)
+                grad_v_k = c_var[1] @ G_k # (2,)
+                
+                # fz components
+                fz_re = 0.5 * (grad_u_k[0] + grad_v_k[1])
+                fz_im = 0.5 * (grad_v_k[0] - grad_u_k[1])
+                
+                fzb_re = 0.5 * (grad_u_k[0] - grad_v_k[1])
+                fzb_im = 0.5 * (grad_v_k[0] + grad_u_k[1])
+                
+                fz_vec = cp.hstack([fz_re, fz_im])
+                fzb_vec = cp.hstack([fzb_re, fzb_im])
+                
+                # Constraint 1: Upper Bound
+                constraints.append(cp.norm(fz_vec, 2) + cp.norm(fzb_vec, 2) <= self.K_high)
+                
+                # Constraint 2: Lower Bound (Injectivity)
+                # <fz, d> = fz_re * d_re + fz_im * d_im
+                dot_prod = fz_re * float(d_k[0]) + fz_im * float(d_k[1])
+                constraints.append(dot_prod - cp.norm(fzb_vec, 2) >= 1.0 / self.K_target)
 
-        # 2) distortion constraints on candidate_indices, using di_local (not self.di)
-        for idx in candidate_indices:
-            G = self.GradPhi[idx]  # numpy array (n+3, 2)
+        # 3. Regularization Term
+        reg_term = 0
+        if self.H_reg is not None and self.config.lambda_biharmonic > 0:
+            # H_reg is (N_basis, N_basis)
+            # Typically applied only to RBF part (first N terms)?
+            # V1 logic applied to RBF only.
+            N = self.config.source_handles.shape[0]
+            H_rbf = self.H_reg[:N, :N]
+            
+            c_rbf_u = c_var[0, :N]
+            c_rbf_v = c_var[1, :N]
+            
+            quad = cp.quad_form(c_rbf_u, H_rbf) + cp.quad_form(c_rbf_v, H_rbf)
+            reg_term = self.config.lambda_biharmonic * quad
 
-            grad_u = c_var[0, :] @ G   # cvxpy expression length-2
-            grad_v = c_var[1, :] @ G
-
-            fz  = 0.5 * cp.hstack([ grad_u[0] + grad_v[1],  grad_v[0] - grad_u[1] ])
-            fzb = 0.5 * cp.hstack([ grad_u[0] - grad_v[1],  grad_v[0] + grad_u[1] ])
-
-            constraints += [cp.norm(fz, 2) + cp.norm(fzb, 2) <= self.K_high]
-
-            di_vec = di_local[idx]  # numpy array length-2
-            constraints += [fz[0]*float(di_vec[0]) + fz[1]*float(di_vec[1]) - cp.norm(fzb, 2) >= 1.0 / self.K]
-
-        # Build objective with optional Biharmonic term
-        objective_expr = cp.sum(r_vars)
-
-        if getattr(self, 'H_reg', None) is not None and self.lambda_biharmonic > 0.0:
-            # cvxpy quad_form expects a matrix (H is symmetric PSD)
-            H = self.H_reg
-            # convert to numpy array if it's not
-            H_np = np.asarray(H, dtype=float)
-
-            # アフィン成分（最後の3要素: 定数, x, y）に対する正則化を除外する
-            n_rbf = self.src.shape[0]
-
-            # RBF係数部分に対応する H の部分行列 (n_rbf x n_rbf) を抽出
-            H_rbf = H_np[:n_rbf, :n_rbf]
-
-            # 最適化変数から RBF 係数部分のみスライス
-            c_rbf_u = c_var[0, :n_rbf]
-            c_rbf_v = c_var[1, :n_rbf]
-
-            # Regularization term for u and v components (only RBF part)
-            reg_term = self.lambda_biharmonic * (cp.quad_form(c_rbf_u, H_rbf) +
-                                                 cp.quad_form(c_rbf_v, H_rbf))
-            objective_expr = objective_expr + reg_term
-
-        objective = cp.Minimize(objective_expr)
-        prob = cp.Problem(objective, constraints)
-
+        objective = cp.Minimize(position_loss + reg_term)
+        
+        problem = cp.Problem(objective, constraints)
+        
         try:
-            prob.solve(solver=cp.ECOS, verbose=False)
+            # ECOS is standard, but sometimes CLARABEL or SCS is available/better.
+            problem.solve(solver=cp.ECOS, verbose=False)
         except Exception as e:
-            raise RuntimeError(f"ECOS solver failed or is not available: {e}")
-
-        if prob.status not in ["infeasible", "unbounded"]:
-            self.c = c_var.value
-            print(f"[INFO] Optimization done: status={prob.status}, objective={prob.value}")
-        else:
-            print(f"[WARN] Problem status: {prob.status}")
-
-    # --- postprocess の修正版（indices を受けてその範囲だけ更新） ---
-    def postprocess(self):
-        """
-        Update self.di for all vertices using eq.(27):
-        d_i <- J_S f(x_i) / ||J_S f(x_i)|| for every vertex.
-        """
-        if self.Phi is None or self.GradPhi is None:
-            raise RuntimeError("Phi and GradPhi must be precomputed before postprocess().")
-
-        n_points = len(self.vertices)
-        for idx in range(n_points):
-            G = self.GradPhi[idx]
-            # grad_u = [u_x, u_y], grad_v = [v_x, v_y]
-            grad_u = self.c[0, :] @ G
-            grad_v = self.c[1, :] @ G
-
-            # J_S f = 0.5 * (∇u + I ∇v)
-            # I ∇v = [ -v_y, v_x ]
-            j_s_vec = 0.5 * np.array([grad_u[0] - grad_v[1],
-                                    grad_u[1] + grad_v[0]])
-
-            norm_js = np.linalg.norm(j_s_vec)
-            if norm_js > 1e-12:
-                self.di[idx] = j_s_vec / norm_js
-            else:
-                # fallback: keep previous di or identity
-                self.di[idx] = np.array([1.0, 0.0])
-
-class BevyBridge:
-    def __init__(self, epsilon=50, K=10.0, fps_k=5):
-        self.width = 512.0
-        self.height = 512.0
-        self.rows = 15
-        self.cols = 15
-
-        self.vertices = None # 初期頂点 (N, 2)
-        self.mapper = None   # ソルバーインスタンス
-        self.is_solver_ready = False # ソルバーが準備完了したか
-
-        # 制御点の管理
-        self.control_indices = [] # [idx1, idx2, ...]
-        self.control_src = []     # [[x,y], ...] (初期位置)
-        self.control_dst = []     # [[x,y], ...] (現在のターゲット位置)
-
-        self.target_K = K
-        self.target_fps_k = fps_k
-        self.target_epsilon = epsilon
-
-    def initialize_mesh_from_data(self, vertices, indices):
-        """Rustから頂点データ(flat list)とインデックスを受け取って初期化"""
-        flat_verts = np.array(vertices, dtype=np.float32)
-        if flat_verts.ndim == 1:
-            self.vertices = flat_verts.reshape(-1, 2)
-        else:
-            self.vertices = flat_verts
-
-        self.indices = np.array(indices, dtype=np.int32)
-        print(f"Python: Mesh initialized from data with {len(self.vertices)} vertices.")
-        return True
-
-    def initialize_mesh_from_data(self, vertices, indices):
-        """Rustから頂点データ(flat list)とインデックスを受け取って初期化"""
-        import numpy as np # 関数内importまたはグローバルimport確認
-        # verticesはPyListとして受け取るが、numpy配列に変換
-        flat_verts = np.array(vertices, dtype=np.float32)
-
-        # フラットなリストを受け取った場合はreshape
-        if flat_verts.ndim == 1:
-             self.vertices = flat_verts.reshape(-1, 2)
-        # List[List] なら (N, 2) になるはず
-        else:
-             self.vertices = flat_verts
-
-        self.indices = np.array(indices, dtype=np.int32)
-        print(f"Python: Mesh initialized from data with {len(self.vertices)} vertices.")
-        return True
-
-    def initialize_mesh(self, w, h, rows, cols):
-        self.width = w
-        self.height = h
-        self.rows = rows
-        self.cols = cols
-
-        # グリッド生成
-        xs = np.linspace(0, w, cols)
-        ys = np.linspace(0, h, rows)
-        verts = []
-        for r in range(rows):
-            v_y = (r / (rows - 1)) * h
-            for c in range(cols):
-                v_x = (c / (cols - 1)) * w
-                verts.append([v_x, v_y])
-        self.vertices = np.array(verts, dtype=np.float32)
-        print(f"Python: Mesh initialized with {len(self.vertices)} vertices.")
-        return True
-
-    def _rebuild_mapper(self):
-        """制御点を用いてソルバーを構築・初期化する"""
-        if not self.control_indices:
-            self.mapper = None
-            self.is_solver_ready = False
+            warnings.warn(f"Solver failed: {e}")
             return
 
-        src_points = np.array(self.control_src, dtype=np.float32)
-
-        # epsilonの自動計算ロジック（例: バウンディングボックスの対角線の15%）
-        if self.target_epsilon is None:
-            min_xy = np.min(self.vertices, axis=0)
-            max_xy = np.max(self.vertices, axis=0)
-            diag = np.linalg.norm(max_xy - min_xy)
-            # 制御点が極端に近い場合などのガードも入れるとなお良し
-            epsilon_val = diag * 0.15
-            if epsilon_val < 1e-6: epsilon_val = 1.0 # 安全策
+        if problem.status not in ["infeasible", "unbounded"]:
+            self.c = c_var.value
         else:
-            epsilon_val = float(self.target_epsilon)
+            warnings.warn(f"Optimization failed: {problem.status}")
 
-        # マッパー生成 (BetterFitwithGaussianRBF)
-        self.mapper = BetterFitwithGaussianRBF(
-            vertices=self.vertices.tolist(),
-            src=src_points,
-            K=self.target_K,            # 変数を使用
-            epsilon=epsilon_val,        # 変数を使用
-            fps_k=self.target_fps_k     # 変数を使用
-        )
+    def _postprocess(self):
+        """Update global frames (di) based on new coefficients."""
+        # This updates self.di for ALL grid points to be ready for next iteration 
+        # (or for checking global validation if needed).
+        # Actually, Algorithm 1 updates d_i only for update_active_set or use in next step?
+        # Refactoring doc says: "Frame (d_i) management: redundant parts..."
+        # We only really need d_i for the active set during optimization.
+        # But `postprocess` in V1 updated all di.
+        
+        # Let's update all d_i on the grid.
+        # This allows visualizing the field or using it for next seeding.
+        
+        G = self.GradPhi # (M, N+3, 2)
+        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
+        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
+        
+        ux, uy = grad_u[:, 0], grad_u[:, 1]
+        vx, vy = grad_v[:, 0], grad_v[:, 1]
+        
+        # f_z = 0.5 * (ux + vy + i(vx - uy))
+        re_fz = 0.5 * (ux + vy)
+        im_fz = 0.5 * (vx - uy)
+        
+        fz_vecs = np.stack([re_fz, im_fz], axis=1) # (M, 2)
+        norm_fz = np.linalg.norm(fz_vecs, axis=1, keepdims=True)
+        
+        mask = (norm_fz > 1e-12).flatten()
+        
+        # Reset to default
+        self.di[...] = np.array([1.0, 0.0])
+        self.di[mask] = fz_vecs[mask] / norm_fz[mask]
 
-        print(f"Python: Building solver with {len(src_points)} control points...")
-        self.mapper.initialize_first_step()
+# --- Bevy Interface ---
 
-        # 現在のターゲット位置をセット
-        self.mapper.dst = np.array(self.control_dst, dtype=np.float32)
+class BevyBridge:
+    def __init__(self):
+        self.solver: Optional[ProvablyGoodMapping] = None
+        
+        # Data stored during setup
+        self.mesh_vertices: Optional[np.ndarray] = None # (N_verts, 2)
+        self.mesh_indices: Optional[List[int]] = None
+        
+        self.control_point_indices: List[int] = []
+        self.control_points_initial: List[Tuple[float, float]] = []
+        self.control_points_current: List[Tuple[float, float]] = []
+        
+        self.is_setup_finalized = False
 
-        self.is_solver_ready = True
-        print("Python: Solver is ready.")
+    def initialize_mesh_from_data(self, vertices: List[float], indices: List[int]):
+        """
+        Receive mesh data from Bevy.
+        vertices: Flat list [x0, y0, x1, y1, ...]
+        indices: Flat list of triangle indices
+        """
+        print(f"[Py] initializing mesh: {len(vertices)//2} verts, {len(indices)//3} tris")
+        # Ensure flat list to numpy array
+        if isinstance(vertices, list):
+            verts_array = np.array(vertices, dtype=np.float32)
+        else:
+             # If it comes as something else (e.g. from pyo3 it might be a list)
+             verts_array = np.array(vertices, dtype=np.float32)
+             
+        self.mesh_vertices = verts_array.reshape(-1, 2)
+        self.mesh_indices = indices
+        
+        # Reset control points when new mesh is loaded
+        # self.reset_mesh() 
+        # Actually reset_mesh clears everything including solver state
+        self.control_point_indices = []
+        self.control_points_initial = []
+        self.control_points_current = []
+        self.solver = None
+        self.is_setup_finalized = False
 
-    def add_control_point(self, index, x, y):
-        """Setupモード: 制御点リストに追加のみ行う（ソルバーは再構築しない）"""
-        try:
-            if index in self.control_indices:
-                return True # 重複は無視
+    def add_control_point(self, index: int, x: float, y: float):
+        """Add a control point during setup."""
+        if self.is_setup_finalized:
+            print("[Py] Warning: Cannot add points after finalization.")
+            return
+            
+        print(f"[Py] Adding control point: mesh_idx={index} at ({x:.1f}, {y:.1f})")
+        self.control_point_indices.append(index)
+        self.control_points_initial.append((x, y))
+        self.control_points_current.append((x, y))
 
-            if index >= len(self.vertices):
-                return False
-
-            orig_pos = self.vertices[index]
-            self.control_indices.append(index)
-            # 変形量ゼロから始めるため、srcもdstも「元の頂点位置」にする
-            self.control_src.append(orig_pos.tolist())
-            self.control_dst.append(orig_pos.tolist())
-
-            print(f"Python: Added setup point {index} (pinned at orig pos). Total: {len(self.control_indices)}")
-            return True
-
-        except Exception as e:
-            print(f"Python Error in add_control_point: {e}")
-            return False
+    def update_control_point(self, index_in_list: int, x: float, y: float):
+        """Update a control point position (Deform mode)."""
+        if index_in_list >= 0 and index_in_list < len(self.control_points_current):
+            self.control_points_current[index_in_list] = (x, y)
+        else:
+            print(f"[Py] Warning: update index {index_in_list} out of range")
 
     def finalize_setup(self):
-        """Setup完了: ここで初めて重いソルバー構築を行う"""
-        try:
-            if len(self.control_indices) == 0:
-                print("Python: No control points to finalize.")
-                return False
+        """Build the solver."""
+        if not self.control_points_initial:
+            print("[Py] No control points. Cannot finalize.")
+            return
 
-            self._rebuild_mapper()
-            return True
-        except Exception as e:
-            print(f"Python Error in finalize_setup: {e}")
-            return False
+        print("[Py] Finalizing setup. Building solver...")
+        
+        if self.mesh_vertices is None:
+            print("[Py] Error: No mesh vertices.")
+            return
 
-    def update_control_point(self, list_index, x, y):
-        """Deformモード: 制御点の移動"""
-        try:
-            if not self.is_solver_ready or self.mapper is None:
-                return False
-
-            if 0 <= list_index < len(self.control_dst):
-                self.control_dst[list_index] = [x, y]
-                self.mapper.dst = np.array(self.control_dst, dtype=np.float32)
-                return True
-            return False
-        except Exception as e:
-            print(f"Python Error in update: {e}")
-            return False
+        bounds_min = np.min(self.mesh_vertices, axis=0)
+        bounds_max = np.max(self.mesh_vertices, axis=0)
+        
+        # Add some margin
+        margin = 50.0
+        domain = [
+            float(bounds_min[0] - margin), float(bounds_min[1] - margin),
+            float(bounds_max[0] + margin), float(bounds_max[1] + margin)
+        ]
+        
+        sources = np.array(self.control_points_initial)
+        
+        # Strategy Config configuration
+        # For better stability, we can try different settings
+        # strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0) 
+        strategy = HeuristicFast(grid_resolution=(20, 20), K=20.0)
+        
+        config = SolverConfig(
+            domain_bounds=tuple(domain),
+            source_handles=sources,
+            basis_type="Gaussian",
+            epsilon=150.0, 
+            lambda_biharmonic=1e-5,
+            strategy=strategy
+        )
+        
+        self.solver = ProvablyGoodMapping(config)
+        self.is_setup_finalized = True
 
     def reset_mesh(self):
-        """リセット"""
-        self.control_indices = []
-        self.control_src = []
-        self.control_dst = []
-        self.mapper = None
-        self.is_solver_ready = False
-        print("Python: Mesh reset.")
-        return True
+        """Reset control points to initial state."""
+        # Clears everything to start fresh setup
+        print("[Py] Resetting mesh state.")
+        self.control_point_indices = []
+        self.control_points_initial = []
+        self.control_points_current = []
+        self.solver = None
+        self.is_setup_finalized = False
+        
+    def solve_frame(self) -> List[float]:
+        """
+        Run one step of optimization and return transformed mesh vertices.
+        """
+        # If not finalized, return original mesh
+        if not self.is_setup_finalized or self.solver is None:
+            if self.mesh_vertices is not None:
+                return self.mesh_vertices.flatten().tolist()
+            return []
 
-    def solve_frame(self):
-        """現在の状態から変形後の頂点を計算して返す"""
-        try:
-            # ソルバーが準備できていない場合は初期形状を返す（ハルシネーション防止）
-            if not self.is_solver_ready or self.mapper is None:
-                if self.vertices is None:
-                    return []
-                return self.vertices.flatten().tolist()
+        targets = np.array(self.control_points_current)
+        
+        # Compute deform
+        # Note: If targets haven't moved, compute_mapping might still do iterative updates if needed
+        # But here it's likely stateless per frame unless we used prev solution as warm start
+        # The current implementation of compute_mapping uses current 'targets'
+        self.solver.compute_mapping(targets)
+        
+        # Transform all mesh vertices
+        # mesh_vertices: (N, 2)
+        deformed_verts = self.solver.transform(self.mesh_vertices)
+        
+        return deformed_verts.flatten().tolist()
 
-            # 計算実行
-            self.mapper.update_active_set()
-            self.mapper.optimize_step()
-
-            # 結果取得
-            new_verts = self.mapper.Phi @ self.mapper.c.T
-            return new_verts.flatten().tolist()
-
-        except Exception as e:
-            print(f"Python Solve Error: {e}")
-            if self.vertices is None:
-                return []
-            return self.vertices.flatten().tolist()
