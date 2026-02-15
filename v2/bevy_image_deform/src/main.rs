@@ -107,7 +107,6 @@ fn setup(
         ModeText,
     ));
 
-    // 通信チャンネル
     let (tx_cmd, rx_cmd) = bounded::<PyCommand>(1);
     let (tx_res, rx_res) = bounded::<Vec<f32>>(5);
 
@@ -216,6 +215,8 @@ fn setup(
                     }
                     PyCommand::UpdateControlPoint { index, x, y } => {
                         // Deformモード: 更新して計算
+                        // デバッグ用: 受け取ったことを表示 (大量に出る可能性あり)
+                        println!("Rust->Py: Update Point {} -> ({:.1}, {:.1})", index, x, y);
                         if let Err(e) = bridge.call_method1("update_control_point", (index, x, y)) {
                             eprintln!("Py Error (Update): {}", e);
                         } else {
@@ -350,9 +351,20 @@ fn handle_input(
                  if let Some(idx) = control_points.dragging_index {
                     if idx < control_points.points.len() {
                         control_points.points[idx].1 = world_pos;
-                        let _ = channels.tx_command.try_send(PyCommand::UpdateControlPoint { 
+                        // 修正: try_send の結果を確認。Fullならスキップされるが、ログに出してみる
+                        match channels.tx_command.try_send(PyCommand::UpdateControlPoint { 
                             index: idx, x: py_x, y: py_y 
-                        });
+                        }) {
+                            Ok(_) => {
+                                // 成功時は大量に出るのでコメントアウトするか、間引いて表示
+                                // println!("Sent update: idx={}, ({:.1}, {:.1})", idx, py_x, py_y);
+                            },
+                            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                                // バッファが一杯の場合はスキップしてOK（描画フレームレート > 計算速度 の場合）
+                                eprintln!("Channel Full! Dropping update event for idx={}", idx);
+                            },
+                            Err(e) => eprintln!("Failed to send update: {}", e),
+                        }
                     }
                 }
             }
@@ -391,7 +403,15 @@ fn update_mesh_and_gizmos(
     mesh_data: Res<MeshData>,
 ) {
     // 1. メッシュ更新
-    if let Ok(flat) = channels.rx_result.try_recv() {
+    let mut latest_flat = None;
+    while let Ok(flat) = channels.rx_result.try_recv() {
+        latest_flat = Some(flat);
+    }
+
+    if let Some(flat) = latest_flat {
+        // デバッグ表示: 更新を受け取った場合
+        // println!("Got mesh update. Verts: {}", flat.len()/2);
+
         if flat.len() == mesh_data.vertex_count * 2 {
             let img_w = mesh_data.image_width;
             let img_h = mesh_data.image_height;

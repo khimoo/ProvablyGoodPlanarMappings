@@ -12,48 +12,124 @@ from scipy.spatial import Delaunay
 # --- Configuration & Strategy ---
 
 @dataclass
-class DistortionStrategyConfig:
-    """Base configuration for distortion control strategy."""
-    pass
+class DistortionStrategyConfig(ABC):
+    """Base configuration for distortion control strategy (Section 4 of Paper)."""
+    @abstractmethod
+    def compute_h(self, basis: 'BasisFunction') -> float:
+        """
+        Calculate required grid spacing h based on strategy. 
+        Returns -1.0 if h is determined by grid_resolution.
+        """
+        pass
+
+    @abstractmethod
+    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
+        """
+        Calculate solver constraints (K_upper, Sigma_lower) to enforce on grid.
+        Args:
+           basis: The basis function (provides omega(h)).
+           h: The actual grid spacing used.
+        Returns:
+           (K_upper, Sigma_lower)
+        """
+        pass
 
 @dataclass
 class FixedBoundCalcGrid(DistortionStrategyConfig):
     """
     Strategy 2 (Guarantee Mode):
-    Calculate required grid spacing 'h' from K and K_max to guarantee injectivity.
+    Given target K on grid and required global K_max, calculate required grid spacing h.
+    Satisfies: omega(h) <= min( K_max - K, 1/K - 1/K_max )
     """
     K: float = 2.0       # Target bound for distortion on grid
     K_max: float = 10.0  # Guaranteed upper bound for distortion everywhere
+
+    def compute_h(self, basis: 'BasisFunction') -> float:
+        return basis.compute_h_strict(self.K, self.K_max)
+
+    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
+        # For Strategy 2, K is fixed and given.
+        return (self.K, 1.0 / self.K)
 
 @dataclass
 class FixedGridCalcBound(DistortionStrategyConfig):
     """
     Strategy 1 (Fixed Grid Mode):
-    Use a fixed grid resolution. Theoretical K_max is calculated (informative).
+    Given grid (h) and target K on grid, calculate resulting K_max (informative).
     """
     grid_resolution: Tuple[int, int]
     K: float = 2.0
 
+    def compute_h(self, basis: 'BasisFunction') -> float:
+        return -1.0
+
+    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
+        # Calculate theoretical K_max for information
+        omega = basis.compute_omega(h)
+        
+        # Valid range for K_max given K and omega?
+        # K_max >= K + omega
+        # K_max >= 1 / (1/K - omega)
+        
+        K_max_est = self.K + omega
+        if (1.0/self.K) > omega:
+             K_max_est = max(K_max_est, 1.0 / (1.0/self.K - omega))
+        else:
+             K_max_est = float('inf')
+
+        print(f"[Strategy 1] With h={h:.4f}, K={self.K} on grid => Theoretical Global K_max <= {K_max_est:.4f}")
+        return (self.K, 1.0 / self.K)
+
 @dataclass
-class HeuristicFast(DistortionStrategyConfig):
+class CalculateKFromBound(DistortionStrategyConfig):
     """
-    Strategy 3 (Fast Mode):
-    Looser constraints, heuristic update, potentially skipping rigorous checks.
+    Strategy 3 (Calculation of K Mode):
+    Given grid (h) and target global K_max, calculate stricter K required on grid.
+    Satisfies: K <= min( K_max - omega(h), 1 / (1/K_max + omega(h)) )
     """
     grid_resolution: Tuple[int, int]
-    K: float = 3.0
+    K_max: float = 10.0
+
+    def compute_h(self, basis: 'BasisFunction') -> float:
+        return -1.0
+
+    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
+        omega = basis.compute_omega(h)
+        
+        # 1. Condition derived from K_max >= K + omega
+        # => K <= K_max - omega
+        cond1 = self.K_max - omega
+        
+        # 2. Condition derived from K_max >= 1 / (1/K - omega)  [Injectivity]
+        # => 1/K - omega >= 1/K_max
+        # => 1/K >= 1/K_max + omega
+        # => K <= 1 / (1/K_max + omega)
+        cond2 = 1.0 / ((1.0 / self.K_max) + omega)
+        
+        K_target = min(cond1, cond2)
+        
+        if K_target < 1.0:
+            warnings.warn(f"[Strategy 3] Impossible to guarantee K_max={self.K_max} with h={h:.4f} (omega={omega:.4f}). Grid too coarse.")
+            K_target = 1.001 # Minimal valid K
+            
+        print(f"[Strategy 3] To guarantee K_max <= {self.K_max}, enforcing K <= {K_target:.4f} on grid (h={h:.4f})")
+        return (K_target, 1.0 / K_target)
+
 
 @dataclass
 class SolverConfig:
     """Main configuration for the Solver."""
     domain_bounds: Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
     source_handles: np.ndarray  # (N, 2) Initial positions of control points
+ 
+    # Strategy pattern instance
+    # デフォルト値を設定して引数順序エラー (non-default argument follows default argument) を回避
+    # リファクタリング計画に従い、Strategy 2 (Guarantee Mode) をデフォルトとする。
+    strategy: 'DistortionStrategyConfig' = field(default_factory=lambda: FixedBoundCalcGrid())
 
     epsilon: float = 100.0     # Width parameter for Gaussian RBF
 
-    lambda_biharmonic: float = 1e-4  # Regularization weight
-
-    strategy: DistortionStrategyConfig = field(default_factory=FixedBoundCalcGrid)
+    lambda_biharmonic: float = 1e-4  # Regularization weight 
 
 # --- Basis Function Interface ---
 
@@ -86,8 +162,13 @@ class BasisFunction(ABC):
         pass
 
     @abstractmethod
-    def compute_h_from_distortion(self, K: float, K_max: float) -> float:
-        """Calculate grid spacing h to satisfy K_max >= K + omega(h)."""
+    def compute_omega(self, h: float) -> float:
+        """Calculate modulus of continuity omega(h)."""
+        pass
+
+    @abstractmethod
+    def compute_h_strict(self, K: float, K_max: float) -> float:
+        """Calculate grid spacing h to guarantee bounds strictly."""
         pass
 
     @abstractmethod
@@ -179,25 +260,39 @@ class GaussianRBF(BasisFunction):
         # GradPhi: (M, N+3, 2)
         return np.concatenate([grad_rbf, grad_affine], axis=1)
 
-    def compute_h_from_distortion(self, K: float, K_max: float) -> float:
-        # Paper (Table 1 & Sec 4): Modulus of continuity omega(t) approx t * (Lip(Phi')?)
-        # Detailed logic: K_max >= K + omega(h).
-        # For Gaussian: omega(t) ~= t / s^2 (Linear approximation valid for small t)
-        # s = epsilon / sqrt(2)
-        # K_max = K + h / s^2  ==>  h = (K_max - K) * s^2
+    def compute_omega(self, h: float) -> float:
+        """
+        Paper Table 1: omega(t) approaches t/s^2 for Gaussian kernel.
+        """
+        # omega(h) = h / s^2
+        return h / (self.s ** 2)
 
+    def compute_h_strict(self, K: float, K_max: float) -> float:
+        """
+        Calculate grid spacing h to guarantee bounds strictly.
+        Condition: omega(h) <= min( K_max - K, 1/K - 1/K_max )
+        """
         if K_max <= K:
             warnings.warn("K_max <= K in configuration. Forcing minimal h.")
-            return 1e-3 * self.epsilon
+            return 0.1 * self.s
 
-        s2 = self.s ** 2
-        # Use a safety factor or derived Lipschitz constant.
-        # Here we use the simplified relation derived in the context of the paper's examples.
-        h = (K_max - K) * s2
+        # 1. Upper Bound condition: omega(h) <= K_max - K
+        cond1 = K_max - K
 
-        if h <= 0:
-            return 1e-3 * self.epsilon
-        return h
+        # 2. Lower Bound (Injectivity) condition: omega(h) <= 1/K - 1/K_max
+        cond2 = (1.0 / K) - (1.0 / K_max)
+        
+        # Stricter constraint wins
+        max_omega = min(cond1, cond2)
+        
+        if max_omega <= 0:
+             return 0.1 * self.s
+
+        # max_omega = h / s^2  =>  h = max_omega * s^2
+        h = max_omega * (self.s ** 2)
+
+        # Safety factor just in case
+        return h * 0.95
 
     def get_identity_coefficients(self, src_handles: np.ndarray) -> np.ndarray:
         N = src_handles.shape[0]
@@ -225,21 +320,13 @@ class ProvablyGoodPlanarMapping(ABC):
         self.collocation_grid: Optional[np.ndarray] = None # Z
         self.Phi: Optional[np.ndarray] = None
         self.GradPhi: Optional[np.ndarray] = None
+        self.h_grid: float = 0.0                     # Actual grid spacing h
 
         self.c: Optional[np.ndarray] = None          # Coefficients (2, N+3)
         self.di: Optional[np.ndarray] = None         # Frame directions for checking (M, 2)
         self.activated_indices: List[int] = []       # Active set indices
 
         self.H_reg: Optional[np.ndarray] = None      # Regularization matrix (Biharmonic)
-
-        # Thresholds derived from Strategy
-        if hasattr(self.config.strategy, 'K'):
-            self.K_target = self.config.strategy.K
-        else:
-            self.K_target = 2.0
-
-        self.K_high = 0.5 + 0.9 * self.K_target
-        self.K_low = 0.5 + 0.5 * self.K_target
 
         # Initialize
         self._initialize_solver()
@@ -254,20 +341,26 @@ class ProvablyGoodPlanarMapping(ABC):
         # 2. Setup Grid based on Strategy
         self._setup_grid()
 
-        # 3. Precompute Basis Matrices (Phi, GradPhi) on Grid
+        # 3. Resolve Constraints (Strategy 3 needs h_grid which is now set)
+        self.K_upper, self.Sigma_lower = self.config.strategy.resolve_constraints(
+            self.basis, self.h_grid
+        )
+        print(f"[Solver] Constraints set: K <= {self.K_upper:.4f}, Sigma >= {self.Sigma_lower:.4f}")
+
+        # 4. Precompute Basis Matrices (Phi, GradPhi) on Grid
         self._precompute_basis_on_grid()
 
-        # 4. Initialize Coefficients (Identity)
+        # 5. Initialize Coefficients (Identity)
         self.c = self.basis.get_identity_coefficients(self.config.source_handles)
 
-        # 5. Initialize Frames (di)
+        # 6. Initialize Frames (di)
         # Default direction (1,0) for all grid points
         M = self.collocation_grid.shape[0]
         self.di = np.tile(np.array([1.0, 0.0]), (M, 1))
 
         self.activated_indices = []
 
-        print(f"[Solver] Initialized. Grid size: {M} points.")
+        print(f"[Solver] Initialized. Grid size: {M} points. h={self.h_grid:.4f}")
 
     @abstractmethod
     def _setup_basis(self):
@@ -282,9 +375,10 @@ class ProvablyGoodPlanarMapping(ABC):
         height = max_y - min_y
 
         nx, ny = 20, 20 # Default fallback
+        h: float = -1.0
 
         if isinstance(strategy, FixedBoundCalcGrid):
-            h = self.basis.compute_h_from_distortion(strategy.K, strategy.K_max)
+            h = strategy.compute_h(self.basis)
             print(f"[Solver] Strategy: FixedBoundCalcGrid. Calculated h={h:.4f} for K={strategy.K}, K_max={strategy.K_max}")
 
             # Simple safeguard against infinite grid
@@ -292,17 +386,27 @@ class ProvablyGoodPlanarMapping(ABC):
 
             nx = int(np.ceil(width / h)) + 1
             ny = int(np.ceil(height / h)) + 1
-
-            # Clamp to reasonable size to prevent OOM during interactive editing if h is tiny
+            
+            # Recalculate actual h to match domain
+            # Or assume h is strict upper bound. 
+            # We use the computed h for grid generation which implies actual spacing.
+            
+            # Clamp to reasonable size to prevent OOM
             if nx * ny > 250000: # 500x500
                 warnings.warn(f"Calculated grid size {nx}x{ny} is too large. Clamping resolution.")
                 ratio = np.sqrt(250000 / (nx*ny))
                 nx = int(nx * ratio)
                 ny = int(ny * ratio)
+                # If clamped, effective h increases
+                h = max(width/nx, height/ny)
 
-        elif isinstance(strategy, FixedGridCalcBound) or isinstance(strategy, HeuristicFast):
+        elif isinstance(strategy, (FixedGridCalcBound, CalculateKFromBound)):
             nx, ny = strategy.grid_resolution
             print(f"[Solver] Strategy: Fixed Resolution {nx}x{ny}")
+            # Calculate h from resolution
+            h_x = width / (nx - 1) if nx > 1 else width
+            h_y = height / (ny - 1) if ny > 1 else height
+            h = max(h_x, h_y)
 
         x = np.linspace(min_x, max_x, nx)
         y = np.linspace(min_y, max_y, ny)
@@ -311,6 +415,7 @@ class ProvablyGoodPlanarMapping(ABC):
         # Z: (M, 2)
         self.collocation_grid = np.column_stack([xv.ravel(), yv.ravel()])
         self.grid_shape = (nx, ny)
+        self.h_grid = h
 
     def _precompute_basis_on_grid(self):
         """Precomputes Phi, GradPhi and Regularization Matrix H_reg."""
@@ -467,28 +572,70 @@ class ProvablyGoodPlanarMapping(ABC):
         return K_vals, {"abs_fz": abs_fz, "abs_fzb": abs_fzb, "mu": mu}
 
     def _update_active_set(self):
-        K_vals, _ = self._compute_distortion_on_grid()
+        """
+        Update Active Set based on violations of the 3 guarantees.
+        """
+        # We need to check violations of:
+        # 1. Sigma_1 <= K (Upper Bound)
+        # 2. Sigma_2 >= 1/K (Lower Bound / Injectivity)
+        # 3. Orientation (Implicit)
+        
+        # We check them numerically on the grid.
+        
+        # Get gradient components
+        G = self.GradPhi
+        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
+        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
 
-        # Find points violating K_high
-        violators = np.where(K_vals > self.K_high)[0]
+        ux, uy = grad_u[:, 0], grad_u[:, 1]
+        vx, vy = grad_v[:, 0], grad_v[:, 1]
 
-        # Add to set
-        current_set = set(self.activated_indices)
-        for v in violators:
-            current_set.add(int(v))
-
-        # Optional: Remove points satisfying K_low (Hysteresis)
-        # To be safe, we might just keep them or remove carefully.
-        # Filter:
-        kept_indices = []
-        for idx in current_set:
-            if K_vals[idx] >= self.K_low:
-                kept_indices.append(idx)
-
-        self.activated_indices = sorted(kept_indices)
-
-        # If strategy is Heuristic, maybe limit the size?
-        # For now, stick to logic.
+        # fz, fzb
+        re_fz  = 0.5 * (ux + vy)
+        im_fz  = 0.5 * (vx - uy)
+        re_fzb = 0.5 * (ux - vy)
+        im_fzb = 0.5 * (vx + uy)
+        
+        abs_fz = np.sqrt(re_fz**2 + im_fz**2)
+        abs_fzb = np.sqrt(re_fzb**2 + im_fzb**2)
+        
+        # Current directions di (from previous iteration/current state)
+        d_re = self.di[:, 0]
+        d_im = self.di[:, 1]
+        
+        # Check Condition 1: Sigma_1 <= K
+        # Sigma_1 = |fz| + |fzb|
+        sigma_1 = abs_fz + abs_fzb
+        violation_1 = sigma_1 > self.K_upper + 1e-4 # Tolerance
+        
+        # Check Condition 2: Sigma_2 >= 1/K
+        # Linearized: Re(<fz, d>) - |fzb| >= 1/K
+        # <fz, d> = re_fz*d_re + im_fz*d_im
+        dot_fz_d = re_fz * d_re + im_fz * d_im
+        lower_val = dot_fz_d - abs_fzb
+        violation_2 = lower_val < self.Sigma_lower - 1e-4
+        
+        # Combined violations
+        violators = np.where(violation_1 | violation_2)[0]
+        
+        if len(violators) > 0:
+            current_set = set(self.activated_indices)
+            count_before = len(current_set)
+            
+            for v in violators:
+                current_set.add(int(v))
+                
+            self.activated_indices = sorted(list(current_set))
+            
+            if len(self.activated_indices) > count_before:
+                # Update di for new active set elements?
+                # Actually, strictly, di is updated after solve.
+                # But for the check, we used current di.
+                pass
+        
+        # Note: We do not remove points in this strict version (monotonically increasing active set)
+        # unless we implement a specific drop strategy.
+        # For performance, could reset active set if handles change significantly.
 
     def _compute_di_local(self, indices: List[int]) -> np.ndarray:
         """Compute frames d_i for specified indices using current coefficients."""
@@ -560,38 +707,15 @@ class ProvablyGoodPlanarMapping(ABC):
             # This linearizes the constraint around current state.
             di_local = self._compute_di_local(idx_list) # (K, 2)
 
-            # Constraints construction
-            # For each point in active set:
-            # |f_z| + |f_zb| <= K_max (or K_high to be safe)
-            # Re(f_z * di_bar) - |f_zb| >= 1/K (approx of lower bound |f_z| - |f_zb| >= 1/K?)
-            # Wait, let's check the paper or v1 code.
-
-            # V1 code:
-            # fz = 0.5 * (grad_u.x + grad_v.y, grad_v.x - grad_u.y)
-            # fzb = 0.5 * (grad_u.x - grad_v.y, grad_v.x + grad_u.y)
-            # 1. |fz| + |fzb| <= K_high
-            # 2. <fz, di> - |fzb| >= 1/K  (Linearized lower bound for |fz|-|fzb|)
-
-            # Efficient implementation in CVXPY?
-            # CVXPY overhead is high for loops. We need vectorization if possible.
-            # But G_sub is specific per point.
-
-            # It's hard to fully vectorize with G_sub structure in CVXPY without loops
-            # unless we flatten carefully.
-            # Loop for now. If slow, optimization needed.
+            # Constraints construction based on Poranne & Lipman 2014
+            # We enforce 3 guarantees on the collocation points:
+            # 1. Upper Bound on Distortion (Max Singular Value): Sigma_1 <= K
+            # 2. Lower Bound on Distortion (Min Singular Value): Sigma_2 >= 1/K (Injectivity)
+            # 3. Orientation Preservation det(J) > 0 (Implicitly satisfied by Sigma_2 > 0)
 
             for k, idx in enumerate(idx_list):
                 G_k = G_sub[k] # (N+3, 2)
                 d_k = di_local[k] # (2,)
-
-                # grad_u_vec = c_var[0] @ G_k
-                # grad_v_vec = c_var[1] @ G_k
-
-                # But c_var is (2, N).
-                # grad_u at point k is scalar? No.
-                # G_k is matrix (N_basis, 2).
-                # c_var[0] is (N_basis,).
-                # product is (2,) vector? -> [du/dx, du/dy]
 
                 grad_u_k = c_var[0] @ G_k # (2,)
                 grad_v_k = c_var[1] @ G_k # (2,)
@@ -606,13 +730,20 @@ class ProvablyGoodPlanarMapping(ABC):
                 fz_vec = cp.hstack([fz_re, fz_im])
                 fzb_vec = cp.hstack([fzb_re, fzb_im])
 
-                # Constraint 1: Upper Bound
-                constraints.append(cp.norm(fz_vec, 2) + cp.norm(fzb_vec, 2) <= self.K_high)
+                # Guarantee 1: Upper Bound (Sigma_1 <= K)
+                # |fz| + |fzb| <= K
+                constraints.append(cp.norm(fz_vec, 2) + cp.norm(fzb_vec, 2) <= self.K_upper)
 
-                # Constraint 2: Lower Bound (Injectivity)
-                # <fz, d> = fz_re * d_re + fz_im * d_im
+                # Guarantee 2: Injectivity / Lower Bound (Sigma_2 >= 1/K)
+                # Linearized constraint: Re(<fz, d>) - |fzb| >= 1/K
+                # This ensures |fz| - |fzb| >= 1/K, hence Sigma_2 >= 1/K.
+                # d_k is the normalized direction of fz from previous iteration.
                 dot_prod = fz_re * float(d_k[0]) + fz_im * float(d_k[1])
-                constraints.append(dot_prod - cp.norm(fzb_vec, 2) >= 1.0 / self.K_target)
+                constraints.append(dot_prod - cp.norm(fzb_vec, 2) >= self.Sigma_lower)
+
+                # Guarantee 3: Orientation (Jacobian Determinant > 0)
+                # det(J) = |fz|^2 - |fzb|^2 = (|fz|-|fzb|)(|fz|+|fzb|) = Sigma_2 * Sigma_1
+                # Since we enforce Sigma_2 >= 1/K > 0 and Sigma_1 <= K, det(J) > 0 is guaranteed.
 
         # 3. Regularization Term
         reg_term = 0
@@ -777,7 +908,8 @@ class BevyBridge:
         # Strategy Config configuration
         # For better stability, we can try different settings
         # strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0)
-        strategy = HeuristicFast(grid_resolution=(20, 20), K=20.0)
+        # strategy = CalculateKFromBound(grid_resolution=(20, 20), K_max=20.0)
+        strategy = FixedGridCalcBound(grid_resolution=(25, 25), K=2.5)
 
         config = SolverConfig(
             domain_bounds=tuple(domain),
