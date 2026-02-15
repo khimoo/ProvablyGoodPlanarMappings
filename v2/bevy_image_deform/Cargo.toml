@@ -1,0 +1,19 @@
+[package]
+name = "bevy_image_deform"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.15"
+bevy_egui = "0.32"
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
+image = "0.25"
+crossbeam-channel = "0.5"
+delaunator = "1.0"
+
+# 最適化設定
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
