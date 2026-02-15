@@ -3,10 +3,8 @@
 
 import cvxpy as cp
 import numpy as np
-import matplotlib.pyplot as plt
 from abc import ABCMeta, abstractmethod
 import warnings
-import multiprocessing as mp
 from scipy.spatial import Delaunay
 
 class RBF2DandAffine:
@@ -269,7 +267,7 @@ class ProvablyGoodPlanarMapping(metaclass=ABCMeta):
 
 
 class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping, RBF2DandAffine):
-    def __init__(self, vertices, src, K, epsilon=80.0, fps_k=20, lambda_biharmonic=1e-3):
+    def __init__(self, vertices, src, K, epsilon=1, fps_k=50, lambda_biharmonic=1e-4):
         RBF2DandAffine.__init__(self, epsilon=epsilon)
         self.set_centers(src)
 
@@ -369,11 +367,11 @@ class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping, RBF2DandAffine):
         H = 0.5 * (H + H.T)
 
 
-        # 制御点が動いていない初期状態で変形が発生しなくなります。
-        n_rbf = self.src.shape[0]
-        # H は (n_rbf+3, n_rbf+3)。最後の3行・3列（定数, x, y）を0クリア
-        H[n_rbf:, :] = 0.0
-        H[:, n_rbf:] = 0.0
+        # # 制御点が動いていない初期状態で変形が発生しなくなります。
+        # n_rbf = self.src.shape[0]
+        # # H は (n_rbf+3, n_rbf+3)。最後の3行・3列（定数, x, y）を0クリア
+        # H[n_rbf:, :] = 0.0
+        # H[:, n_rbf:] = 0.0
 
         self.H_reg = H
         print(f"[INFO] precompute: built Phi({self.Phi.shape}), GradPhi({self.GradPhi.shape}), H_reg({self.H_reg.shape})")
@@ -480,9 +478,20 @@ class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping, RBF2DandAffine):
             H = self.H_reg
             # convert to numpy array if it's not
             H_np = np.asarray(H, dtype=float)
-            # Regularization term for u and v components
-            reg_term = self.lambda_biharmonic * (cp.quad_form(c_var[0, :], H_np) +
-                                                 cp.quad_form(c_var[1, :], H_np))
+
+            # アフィン成分（最後の3要素: 定数, x, y）に対する正則化を除外する
+            n_rbf = self.src.shape[0]
+
+            # RBF係数部分に対応する H の部分行列 (n_rbf x n_rbf) を抽出
+            H_rbf = H_np[:n_rbf, :n_rbf]
+
+            # 最適化変数から RBF 係数部分のみスライス
+            c_rbf_u = c_var[0, :n_rbf]
+            c_rbf_v = c_var[1, :n_rbf]
+
+            # Regularization term for u and v components (only RBF part)
+            reg_term = self.lambda_biharmonic * (cp.quad_form(c_rbf_u, H_rbf) +
+                                                 cp.quad_form(c_rbf_v, H_rbf))
             objective_expr = objective_expr + reg_term
 
         objective = cp.Minimize(objective_expr)
@@ -528,7 +537,7 @@ class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping, RBF2DandAffine):
                 self.di[idx] = np.array([1.0, 0.0])
 
 class BevyBridge:
-    def __init__(self):
+    def __init__(self, epsilon=50, K=10.0, fps_k=5):
         self.width = 512.0
         self.height = 512.0
         self.rows = 15
@@ -543,6 +552,10 @@ class BevyBridge:
         self.control_src = []     # [[x,y], ...] (初期位置)
         self.control_dst = []     # [[x,y], ...] (現在のターゲット位置)
 
+        self.target_K = K
+        self.target_fps_k = fps_k
+        self.target_epsilon = epsilon
+
     def initialize_mesh_from_data(self, vertices, indices):
         """Rustから頂点データ(flat list)とインデックスを受け取って初期化"""
         flat_verts = np.array(vertices, dtype=np.float32)
@@ -550,7 +563,24 @@ class BevyBridge:
             self.vertices = flat_verts.reshape(-1, 2)
         else:
             self.vertices = flat_verts
-            
+
+        self.indices = np.array(indices, dtype=np.int32)
+        print(f"Python: Mesh initialized from data with {len(self.vertices)} vertices.")
+        return True
+
+    def initialize_mesh_from_data(self, vertices, indices):
+        """Rustから頂点データ(flat list)とインデックスを受け取って初期化"""
+        import numpy as np # 関数内importまたはグローバルimport確認
+        # verticesはPyListとして受け取るが、numpy配列に変換
+        flat_verts = np.array(vertices, dtype=np.float32)
+
+        # フラットなリストを受け取った場合はreshape
+        if flat_verts.ndim == 1:
+             self.vertices = flat_verts.reshape(-1, 2)
+        # List[List] なら (N, 2) になるはず
+        else:
+             self.vertices = flat_verts
+
         self.indices = np.array(indices, dtype=np.int32)
         print(f"Python: Mesh initialized from data with {len(self.vertices)} vertices.")
         return True
@@ -583,17 +613,27 @@ class BevyBridge:
 
         src_points = np.array(self.control_src, dtype=np.float32)
 
+        # epsilonの自動計算ロジック（例: バウンディングボックスの対角線の15%）
+        if self.target_epsilon is None:
+            min_xy = np.min(self.vertices, axis=0)
+            max_xy = np.max(self.vertices, axis=0)
+            diag = np.linalg.norm(max_xy - min_xy)
+            # 制御点が極端に近い場合などのガードも入れるとなお良し
+            epsilon_val = diag * 0.15
+            if epsilon_val < 1e-6: epsilon_val = 1.0 # 安全策
+        else:
+            epsilon_val = float(self.target_epsilon)
+
         # マッパー生成 (BetterFitwithGaussianRBF)
         self.mapper = BetterFitwithGaussianRBF(
             vertices=self.vertices.tolist(),
             src=src_points,
-            K=2.0,
-            epsilon=70.0,
-            fps_k=5
+            K=self.target_K,            # 変数を使用
+            epsilon=epsilon_val,        # 変数を使用
+            fps_k=self.target_fps_k     # 変数を使用
         )
 
         print(f"Python: Building solver with {len(src_points)} control points...")
-        # 初期化計算 (ここが重い)
         self.mapper.initialize_first_step()
 
         # 現在のターゲット位置をセット
