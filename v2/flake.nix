@@ -23,6 +23,7 @@
           matplotlib
           cvxpy
           ecos # cvxpyで指定されていたソルバー
+          pillow
           # その他必要ならここに追加 (例: jupyter, ipythonなど)
         ]);
 

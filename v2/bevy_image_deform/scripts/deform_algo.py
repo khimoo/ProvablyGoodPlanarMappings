@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Union
 import warnings
 from scipy.spatial import Delaunay
+from PIL import Image
+import os
 
 # --- Configuration & Strategy ---
 
@@ -497,21 +499,39 @@ class ProvablyGoodPlanarMapping(ABC):
 
     def compute_mapping(self, target_handles: np.ndarray):
         """
-        Main Loop:
-        1. Check distortion on grid (update active set)
-        2. Solve optimization problem
-        3. Post-process (update constraints frames)
+        Main Loop (Algorithm 1 from Paper):
+        Iteratively add constraints and re-solve until no violations occur.
         """
-        # Update target positions in config? Or just use local variable?
-        # Ideally, we optimize to match target_handles.
+        max_iterations = 10
+        iteration = 0
+        
+        while iteration < max_iterations:
+            # 1. Check for violations and update active set
+            # Returns number of NEW violations found
+            new_violations = self._update_active_set()
+            
+            # If no new violations and we have solved at least once (or active set is empty initially),
+            # we check if we are done.
+            # Actually, the paper says: "We repeat this process until no more points are added to the active set."
+            # But we must ensure the current solution satisfies the constraints.
+            
+            # If it's the first iteration, we simply solve.
+            # If subsequent iteration found NO new violations, we are done.
+            if iteration > 0 and new_violations == 0:
+                # print(f"[Solver] Converged at iteration {iteration}")
+                break
 
-        # 1. Update Active Set
-        self._update_active_set()
+            # 2. Optimize with current active set
+            # Note: The frames d_i for the active set are fixed at the moment they were added.
+            # _update_active_set handles setting d_i for new points.
+            self._optimize_step(target_handles)
+            
+            iteration += 1
+        
+        if iteration == max_iterations:
+             warnings.warn(f"[Solver] Max iterations ({max_iterations}) reached. Solution might not be fully valid.")
 
-        # 2. Optimize
-        self._optimize_step(target_handles)
-
-        # 3. Post-process
+        # 3. Post-process (Optional, for next frame warm start visualisation)
         self._postprocess()
 
     def transform(self, points: np.ndarray) -> np.ndarray:
@@ -571,9 +591,10 @@ class ProvablyGoodPlanarMapping(ABC):
 
         return K_vals, {"abs_fz": abs_fz, "abs_fzb": abs_fzb, "mu": mu}
 
-    def _update_active_set(self):
+    def _update_active_set(self) -> int:
         """
         Update Active Set based on violations of the 3 guarantees.
+        Returns: number of new violations added.
         """
         # We need to check violations of:
         # 1. Sigma_1 <= K (Upper Bound)
@@ -582,7 +603,7 @@ class ProvablyGoodPlanarMapping(ABC):
         
         # We check them numerically on the grid.
         
-        # Get gradient components
+        # Get gradient components for ALL grid points based on current c
         G = self.GradPhi
         grad_u = np.einsum('j,mjk->mk', self.c[0], G)
         grad_v = np.einsum('j,mjk->mk', self.c[1], G)
@@ -600,8 +621,14 @@ class ProvablyGoodPlanarMapping(ABC):
         abs_fzb = np.sqrt(re_fzb**2 + im_fzb**2)
         
         # Current directions di (from previous iteration/current state)
-        d_re = self.di[:, 0]
-        d_im = self.di[:, 1]
+        # Important: For checking violation 2, what d should we use?
+        # The paper says: "If a point x_i violates the constraints... we add it to the active set...
+        # and set d_i = J_S f(x_i) / |J_S f(x_i)|".
+        # So we check if there exists a direction d such that constraints are satisfied?
+        # No, we check if the current map satisfies the bounds.
+        # Condition 2 is simply sigma_min >= 1/K => |fz| - |fzb| >= 1/K.
+        # The linearization with d_i is only for the SOLVER constraint.
+        # The CHECK is on the singular values directly.
         
         # Check Condition 1: Sigma_1 <= K
         # Sigma_1 = |fz| + |fzb|
@@ -609,68 +636,60 @@ class ProvablyGoodPlanarMapping(ABC):
         violation_1 = sigma_1 > self.K_upper + 1e-4 # Tolerance
         
         # Check Condition 2: Sigma_2 >= 1/K
-        # Linearized: Re(<fz, d>) - |fzb| >= 1/K
-        # <fz, d> = re_fz*d_re + im_fz*d_im
-        dot_fz_d = re_fz * d_re + im_fz * d_im
-        lower_val = dot_fz_d - abs_fzb
-        violation_2 = lower_val < self.Sigma_lower - 1e-4
+        sigma_2 = abs_fz - abs_fzb
+        violation_2 = sigma_2 < self.Sigma_lower - 1e-4
         
         # Combined violations
         violators = np.where(violation_1 | violation_2)[0]
         
+        new_added_count = 0
         if len(violators) > 0:
             current_set = set(self.activated_indices)
-            count_before = len(current_set)
             
             for v in violators:
-                current_set.add(int(v))
-                
+                idx = int(v)
+                if idx not in current_set:
+                    current_set.add(idx)
+                    new_added_count += 1
+                    
+                    # --- CRITICAL: Set frame d_i for NEW active point ---
+                    # According to paper: "When a point x_i is added to the active set... we set d_i = J_S f(x_i) / ..."
+                    # We compute d_i based on the CURRENT map state (before optimization).
+                    # This fixes the linearization frame.
+                    
+                    # Extract fz for this point
+                    fz_re_val = re_fz[idx]
+                    fz_im_val = im_fz[idx]
+                    norm = np.sqrt(fz_re_val**2 + fz_im_val**2)
+                    
+                    if norm > 1e-12:
+                        self.di[idx] = np.array([fz_re_val/norm, fz_im_val/norm])
+                    else:
+                        # Fallback for singular points
+                        self.di[idx] = np.array([1.0, 0.0])
+
             self.activated_indices = sorted(list(current_set))
             
-            if len(self.activated_indices) > count_before:
-                # Update di for new active set elements?
-                # Actually, strictly, di is updated after solve.
-                # But for the check, we used current di.
-                pass
+        return new_added_count
         
         # Note: We do not remove points in this strict version (monotonically increasing active set)
         # unless we implement a specific drop strategy.
         # For performance, could reset active set if handles change significantly.
 
     def _compute_di_local(self, indices: List[int]) -> np.ndarray:
-        """Compute frames d_i for specified indices using current coefficients."""
+        """
+        Retrieve frames d_i for specified indices.
+        Now simply returns the stored self.di which are updated only when added to active set.
+        """
         if not indices:
             return np.zeros((0, 2))
 
         idx_arr = np.array(indices)
-        G = self.GradPhi[idx_arr] # (K, N+3, 2)
+        return self.di[idx_arr]
 
-        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
-        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
-
-        ux, uy = grad_u[:, 0], grad_u[:, 1]
-        vx, vy = grad_v[:, 0], grad_v[:, 1]
-
-        # f_z vector (real, imag)
-        re_fz  = 0.5 * (ux + vy)
-        im_fz  = 0.5 * (vx - uy)
-
-        fz_vecs = np.stack([re_fz, im_fz], axis=1) # (K, 2)
-        norm_fz = np.linalg.norm(fz_vecs, axis=1, keepdims=True)
-
-        # Normalized direction
-        # Handle zero norm
-        mask = (norm_fz > 1e-12).flatten()
-
-        di_subset = np.zeros_like(fz_vecs)
-        # Copy existing di for near-zero gradients? Or default (1,0)?
-        # For this temporary calculation, we use (1,0) fallback if singular
-        di_subset[...] = np.array([1.0, 0.0])
-
-        if np.any(mask):
-            di_subset[mask] = fz_vecs[mask] / norm_fz[mask]
-
-        return di_subset
+    def _optimize_step_DISABLED(self, target_handles: np.ndarray):
+        # Renamed old method to avoid confusion, though logic is mostly same
+        pass
 
     def _optimize_step(self, target_handles: np.ndarray):
         # CVXPY Setup
@@ -704,9 +723,10 @@ class ProvablyGoodPlanarMapping(ABC):
             G_sub = self.GradPhi[idx_list] # (K, N+3, 2)
 
             # Recompute local di for the active set based on *current* (previous step) coefficients
+            # Recompute local di for the active set based on *current* (previous step) coefficients
             # This linearizes the constraint around current state.
+            # FIX: Use FIXED di stored in self.di, not recomputed from current c every time.
             di_local = self._compute_di_local(idx_list) # (K, 2)
-
             # Constraints construction based on Poranne & Lipman 2014
             # We enforce 3 guarantees on the collocation points:
             # 1. Upper Bound on Distortion (Max Singular Value): Sigma_1 <= K
@@ -778,16 +798,12 @@ class ProvablyGoodPlanarMapping(ABC):
 
     def _postprocess(self):
         """Update global frames (di) based on new coefficients."""
-        # This updates self.di for ALL grid points to be ready for next iteration
-        # (or for checking global validation if needed).
-        # Actually, Algorithm 1 updates d_i only for update_active_set or use in next step?
-        # Refactoring doc says: "Frame (d_i) management: redundant parts..."
-        # We only really need d_i for the active set during optimization.
-        # But `postprocess` in V1 updated all di.
-
-        # Let's update all d_i on the grid.
-        # This allows visualizing the field or using it for next seeding.
-
+        # For visualization or next frame starting point.
+        # In the iterative algorithm, d_i for active constraints should remain fixed 
+        # until valid solution is found or constraint is deactivated.
+        # However, for the NEXT user input frame, we can reset d_i to current deformation?
+        # Yes, usually between time steps we update the linearization.
+        
         G = self.GradPhi # (M, N+3, 2)
         grad_u = np.einsum('j,mjk->mk', self.c[0], G)
         grad_v = np.einsum('j,mjk->mk', self.c[1], G)
@@ -830,12 +846,136 @@ class BevyBridge:
         # Data stored during setup
         self.mesh_vertices: Optional[np.ndarray] = None # (N_verts, 2)
         self.mesh_indices: Optional[List[int]] = None
+        
+        self.epsilon: float = 100.0  # Default epsilon, updated by load_image
+        self.image_width: int = 0
+        self.image_height: int = 0
 
         self.control_point_indices: List[int] = []
         self.control_points_initial: List[Tuple[float, float]] = []
         self.control_points_current: List[Tuple[float, float]] = []
 
         self.is_setup_finalized = False
+
+    def load_image_and_generate_mesh(self, image_path: str, epsilon: float) -> Tuple[List[float], List[int], List[float], int, int]:
+        """
+        Load image, calculate guaranteed h, generate mesh.
+        Returns: (flat_vertices, flat_indices, flat_uvs, width, height)
+        """
+        print(f"[Py] Loading image: {image_path} with epsilon={epsilon}")
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        self.epsilon = float(epsilon)
+        
+        # 1. Load Image
+        img = Image.open(image_path)
+        w, h_img = img.size
+        self.image_width = w
+        self.image_height = h_img
+        
+        # Access pixel data (RGBA)
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        pixels = img.load()
+
+        # 2. Calculate optimal grid spacing h
+        # Use Strategy 2 (Guarantee Mode) to find h
+        # We need a temporary basis to compute s from epsilon
+        temp_basis = GaussianRBF(epsilon=self.epsilon)
+        strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0)
+        
+        h_theoretical = strategy.compute_h(temp_basis)
+        print(f"[Py] Theoretical h={h_theoretical:.4f} for epsilon={self.epsilon}")
+        
+        # Use a sampling stride slightly smaller than h to be safe, 
+        # or exactly h if we trust the grid alignment.
+        # Ensure we don't have too many points (limit for performance).
+        # Also ensure stride is not too large (minimum density guarantee).
+        # Let's say at least ~30x30 grid points for the image?
+        min_density_stride = max(w, h_img) // 30
+        stride = max(int(h_theoretical), 5)
+        
+        if stride > min_density_stride:
+            print(f"[Py] Clamping stride from {stride} to {min_density_stride} to ensure density.")
+            stride = min_density_stride
+            
+        print(f"[Py] Using sampling stride: {stride} px")
+
+        # 3. Sample Points
+        points = []
+        uvs = []
+        
+        # Grid sampling
+        for y in range(0, h_img, stride):
+            for x in range(0, w, stride):
+                r, g, b, a = pixels[x, y]
+                if a > 10: # Threshold
+                    # Bevy World Coordinates: Center Origin, Y-Up
+                    # Image Coordinates: TopLeft Origin, Y-Down
+                    # We store in SOLVER COORDINATES (Internal).
+                    # Let's map 1:1 to Image Coordinates for simpler debugging first?
+                    # NO, the Plan says "Internal data unified to Solver coordinates".
+                    # And Solver coordinates usually match the domain.
+                    # Let's use Image Coordinates internally (0,0 is Top-Left) 
+                    # because RBF doesn't care about origin, and it's easier to map back to UV.
+                    # The Rust side expects Bevy World Coordinates for display?
+                    # Actually, the previous implementation did the conversion in Rust.
+                    # "Internal data stored in Solver mode" -> Let's keep Image Coordinates (0..W, 0..H)
+                    # and let Rust transform to World for Bevy display.
+                    
+                    points.append([float(x), float(y)])
+                    uvs.append([x / w, 1.0 - (y / h_img)]) # UV (0..1), V is 1 at Top if we want? No, usually V=1 is Top in Bevy?
+                    # Bevy: UV (0,0) is bottom-left? 
+                    # Standard: (0,0) Top-Left often in textures. 
+                    # Bevy standard: (0,0) Top-Left or Bottom-Left? 
+                    # In main.rs: uvs.push([x as f32 / width_f, 1.0 - (y as f32 / height_f)]);
+                    # This implies V=0 at Top (because y=0 -> V=1). Wait.
+                    # y=0(Top) -> 1.0 - 0 = 1.0. So V=1 is Top.
+                    # y=H(Bottom) -> 1.0 - 1 = 0.0. So V=0 is Bottom.
+                    # This matches OpenGL/Bevy usually (0,0) is Bottom-Left.
+
+        points_np = np.array(points, dtype=np.float64)
+        print(f"[Py] Sampled {len(points)} points.") 
+
+        if len(points) < 3:
+             print("[Py] Not enough points to triangulate.")
+             return ([], [], [], w, h_img)
+
+        # 4. Delaunay Triangulation
+        tri = Delaunay(points_np)
+        
+        # 5. Filter Triangles (Centroid check)
+        valid_indices = []
+        for simplex in tri.simplices: # simplex is (3,) indices
+            pts = points_np[simplex]
+            centroid = np.mean(pts, axis=0) # (2,)
+            cx, cy = int(centroid[0]), int(centroid[1])
+            
+            # Check bounds
+            if 0 <= cx < w and 0 <= cy < h_img:
+                # Check alpha
+                try:
+                    r, g, b, a = pixels[cx, cy]
+                    if a > 10:
+                        valid_indices.extend(simplex)
+                except IndexError:
+                    pass
+        
+        # Prepare Return Data
+        flat_verts = points_np.flatten().tolist()
+        flat_uvs = np.array(uvs).flatten().tolist()
+        
+        # Store locally
+        self.mesh_vertices = points_np
+        self.mesh_indices = valid_indices
+        self.control_point_indices = []
+        self.control_points_initial = []
+        self.control_points_current = []
+        self.solver = None
+        self.is_setup_finalized = False
+        
+        return (flat_verts, valid_indices, flat_uvs, w, h_img)
 
     def initialize_mesh_from_data(self, vertices: List[float], indices: List[int]):
         """
@@ -915,7 +1055,7 @@ class BevyBridge:
         config = SolverConfig(
             domain_bounds=tuple(domain),
             source_handles=sources,
-            epsilon=150.0,
+            epsilon=self.epsilon,
             lambda_biharmonic=1e-5,
             strategy=strategy
         )

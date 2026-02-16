@@ -7,9 +7,7 @@ edition = "2021"
 bevy = "0.15"
 bevy_egui = "0.32"
 pyo3 = { version = "0.23", features = ["auto-initialize"] }
-image = "0.25"
 crossbeam-channel = "0.5"
-delaunator = "1.0"
 tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 
 # 最適化設定

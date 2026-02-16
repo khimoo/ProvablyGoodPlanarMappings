@@ -10,8 +10,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule};
 use std::env;
 use std::time::Duration; // 追加
-use image::GenericImageView;
-use delaunator::{Point, triangulate};
 use tokio::sync::watch; // 追加
 
 // --- デフォルト定数（ウィンドウサイズ用） ---
@@ -28,17 +26,29 @@ enum AppMode {
 
 // --- 通信コマンド ---
 enum PyCommand {
-    InitializeMesh { vertices: Vec<f32>, indices: Vec<u32> },
+    LoadImage { path: String, epsilon: f32 },
     AddControlPoint { index: usize, x: f32, y: f32 },
     FinalizeSetup, // セットアップ完了、ソルバー構築指示
     Reset,
+}
+
+// --- 通信結果 ---
+enum PyResult {
+    MeshInit {
+        vertices: Vec<f32>,
+        indices: Vec<u32>,
+        uvs: Vec<f32>,
+        image_width: f32,
+        image_height: f32,
+    },
+    DeformUpdate(Vec<f32>),
 }
 
 // --- リソース ---
 #[derive(Resource)]
 struct PythonChannels {
     tx_command: tokio::sync::mpsc::Sender<PyCommand>,
-    rx_result: Receiver<Vec<f32>>,
+    rx_result: Receiver<PyResult>,
     tx_coords: watch::Sender<Option<(usize, f32, f32)>>,
 }
 
@@ -110,7 +120,7 @@ fn setup(
     // イベント用 (非同期MPSC)
     let (tx_cmd, rx_cmd) = tokio::sync::mpsc::channel::<PyCommand>(10);
     // 結果用 (同期Crossbeam - Bevyが受信)
-    let (tx_res, rx_res) = bounded::<Vec<f32>>(1); 
+    let (tx_res, rx_res) = bounded::<PyResult>(5); 
     // 座標同期用ウォッチチャンネル (初期値: None)
     let (tx_coords, rx_coords) = watch::channel::<Option<(usize, f32, f32)>>(None);
 
@@ -130,47 +140,144 @@ fn setup(
     });
 
     // メッシュ
-    // 画像読み込みとメッシュ生成
     let image_path = "assets/texture.png";
-    println!("Generating mesh from: {}", image_path);
-    let sample_stride = 15;
-    let (mesh, flat_verts, indices, initial_positions, img_w, img_h) = create_mesh_from_image_alpha(image_path, sample_stride);
+    let epsilon = 100.0;
+    println!("Requesting mesh gen for: {}", image_path);
 
-    // リソースに保存
-    mesh_data.vertex_count = flat_verts.len() / 2;
-    mesh_data.initial_positions = initial_positions;
-    mesh_data.image_width = img_w;
-    mesh_data.image_height = img_h;
-
-    // Pythonへ初期メッシュデータを送信
-    // TrySend for async channel from sync context
-    let _ = tx_cmd.try_send(PyCommand::InitializeMesh { 
-        vertices: flat_verts, 
-        indices: indices 
+    // Pythonへ初期化コマンドを送信
+    let _ = tx_cmd.try_send(PyCommand::LoadImage { 
+        path: image_path.to_string(), 
+        epsilon 
     });
+}
 
-    let mesh_handle = meshes.add(mesh);
-    // let texture_handle = asset_server.load("texture.png"); // メッシュにはテクスチャを貼らない
+fn update_mesh_and_gizmos(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
+    mut query: Query<(Entity, &mut Mesh2d), With<DeformableMesh>>,
+    channels: Res<PythonChannels>,
+    control_points: Res<ControlPoints>,
+    mut gizmos: Gizmos,
+    state: Res<State<AppMode>>,
+    mut mesh_data: ResMut<MeshData>,
+) {
+    // 1. メッシュ更新
+    while let Ok(res) = channels.rx_result.try_recv() {
+        match res {
+            PyResult::MeshInit { vertices, indices, uvs, image_width, image_height } => {
+                println!("Got MeshInit: {} verts, {}x{}", vertices.len()/2, image_width, image_height);
+                
+                // Bevy's coordinate system
+                // Vertices from Python are in Image Coords (0..W, 0..H), Y-Down.
+                // We need to convert to World Coords for Bevy display (Center Origin, Y-Up).
+                let world_positions: Vec<Vec2> = vertices
+                    .chunks(2)
+                    .map(|v| Vec2::new(
+                        v[0] - image_width / 2.0, 
+                        image_height / 2.0 - v[1]
+                    ))
+                    .collect();
 
-    // 1. 背景画像の表示 (Sprite)
-    commands.spawn((
-        Sprite::from_image(asset_server.load("texture.png")),
-        Transform::from_xyz(0.0, 0.0, -1.0), // メッシュより奥に
-    ));
+                // Build Mesh
+                let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+                let positions_3d: Vec<[f32; 3]> = world_positions.iter().map(|p| [p.x, p.y, 0.0]).collect();
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions_3d);
+                
+                // UVs
+                let uv_vecs: Vec<[f32; 2]> = uvs.chunks(2).map(|v| [v[0], v[1]]).collect();
+                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv_vecs);
+                
+                mesh.insert_indices(Indices::U32(indices));
 
-    // 2. メッシュの表示 (ワイヤーフレーム用、テクスチャなし)
-    commands.spawn((
-        Mesh2d(mesh_handle),
-        MeshMaterial2d(materials.add(ColorMaterial {
-            color: Color::WHITE.with_alpha(0.1), // 半透明の白
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-        DeformableMesh,
-    ));
-}async fn python_thread_loop(
+                let mesh_handle = meshes.add(mesh);
+
+                // Check if we already have the entity
+                if let Ok((entity, mut m2d)) = query.get_single_mut() {
+                    m2d.0 = mesh_handle;
+                } else {
+                    // Spawn new
+                    commands.spawn((
+                        Sprite::from_image(asset_server.load("texture.png")),
+                        Transform::from_xyz(0.0, 0.0, -1.0),
+                    ));
+
+                    commands.spawn((
+                        Mesh2d(mesh_handle),
+                        MeshMaterial2d(materials.add(ColorMaterial {
+                            color: Color::WHITE.with_alpha(0.1),
+                            ..default()
+                        })),
+                        Transform::from_xyz(0.0, 0.0, 0.0),
+                        DeformableMesh,
+                    ));
+                }
+
+                // Update MeshData
+                mesh_data.vertex_count = vertices.len() / 2;
+                mesh_data.initial_positions = world_positions;
+                mesh_data.image_width = image_width;
+                mesh_data.image_height = image_height;
+            },
+            PyResult::DeformUpdate(flat_verts) => {
+               if let Ok((_, mesh_handle)) = query.get_single() {
+                   if let Some(mesh) = meshes.get_mut(&mesh_handle.0) {
+                       let img_w = mesh_data.image_width;
+                       let img_h = mesh_data.image_height;
+                       // Python returns Image Coords. Convert to World.
+                       let positions: Vec<[f32; 3]> = flat_verts
+                        .chunks(2)
+                        .map(|v| [
+                            v[0] - img_w / 2.0,      
+                            -(v[1] - img_h / 2.0), // Y-Flip relative to center
+                            0.0
+                        ])
+                        .collect();
+                       mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+                   }
+               }
+            }
+        }
+    }
+
+    // 2. 制御点とワイヤーフレーム描画
+    // モードによって制御点の色を変える
+    let point_color = match state.get() {
+        AppMode::Setup => Color::srgb(1.0, 1.0, 0.0), // YELLOW
+        AppMode::Deform => Color::srgb(0.0, 1.0, 1.0), // CYAN
+    };
+
+    for (i, (_, pos)) in control_points.points.iter().enumerate() {
+        let color = if Some(i) == control_points.dragging_index { Color::srgb(1.0, 0.0, 0.0) } else { point_color }; // RED
+        gizmos.circle_2d(*pos, 8.0, color);
+    }
+
+    // ワイヤーフレーム
+    for (_, mesh_2d) in query.iter() {
+        if let Some(mesh) = meshes.get(&mesh_2d.0) {
+            if let (Some(pos), Some(Indices::U32(inds))) = (
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()),
+                mesh.indices(),
+            ) {
+                let max_idx = inds.iter().map(|i| *i as usize).max().unwrap_or(0);
+                if pos.len() <= max_idx { continue; }
+
+                for i in (0..inds.len()).step_by(3) {
+                    let a = Vec3::from(pos[inds[i] as usize]).truncate();
+                    let b = Vec3::from(pos[inds[i+1] as usize]).truncate();
+                    let c = Vec3::from(pos[inds[i+2] as usize]).truncate();
+                    gizmos.line_2d(a, b, Color::WHITE.with_alpha(0.2));
+                    gizmos.line_2d(b, c, Color::WHITE.with_alpha(0.2));
+                    gizmos.line_2d(c, a, Color::WHITE.with_alpha(0.2));
+                }
+            }
+        }
+    }
+}
+async fn python_thread_loop(
     mut rx_cmd: tokio::sync::mpsc::Receiver<PyCommand>,
-    tx_res: Sender<Vec<f32>>,
+    tx_res: Sender<PyResult>,
     mut rx_coords: watch::Receiver<Option<(usize, f32, f32)>>
 ) {
     pyo3::prepare_freethreaded_python();
@@ -203,14 +310,23 @@ fn setup(
                 Python::with_gil(|py| {
                     let bridge_bound = bridge.bind(py);
                     match cmd {
-                        PyCommand::InitializeMesh { vertices, indices } => {
-                             println!("Rust->Py: Init Mesh ({} verts, {} tris)", vertices.len()/2, indices.len()/3);
-                             let py_verts = PyList::empty(py);
-                             for chunk in vertices.chunks(2) {
-                                 let _ = py_verts.append(PyList::new(py, chunk).unwrap());
-                             }
-                             if let Err(e) = bridge_bound.call_method1("initialize_mesh_from_data", (py_verts, indices)) {
-                                  eprintln!("Py Error (Init): {}", e);
+                        PyCommand::LoadImage { path, epsilon } => {
+                             println!("Rust->Py: LoadImage {}, eps={}", path, epsilon);
+                             match bridge_bound.call_method1("load_image_and_generate_mesh", (path, epsilon)) {
+                                Ok(res_tuple) => {
+                                    if let Ok((verts, indices, uvs, w, h)) = res_tuple.extract::<(Vec<f32>, Vec<u32>, Vec<f32>, f32, f32)>() {
+                                        let _ = tx_res.send(PyResult::MeshInit {
+                                            vertices: verts,
+                                            indices,
+                                            uvs,
+                                            image_width: w,
+                                            image_height: h,
+                                        });
+                                    } else {
+                                        eprintln!("Py Error: Failed to extract mesh data tuple");
+                                    }
+                                },
+                                Err(e) => eprintln!("Py Error (LoadImage): {}", e),
                              }
                         }
                         PyCommand::AddControlPoint { index, x, y } => {
@@ -268,7 +384,7 @@ fn setup(
 
             if let Some(vertices) = res_verts {
                 if !vertices.is_empty() {
-                    let _ = tx_res.send(vertices);
+                    let _ = tx_res.send(PyResult::DeformUpdate(vertices));
                 }
             }
         }
@@ -412,186 +528,4 @@ fn update_ui_text(
     }
 }
 
-fn update_mesh_and_gizmos(
-    mut meshes: ResMut<Assets<Mesh>>,
-    query: Query<&Mesh2d, With<DeformableMesh>>,
-    channels: Res<PythonChannels>,
-    control_points: Res<ControlPoints>,
-    mut gizmos: Gizmos,
-    state: Res<State<AppMode>>,
-    mesh_data: Res<MeshData>,
-) {
-    // 1. メッシュ更新
-    let mut latest_flat = None;
-    while let Ok(flat) = channels.rx_result.try_recv() {
-        latest_flat = Some(flat);
-    }
 
-    if let Some(flat) = latest_flat {
-        // デバッグ表示: 更新を受け取った場合
-        // println!("Got mesh update. Verts: {}", flat.len()/2);
-
-        if flat.len() == mesh_data.vertex_count * 2 {
-            let img_w = mesh_data.image_width;
-            let img_h = mesh_data.image_height;
-
-            for mesh_handle in query.iter() {
-                if let Some(mesh) = meshes.get_mut(mesh_handle.id()) {
-                    let positions: Vec<[f32; 3]> = flat
-                        .chunks(2)
-                        .map(|v| [
-                            v[0] - img_w / 2.0,      // ImageX(0..W) -> WorldX(-W/2..W/2)
-                            -(v[1] - img_h / 2.0), // ImageY(0..H) -> WorldY(H/2..-H/2) (Y軸反転)
-                            0.0
-                        ])
-                        .collect();
-                    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-                }
-            }
-        }
-    }
-
-    // 2. 制御点とワイヤーフレーム描画
-    // モードによって制御点の色を変える
-    let point_color = match state.get() {
-        AppMode::Setup => Color::srgb(1.0, 1.0, 0.0), // YELLOW
-        AppMode::Deform => Color::srgb(0.0, 1.0, 1.0), // CYAN
-    };
-
-    for (i, (_, pos)) in control_points.points.iter().enumerate() {
-        let color = if Some(i) == control_points.dragging_index { Color::srgb(1.0, 0.0, 0.0) } else { point_color }; // RED
-        gizmos.circle_2d(*pos, 8.0, color);
-    }
-
-    // ワイヤーフレーム
-    for mesh_handle in query.iter() {
-        if let Some(mesh) = meshes.get(mesh_handle.id()) {
-            if let (Some(pos), Some(Indices::U32(inds))) = (
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()),
-                mesh.indices(),
-            ) {
-                let max_idx = inds.iter().map(|i| *i as usize).max().unwrap_or(0);
-                if pos.len() <= max_idx { continue; }
-
-                for i in (0..inds.len()).step_by(3) {
-                    let a = Vec3::from(pos[inds[i] as usize]).truncate();
-                    let b = Vec3::from(pos[inds[i+1] as usize]).truncate();
-                    let c = Vec3::from(pos[inds[i+2] as usize]).truncate();
-                    gizmos.line_2d(a, b, Color::WHITE.with_alpha(0.2));
-                    gizmos.line_2d(b, c, Color::WHITE.with_alpha(0.2));
-                    gizmos.line_2d(c, a, Color::WHITE.with_alpha(0.2));
-                }
-            }
-        }
-    }
-}
-
-// 修正された関数: 画像アルファ値に基づくメッシュ生成（凹部フィルタリング付き）
-// 戻り値: (BevyMesh, FlatCoords(Python用), Indices, InitialVec2(World用), img_w, img_h)
-fn create_mesh_from_image_alpha(image_path: &str, stride: u32) -> (Mesh, Vec<f32>, Vec<u32>, Vec<Vec2>, f32, f32) {
-    let img = image::open(image_path).expect("Failed to open image");
-    let (w, h) = img.dimensions();
-    let width_f = w as f32;
-    let height_f = h as f32;
-
-    let mut points: Vec<Point> = Vec::new();
-    let mut uvs = Vec::new();
-    let mut flat_verts = Vec::new();
-    let mut world_points_vec2 = Vec::new();
-
-    // 1. 点群サンプリング
-    for y in (0..h).step_by(stride as usize) {
-        for x in (0..w).step_by(stride as usize) {
-            let pixel = img.get_pixel(x, y);
-            if pixel[3] > 10 { // アルファ閾値
-                // Delaunatorはf64要求
-                points.push(Point { x: x as f64, y: y as f64 });
-                
-                // UV (Y反転なし/ありは画像の仕様次第。ここでは標準的なUV)
-                uvs.push([x as f32 / width_f, 1.0 - (y as f32 / height_f)]);
-
-                // Python用 (画像座標系)
-                flat_verts.push(x as f32);
-                flat_verts.push(y as f32);
-
-                // Bevy World用 (中心基準)
-                // 画像座標 (0,0)=TopLeft -> Bevy (0,0)=Center
-                // y=0 -> +H/2, y=H -> -H/2
-                // w_x = x - W/2
-                // w_y = -(y - H/2) = H/2 - y
-                world_points_vec2.push(Vec2::new(
-                    x as f32 - width_f / 2.0,
-                    height_f / 2.0 - y as f32
-                ));
-            }
-        }
-    }
-
-    // 2. 三角形分割
-    let triangulation = triangulate(&points);
-    let mut filtered_indices = Vec::new();
-
-    // 3. 三角形フィルタリング (凹部削除)
-    for i in (0..triangulation.triangles.len()).step_by(3) {
-        let i0 = triangulation.triangles[i];
-        let i1 = triangulation.triangles[i+1];
-        let i2 = triangulation.triangles[i+2];
-
-        let p0 = &points[i0];
-        let p1 = &points[i1];
-        let p2 = &points[i2];
-
-        // 重心計算
-        let cx = (p0.x + p1.x + p2.x) / 3.0;
-        let cy = (p0.y + p1.y + p2.y) / 3.0;
-
-        // 画像範囲チェック
-        if cx >= 0.0 && cx < w as f64 && cy >= 0.0 && cy < h as f64 {
-            // 重心のピクセルが透明なら、その三角形は除外する
-            let alpha = img.get_pixel(cx as u32, cy as u32)[3];
-            if alpha > 10 {
-                filtered_indices.push(i0 as u32);
-                filtered_indices.push(i1 as u32);
-                filtered_indices.push(i2 as u32);
-            }
-        }
-    }
-
-    // 4. メッシュ構築
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    let positions: Vec<[f32; 3]> = world_points_vec2.iter().map(|p| [p.x, p.y, 0.0]).collect();
-
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(filtered_indices.clone()));
-
-    (mesh, flat_verts, filtered_indices, world_points_vec2, width_f, height_f)
-}fn create_grid_mesh(rows: usize, cols: usize, width: f32, height: f32) -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    let mut pos = Vec::new();
-    let mut uvs = Vec::new();
-    let mut inds = Vec::new();
-
-    for r in 0..rows {
-        for c in 0..cols {
-            let u = c as f32 / (cols - 1) as f32;
-            let v = r as f32 / (rows - 1) as f32;
-            pos.push([(u - 0.5) * width, (v - 0.5) * height, 0.0]);
-            uvs.push([u, 1.0 - v]);
-        }
-    }
-
-    for r in 0..(rows - 1) {
-        for c in 0..(cols - 1) {
-            let i = r * cols + c;
-            inds.extend_from_slice(&[
-                i as u32, (i + 1) as u32, (i + cols + 1) as u32,
-                i as u32, (i + cols + 1) as u32, (i + cols) as u32
-            ]);
-        }
-    }
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(inds));
-    mesh
-}
