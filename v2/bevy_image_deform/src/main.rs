@@ -9,8 +9,10 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule};
 use std::env;
+use std::time::Duration; // 追加
 use image::GenericImageView;
 use delaunator::{Point, triangulate};
+use tokio::sync::watch; // 追加
 
 // --- デフォルト定数（ウィンドウサイズ用） ---
 const WINDOW_WIDTH: f32 = 1000.0;
@@ -29,15 +31,15 @@ enum PyCommand {
     InitializeMesh { vertices: Vec<f32>, indices: Vec<u32> },
     AddControlPoint { index: usize, x: f32, y: f32 },
     FinalizeSetup, // セットアップ完了、ソルバー構築指示
-    UpdateControlPoint { index: usize, x: f32, y: f32 },
     Reset,
 }
 
 // --- リソース ---
 #[derive(Resource)]
 struct PythonChannels {
-    tx_command: Sender<PyCommand>,
+    tx_command: tokio::sync::mpsc::Sender<PyCommand>,
     rx_result: Receiver<Vec<f32>>,
+    tx_coords: watch::Sender<Option<(usize, f32, f32)>>,
 }
 
 #[derive(Resource, Default)]
@@ -45,9 +47,7 @@ struct ControlPoints {
     // (頂点インデックス, 表示座標)
     points: Vec<(usize, Vec2)>,
     dragging_index: Option<usize>,
-}
-
-#[derive(Resource, Default)]
+}#[derive(Resource, Default)]
 struct MeshData {
     // 初期頂点位置 (World座標)
     initial_positions: Vec<Vec2>,
@@ -107,17 +107,26 @@ fn setup(
         ModeText,
     ));
 
-    let (tx_cmd, rx_cmd) = bounded::<PyCommand>(1);
-    let (tx_res, rx_res) = bounded::<Vec<f32>>(5);
+    // イベント用 (非同期MPSC)
+    let (tx_cmd, rx_cmd) = tokio::sync::mpsc::channel::<PyCommand>(10);
+    // 結果用 (同期Crossbeam - Bevyが受信)
+    let (tx_res, rx_res) = bounded::<Vec<f32>>(1); 
+    // 座標同期用ウォッチチャンネル (初期値: None)
+    let (tx_coords, rx_coords) = watch::channel::<Option<(usize, f32, f32)>>(None);
 
-    // Pythonスレッド起動
+    // Pythonスレッド起動 (Tokio Runtime内で実行)
     std::thread::spawn(move || {
-        python_thread_loop(rx_cmd, tx_res);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(python_thread_loop(rx_cmd, tx_res, rx_coords));
     });
 
     commands.insert_resource(PythonChannels {
         tx_command: tx_cmd.clone(),
         rx_result: rx_res,
+        tx_coords,
     });
 
     // メッシュ
@@ -134,7 +143,8 @@ fn setup(
     mesh_data.image_height = img_h;
 
     // Pythonへ初期メッシュデータを送信
-    let _ = tx_cmd.send(PyCommand::InitializeMesh { 
+    // TrySend for async channel from sync context
+    let _ = tx_cmd.try_send(PyCommand::InitializeMesh { 
         vertices: flat_verts, 
         indices: indices 
     });
@@ -158,9 +168,15 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 0.0),
         DeformableMesh,
     ));
-}fn python_thread_loop(rx_cmd: Receiver<PyCommand>, tx_res: Sender<Vec<f32>>) {
+}async fn python_thread_loop(
+    mut rx_cmd: tokio::sync::mpsc::Receiver<PyCommand>,
+    tx_res: Sender<Vec<f32>>,
+    mut rx_coords: watch::Receiver<Option<(usize, f32, f32)>>
+) {
     pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| {
+    
+    // Pythonオブジェクトをループ外で保持するために PyObject (Py<PyAny>) を取得
+    let bridge: PyObject = Python::with_gil(|py| {
         let sys = py.import("sys").unwrap();
         let current_dir = env::current_dir().unwrap();
         let script_dir = current_dir.join("scripts");
@@ -169,84 +185,94 @@ fn setup(
                 let _ = path_list.insert(0, script_dir);
             }
         }
-        let module = match PyModule::import(py, "deform_algo") {
-            Ok(m) => m,
-            Err(e) => { eprintln!("Rust Import Error: {}", e); return; }
-        };
-
+        let module = PyModule::import(py, "deform_algo").expect("Failed to import deform_algo");
         let bridge_class = module.getattr("BevyBridge").expect("No BevyBridge class");
-        let bridge = bridge_class.call0().expect("Failed to init BevyBridge");
+        // Rustのスレッド内で保持するため、GILに束縛されない PyObject に変換しておく
+        let bridge_instance = bridge_class.call0().expect("Failed to init BevyBridge");
+        bridge_instance.into()
+    });
 
-        println!("Rust: Python Thread Waiting for Mesh Data...");
+    println!("Rust: Python Thread Waiting for Mesh Data...");
 
-        loop {
-            // コマンド受信 (ブロッキング)
-            if let Ok(cmd) = rx_cmd.recv() {
-                let mut should_solve = false;
-                match cmd {
-                    PyCommand::InitializeMesh { vertices, indices } => {
-                        println!("Rust->Py: Init Mesh ({} verts, {} tris)", vertices.len()/2, indices.len()/3);
-                        // Vec<f32> -> List[List[float, float]]
-                        let py_verts = PyList::empty(py);
-                        for chunk in vertices.chunks(2) {
-                            let _ = py_verts.append(PyList::new(py, chunk).unwrap());
+    loop {
+        let mut should_solve = false;
+        
+        // select! でイベントを待つ
+        tokio::select! {
+            Some(cmd) = rx_cmd.recv() => {
+                Python::with_gil(|py| {
+                    let bridge_bound = bridge.bind(py);
+                    match cmd {
+                        PyCommand::InitializeMesh { vertices, indices } => {
+                             println!("Rust->Py: Init Mesh ({} verts, {} tris)", vertices.len()/2, indices.len()/3);
+                             let py_verts = PyList::empty(py);
+                             for chunk in vertices.chunks(2) {
+                                 let _ = py_verts.append(PyList::new(py, chunk).unwrap());
+                             }
+                             if let Err(e) = bridge_bound.call_method1("initialize_mesh_from_data", (py_verts, indices)) {
+                                  eprintln!("Py Error (Init): {}", e);
+                             }
                         }
-                        
-                        // indices はそのままタプルとして渡せるか、リストにするか
-                        // BevyBridge側で list を受け取るならこれでOK
-                        if let Err(e) = bridge.call_method1("initialize_mesh_from_data", (py_verts, indices)) {
-                             eprintln!("Py Error (Init): {}", e);
+                        PyCommand::AddControlPoint { index, x, y } => {
+                            if let Err(e) = bridge_bound.call_method1("add_control_point", (index, x, y)) {
+                                eprintln!("Py Error (Add): {}", e);
+                            }
+                        }
+                        PyCommand::FinalizeSetup => {
+                            println!("Rust: Finalizing Setup...");
+                            if let Err(e) = bridge_bound.call_method0("finalize_setup") {
+                                eprintln!("Py Error (Finalize): {}", e);
+                            } else {
+                                should_solve = true;
+                            }
+                        }
+                        PyCommand::Reset => {
+                             if let Err(e) = bridge_bound.call_method0("reset_mesh") {
+                                eprintln!("Py Error (Reset): {}", e);
+                            } else {
+                                should_solve = true;
+                            }
                         }
                     }
-                    PyCommand::AddControlPoint { index, x, y } => {
-                        // Setupモード: 追加のみ、計算なし
-                        if let Err(e) = bridge.call_method1("add_control_point", (index, x, y)) {
-                            eprintln!("Py Error (Add): {}", e);
-                        }
-                    }
-                    PyCommand::FinalizeSetup => {
-                        // Setup完了: ソルバー構築
-                        println!("Rust: Finalizing Setup...");
-                        if let Err(e) = bridge.call_method0("finalize_setup") {
-                            eprintln!("Py Error (Finalize): {}", e);
-                        } else {
-                            should_solve = true; // 初回の変形なし形状を取得するために一度solve
-                        }
-                    }
-                    PyCommand::UpdateControlPoint { index, x, y } => {
-                        // Deformモード: 更新して計算
-                        // デバッグ用: 受け取ったことを表示 (大量に出る可能性あり)
-                        println!("Rust->Py: Update Point {} -> ({:.1}, {:.1})", index, x, y);
-                        if let Err(e) = bridge.call_method1("update_control_point", (index, x, y)) {
+                });
+            }
+            Ok(_) = rx_coords.changed() => {
+                let val = *rx_coords.borrow_and_update();
+                if let Some((index, x, y)) = val {
+                    Python::with_gil(|py| {
+                        let bridge_bound = bridge.bind(py);
+                         // println!("Rust->Py: Update Point {} -> ({:.1}, {:.1})", index, x, y);
+                         if let Err(e) = bridge_bound.call_method1("update_control_point", (index, x, y)) {
                             eprintln!("Py Error (Update): {}", e);
                         } else {
                             should_solve = true;
                         }
-                    }
-                    PyCommand::Reset => {
-                        if let Err(e) = bridge.call_method0("reset_mesh") {
-                            eprintln!("Py Error (Reset): {}", e);
-                        } else {
-                            should_solve = true; // 初期形状に戻す
-                        }
-                    }
-                }
-
-                if should_solve {
-                    match bridge.call_method0("solve_frame") {
-                        Ok(res) => {
-                            if let Ok(vertices) = res.extract::<Vec<f32>>() {
-                                if !vertices.is_empty() {
-                                    let _ = tx_res.send(vertices);
-                                }
-                            }
-                        },
-                        Err(e) => eprintln!("Py Solve Error: {}", e),
-                    }
+                    });
                 }
             }
         }
-    });
+
+        if should_solve {
+            let res_verts: Option<Vec<f32>> = Python::with_gil(|py| {
+                let bridge_bound = bridge.bind(py);
+                match bridge_bound.call_method0("solve_frame") {
+                    Ok(res) => {
+                         res.extract::<Vec<f32>>().ok()
+                    },
+                    Err(e) => {
+                        eprintln!("Py Solve Error: {}", e);
+                        None
+                    }
+                }
+            });
+
+            if let Some(vertices) = res_verts {
+                if !vertices.is_empty() {
+                    let _ = tx_res.send(vertices);
+                }
+            }
+        }
+    }
 }
 
 fn handle_input(
@@ -267,7 +293,7 @@ fn handle_input(
     if keys.just_pressed(KeyCode::KeyR) {
         control_points.points.clear();
         control_points.dragging_index = None;
-        let _ = channels.tx_command.send(PyCommand::Reset);
+        let _ = channels.tx_command.try_send(PyCommand::Reset);
         next_state.set(AppMode::Setup);
         return;
     }
@@ -279,7 +305,7 @@ fn handle_input(
              return;
         }
         println!("Switching to Deform Mode");
-        let _ = channels.tx_command.send(PyCommand::FinalizeSetup);
+        let _ = channels.tx_command.try_send(PyCommand::FinalizeSetup);
         next_state.set(AppMode::Deform);
         return;
     }
@@ -332,7 +358,10 @@ fn handle_input(
                         let snap_py_x = snap_pos.x + img_w / 2.0;
                         let snap_py_y = img_h / 2.0 - snap_pos.y; // Y軸反転
 
-                        let _ = channels.tx_command.send(PyCommand::AddControlPoint {
+                        // Setupモードの追加コマンドは MPSC で確実に送る
+                        // try_send ではなく blocking send でもいいが、Async Channel なので blocking_send も使える
+                        // ここではイベント頻度が低いので try_send でOK、ただし容量に注意
+                        let _ = channels.tx_command.try_send(PyCommand::AddControlPoint {
                             index: v_idx, x: snap_py_x, y: snap_py_y
                         });
                         println!("Added Point: {} ({:.1}, {:.1})", v_idx, snap_py_x, snap_py_y);
@@ -351,20 +380,10 @@ fn handle_input(
                  if let Some(idx) = control_points.dragging_index {
                     if idx < control_points.points.len() {
                         control_points.points[idx].1 = world_pos;
-                        // 修正: try_send の結果を確認。Fullならスキップされるが、ログに出してみる
-                        match channels.tx_command.try_send(PyCommand::UpdateControlPoint { 
-                            index: idx, x: py_x, y: py_y 
-                        }) {
-                            Ok(_) => {
-                                // 成功時は大量に出るのでコメントアウトするか、間引いて表示
-                                // println!("Sent update: idx={}, ({:.1}, {:.1})", idx, py_x, py_y);
-                            },
-                            Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                // バッファが一杯の場合はスキップしてOK（描画フレームレート > 計算速度 の場合）
-                                eprintln!("Channel Full! Dropping update event for idx={}", idx);
-                            },
-                            Err(e) => eprintln!("Failed to send update: {}", e),
-                        }
+                        // 修正: 座標更新は Watch Channel で送る
+                        // これで「常に最新の値」だけが保持される
+                        let _ = channels.tx_coords.send(Some((idx, py_x, py_y)));
+                        // println!("Sent watch update: idx={}, ({:.1}, {:.1})", idx, py_x, py_y);
                     }
                 }
             }

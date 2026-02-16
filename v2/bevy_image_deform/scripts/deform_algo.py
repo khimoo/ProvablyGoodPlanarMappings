@@ -907,9 +907,10 @@ class BevyBridge:
 
         # Strategy Config configuration
         # For better stability, we can try different settings
-        # strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0)
+        strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0)
         # strategy = CalculateKFromBound(grid_resolution=(20, 20), K_max=20.0)
-        strategy = FixedGridCalcBound(grid_resolution=(25, 25), K=2.5)
+        # strategy = FixedGridCalcBound(grid_resolution=(25, 25), K=10)
+        
 
         config = SolverConfig(
             domain_bounds=tuple(domain),
