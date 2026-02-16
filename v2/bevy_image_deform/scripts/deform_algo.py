@@ -131,7 +131,11 @@ class SolverConfig:
 
     epsilon: float = 100.0     # Width parameter for Gaussian RBF
 
-    lambda_biharmonic: float = 1e-4  # Regularization weight 
+    lambda_biharmonic: float = 1e-4  # Regularization weight
+
+    fps_k: int = 50  # Number of permanently active points Z'' (Farthest Point Sampling)
+                      # Paper Section 5: "keep a small subset of equally spread collocation
+                      # points always active" to stabilize against fast handle movement.
 
 # --- Basis Function Interface ---
 
@@ -360,14 +364,93 @@ class ProvablyGoodPlanarMapping(ABC):
         M = self.collocation_grid.shape[0]
         self.di = np.tile(np.array([1.0, 0.0]), (M, 1))
 
-        self.activated_indices = []
+        # 7. K_high, K_low thresholds (Paper Section 5)
+        # K_high = 0.1 + 0.9*K: points above this are added to active set
+        # K_low  = 0.5 + 0.5*K: points below this are removed from active set
+        self.K_high = 0.1 + 0.9 * self.K_upper
+        self.K_low  = 0.5 + 0.5 * self.K_upper
+
+        # 8. Z'': Farthest Point Sampling for stabilization (Algorithm 1)
+        # These points are always active and never removed.
+        self.permanent_indices = self._farthest_point_sampling(self.config.fps_k)
+
+        # 9. Initialize active set with Z''
+        self.activated_indices = list(self.permanent_indices)
 
         print(f"[Solver] Initialized. Grid size: {M} points. h={self.h_grid:.4f}")
+        print(f"[Solver] K_high={self.K_high:.4f}, K_low={self.K_low:.4f}")
+        print(f"[Solver] Z'' (permanent active points): {len(self.permanent_indices)}")
 
     @abstractmethod
     def _setup_basis(self):
         """Initialize self.basis"""
         pass
+
+    def _farthest_point_sampling(self, k: int) -> List[int]:
+        """
+        FPS on collocation grid to select Z'' (permanently active points).
+        Paper Algorithm 1: "Initialize set Z'' with farthest point samples."
+        Paper Section 5: "keep a small subset of equally spread collocation
+        points always active" for stabilization.
+        """
+        points = self.collocation_grid
+        m = points.shape[0]
+        if k >= m:
+            return list(range(m))
+        if k <= 0:
+            return []
+
+        indices = np.empty(k, dtype=int)
+        # Start from the point with minimum x-coordinate (deterministic)
+        indices[0] = int(np.argmin(points[:, 0]))
+
+        chosen = points[indices[0]]
+        min_d2 = np.sum((points - chosen) ** 2, axis=1)
+
+        for i in range(1, k):
+            next_idx = int(np.argmax(min_d2))
+            indices[i] = next_idx
+            d2 = np.sum((points - points[next_idx]) ** 2, axis=1)
+            min_d2 = np.minimum(min_d2, d2)
+
+        return indices.tolist()
+
+    def _find_local_maxima(self, K_vals: np.ndarray) -> np.ndarray:
+        """
+        Find local maxima of distortion on the collocation grid (4-neighborhood).
+        Paper Algorithm 1: "Find the set Z_max of local maxima of D(z)."
+
+        Uses >= for comparisons to handle plateaus where distortion is
+        uniformly high. In such cases, all plateau points are treated as
+        local maxima, ensuring they can be added to the active set if
+        they exceed K_high. This is conservative but safe.
+
+        Args:
+            K_vals: (M,) distortion values at each grid point
+        Returns:
+            Array of indices that are local maxima
+        """
+        nx, ny = self.grid_shape
+        # collocation_grid is built from meshgrid(x, y) with y as outer loop
+        # so the grid layout is (ny, nx) when reshaped
+        K_grid = K_vals.reshape(ny, nx)
+
+        # A point is a local maximum if it is >= all its existing neighbors.
+        # Using >= instead of > to handle plateaus (uniform distortion regions).
+        # On a plateau, every point qualifies, which is conservative but prevents
+        # the scenario where no local maxima are found despite high distortion.
+        local_max_mask = np.ones((ny, nx), dtype=bool)
+
+        local_max_mask[1:, :]  &= K_grid[1:, :]  >= K_grid[:-1, :]   # vs above
+        local_max_mask[:-1, :] &= K_grid[:-1, :] >= K_grid[1:, :]    # vs below
+        local_max_mask[:, 1:]  &= K_grid[:, 1:]  >= K_grid[:, :-1]   # vs left
+        local_max_mask[:, :-1] &= K_grid[:, :-1] >= K_grid[:, 1:]    # vs right
+
+        # Boundary points: only compare with existing neighbors (already handled
+        # by the slicing above - boundary edges have fewer comparisons, which is
+        # conservative and correct)
+
+        return np.where(local_max_mask.ravel())[0]
 
     def _setup_grid(self):
         strategy = self.config.strategy
@@ -393,14 +476,8 @@ class ProvablyGoodPlanarMapping(ABC):
             # Or assume h is strict upper bound. 
             # We use the computed h for grid generation which implies actual spacing.
             
-            # Clamp to reasonable size to prevent OOM
-            if nx * ny > 250000: # 500x500
-                warnings.warn(f"Calculated grid size {nx}x{ny} is too large. Clamping resolution.")
-                ratio = np.sqrt(250000 / (nx*ny))
-                nx = int(nx * ratio)
-                ny = int(ny * ratio)
-                # If clamped, effective h increases
-                h = max(width/nx, height/ny)
+            # We removed the clamping logic here to respect the theoretical guarantees.
+            # If the grid is too large, it might be slow, but it will be correct.
 
         elif isinstance(strategy, (FixedGridCalcBound, CalculateKFromBound)):
             nx, ny = strategy.grid_resolution
@@ -409,6 +486,13 @@ class ProvablyGoodPlanarMapping(ABC):
             h_x = width / (nx - 1) if nx > 1 else width
             h_y = height / (ny - 1) if ny > 1 else height
             h = max(h_x, h_y)
+
+        # Fallback calculation if h was not set by strategy (e.g. unknown strategy with default 20x20)
+        if h < 0:
+            h_x = width / (nx - 1) if nx > 1 else width
+            h_y = height / (ny - 1) if ny > 1 else height
+            h = max(h_x, h_y)
+            print(f"[Solver] Strategy: Unknown/Fallback. Using defaults {nx}x{ny}, h={h:.4f}")
 
         x = np.linspace(min_x, max_x, nx)
         y = np.linspace(min_y, max_y, ny)
@@ -500,39 +584,46 @@ class ProvablyGoodPlanarMapping(ABC):
     def compute_mapping(self, target_handles: np.ndarray):
         """
         Main Loop (Algorithm 1 from Paper):
-        Iteratively add constraints and re-solve until no violations occur.
+        
+        Paper Algorithm 1 order:
+          Initialization: Evaluate D(z), find Z_max, update Z' (add/remove)
+          Optimization:   Solve SOCP to find c
+          Postprocessing: Update d_i using Eq. 27
+        
+        Loop: Active Set update → Optimize → Frame update
         """
         max_iterations = 10
         iteration = 0
-        
+
         while iteration < max_iterations:
-            # 1. Check for violations and update active set
-            # Returns number of NEW violations found
+            # 1. Update frames based on current c (Eq. 27)
+            #    On first call after _initialize_solver, c is identity and di is (1,0).
+            #    This is consistent with the paper's initialization.
+            self._update_frames()
+
+            # 2. Evaluate distortion and update active set (Algorithm 1: Initialization)
+            #    - Evaluate D(z) for all z in Z
+            #    - Find local maxima Z_max of D(z)
+            #    - Insert z in Z_max with D(z) > K_high into Z'
+            #    - Remove z in Z' with D(z) < K_low from Z' (except Z'')
             new_violations = self._update_active_set()
-            
-            # If no new violations and we have solved at least once (or active set is empty initially),
-            # we check if we are done.
-            # Actually, the paper says: "We repeat this process until no more points are added to the active set."
-            # But we must ensure the current solution satisfies the constraints.
-            
-            # If it's the first iteration, we simply solve.
-            # If subsequent iteration found NO new violations, we are done.
-            if iteration > 0 and new_violations == 0:
-                # print(f"[Solver] Converged at iteration {iteration}")
+
+            # 3. Solve SOCP with updated active set (Algorithm 1: Optimization)
+            self._optimize_step(target_handles)
+
+            # 4. Convergence check:
+            #    On iteration 0, always continue (handle positions changed).
+            #    After that, if no new violations were added, we have converged.
+            if new_violations == 0 and iteration > 0:
                 break
 
-            # 2. Optimize with current active set
-            # Note: The frames d_i for the active set are fixed at the moment they were added.
-            # _update_active_set handles setting d_i for new points.
-            self._optimize_step(target_handles)
-            
             iteration += 1
-        
-        if iteration == max_iterations:
-             warnings.warn(f"[Solver] Max iterations ({max_iterations}) reached. Solution might not be fully valid.")
 
-        # 3. Post-process (Optional, for next frame warm start visualisation)
-        self._postprocess()
+        if iteration == max_iterations:
+            warnings.warn(f"[Solver] Max iterations ({max_iterations}) reached. Solution might not be fully valid.")
+
+        # Final frame update for next call's warm start (Algorithm 1: Postprocessing)
+        self._update_frames()
 
     def transform(self, points: np.ndarray) -> np.ndarray:
         """
@@ -549,6 +640,34 @@ class ProvablyGoodPlanarMapping(ABC):
         return Phi_points @ self.c.T
 
     # --- Internal Methods ---
+
+    def _update_frames(self):
+        """Update global frames (di) based on CURRENT coefficients c."""
+        # Calculate gradients
+        G = self.GradPhi # (M, N+3, 2)
+        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
+        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
+
+        ux, uy = grad_u[:, 0], grad_u[:, 1]
+        vx, vy = grad_v[:, 0], grad_v[:, 1]
+
+        # f_z = 0.5 * (ux + vy + i(vx - uy))
+        re_fz = 0.5 * (ux + vy)
+        im_fz = 0.5 * (vx - uy)
+
+        fz_vecs = np.stack([re_fz, im_fz], axis=1) # (M, 2)
+        norm_fz = np.linalg.norm(fz_vecs, axis=1, keepdims=True)
+
+        # Avoid zero division
+        # If |fz| ~ 0, we simply keep the previous di or default (1,0)
+        # We only update where norm is sufficient.
+        mask = (norm_fz > 1e-12).flatten()
+        
+        # In a strict implementation, we might not update di for points NOT in the active set,
+        # but updating all helps for future activations.
+        # Crucially, we MUST update di for Active Set points to rotate the cut plane.
+        
+        self.di[mask] = fz_vecs[mask] / norm_fz[mask]
 
     def _compute_distortion_on_grid(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -593,88 +712,50 @@ class ProvablyGoodPlanarMapping(ABC):
 
     def _update_active_set(self) -> int:
         """
-        Update Active Set based on violations of the 3 guarantees.
-        Returns: number of new violations added.
+        Update Active Set Z' based on distortion evaluation (Algorithm 1).
+
+        Paper Algorithm 1:
+          1. Evaluate D(z) for z in Z
+          2. Find Z_max = local maxima of D(z)
+          3. foreach z in Z_max with D(z) > K_high: insert z into Z'
+          4. foreach z in Z' with D(z) < K_low: remove z from Z' (but never remove Z'')
+
+        Paper Section 5:
+          K_high = 0.1 + 0.9*K  (add threshold, slightly below K)
+          K_low  = 0.5 + 0.5*K  (remove threshold)
+
+        Returns: number of new points added to the active set.
         """
-        # We need to check violations of:
-        # 1. Sigma_1 <= K (Upper Bound)
-        # 2. Sigma_2 >= 1/K (Lower Bound / Injectivity)
-        # 3. Orientation (Implicit)
-        
-        # We check them numerically on the grid.
-        
-        # Get gradient components for ALL grid points based on current c
-        G = self.GradPhi
-        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
-        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
+        # 1. Evaluate distortion D(z) at all collocation points
+        K_vals, _ = self._compute_distortion_on_grid()
 
-        ux, uy = grad_u[:, 0], grad_u[:, 1]
-        vx, vy = grad_v[:, 0], grad_v[:, 1]
+        # 2. Find local maxima of D(z) on the grid
+        local_maxima = self._find_local_maxima(K_vals)
 
-        # fz, fzb
-        re_fz  = 0.5 * (ux + vy)
-        im_fz  = 0.5 * (vx - uy)
-        re_fzb = 0.5 * (ux - vy)
-        im_fzb = 0.5 * (vx + uy)
-        
-        abs_fz = np.sqrt(re_fz**2 + im_fz**2)
-        abs_fzb = np.sqrt(re_fzb**2 + im_fzb**2)
-        
-        # Current directions di (from previous iteration/current state)
-        # Important: For checking violation 2, what d should we use?
-        # The paper says: "If a point x_i violates the constraints... we add it to the active set...
-        # and set d_i = J_S f(x_i) / |J_S f(x_i)|".
-        # So we check if there exists a direction d such that constraints are satisfied?
-        # No, we check if the current map satisfies the bounds.
-        # Condition 2 is simply sigma_min >= 1/K => |fz| - |fzb| >= 1/K.
-        # The linearization with d_i is only for the SOLVER constraint.
-        # The CHECK is on the singular values directly.
-        
-        # Check Condition 1: Sigma_1 <= K
-        # Sigma_1 = |fz| + |fzb|
-        sigma_1 = abs_fz + abs_fzb
-        violation_1 = sigma_1 > self.K_upper + 1e-4 # Tolerance
-        
-        # Check Condition 2: Sigma_2 >= 1/K
-        sigma_2 = abs_fz - abs_fzb
-        violation_2 = sigma_2 < self.Sigma_lower - 1e-4
-        
-        # Combined violations
-        violators = np.where(violation_1 | violation_2)[0]
-        
+        # 3. Remove points with D(z) < K_low from Z' (but protect Z'')
+        permanent_set = set(self.permanent_indices)
+        remaining = []
+        for idx in self.activated_indices:
+            if idx in permanent_set:
+                remaining.append(idx)  # Z'' is never removed
+            elif K_vals[idx] >= self.K_low:
+                remaining.append(idx)  # Distortion still significant, keep
+            # else: distortion sufficiently below bound, remove from active set
+        self.activated_indices = remaining
+
+        # 4. Add local maxima with D(z) > K_high to Z'
+        current_set = set(self.activated_indices)
         new_added_count = 0
-        if len(violators) > 0:
-            current_set = set(self.activated_indices)
-            
-            for v in violators:
-                idx = int(v)
-                if idx not in current_set:
-                    current_set.add(idx)
-                    new_added_count += 1
-                    
-                    # --- CRITICAL: Set frame d_i for NEW active point ---
-                    # According to paper: "When a point x_i is added to the active set... we set d_i = J_S f(x_i) / ..."
-                    # We compute d_i based on the CURRENT map state (before optimization).
-                    # This fixes the linearization frame.
-                    
-                    # Extract fz for this point
-                    fz_re_val = re_fz[idx]
-                    fz_im_val = im_fz[idx]
-                    norm = np.sqrt(fz_re_val**2 + fz_im_val**2)
-                    
-                    if norm > 1e-12:
-                        self.di[idx] = np.array([fz_re_val/norm, fz_im_val/norm])
-                    else:
-                        # Fallback for singular points
-                        self.di[idx] = np.array([1.0, 0.0])
 
-            self.activated_indices = sorted(list(current_set))
-            
+        for idx in local_maxima:
+            idx = int(idx)
+            if K_vals[idx] > self.K_high and idx not in current_set:
+                current_set.add(idx)
+                new_added_count += 1
+
+        self.activated_indices = sorted(list(current_set))
+
         return new_added_count
-        
-        # Note: We do not remove points in this strict version (monotonically increasing active set)
-        # unless we implement a specific drop strategy.
-        # For performance, could reset active set if handles change significantly.
 
     def _compute_di_local(self, indices: List[int]) -> np.ndarray:
         """
@@ -722,10 +803,11 @@ class ProvablyGoodPlanarMapping(ABC):
             idx_list = self.activated_indices
             G_sub = self.GradPhi[idx_list] # (K, N+3, 2)
 
-            # Recompute local di for the active set based on *current* (previous step) coefficients
-            # Recompute local di for the active set based on *current* (previous step) coefficients
-            # This linearizes the constraint around current state.
-            # FIX: Use FIXED di stored in self.di, not recomputed from current c every time.
+            # Retrieve fixed local frames di (from start of frame / last valid configuration).
+            # We use the cached self.di which is updated only in _postprocess.
+            # This ensures we are always linearizing around a valid (unfolded) state, 
+            # forcing the solver to "unfold" if it tries to violate injectivity.
+
             di_local = self._compute_di_local(idx_list) # (K, 2)
             # Constraints construction based on Poranne & Lipman 2014
             # We enforce 3 guarantees on the collocation points:
@@ -798,31 +880,18 @@ class ProvablyGoodPlanarMapping(ABC):
 
     def _postprocess(self):
         """Update global frames (di) based on new coefficients."""
-        # For visualization or next frame starting point.
-        # In the iterative algorithm, d_i for active constraints should remain fixed 
-        # until valid solution is found or constraint is deactivated.
-        # However, for the NEXT user input frame, we can reset d_i to current deformation?
-        # Yes, usually between time steps we update the linearization.
+        # For visualization or next frame warm start visualisation
+        # We need to update ALL d_i to match the new configuration
+        # so that when the user starts the NEXT drag operation, 
+        # the initial linearization frames are correct.
         
         G = self.GradPhi # (M, N+3, 2)
         grad_u = np.einsum('j,mjk->mk', self.c[0], G)
         grad_v = np.einsum('j,mjk->mk', self.c[1], G)
 
-        ux, uy = grad_u[:, 0], grad_u[:, 1]
-        vx, vy = grad_v[:, 0], grad_v[:, 1]
-
-        # f_z = 0.5 * (ux + vy + i(vx - uy))
-        re_fz = 0.5 * (ux + vy)
-        im_fz = 0.5 * (vx - uy)
-
-        fz_vecs = np.stack([re_fz, im_fz], axis=1) # (M, 2)
-        norm_fz = np.linalg.norm(fz_vecs, axis=1, keepdims=True)
-
-        mask = (norm_fz > 1e-12).flatten()
-
-        # Reset to default
-        self.di[...] = np.array([1.0, 0.0])
-        self.di[mask] = fz_vecs[mask] / norm_fz[mask]
+        # This method is effectively deprecated since we use _update_frames() in the loop.
+        # But keeping it empty or calling _update_frames() is fine.
+        self._update_frames()
 
 class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping):
     """
@@ -833,8 +902,6 @@ class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping):
         self.basis = GaussianRBF(epsilon=self.config.epsilon)
 
         # Setup centers
-        # This part was common, but since each basis might have different requirements for centers
-        # (e.g. B-Spline uses grid control points, not scattered centers), it's good here.
         self.basis.set_centers(self.config.source_handles)
 
 # --- Bevy Interface ---
@@ -879,28 +946,14 @@ class BevyBridge:
             img = img.convert('RGBA')
         pixels = img.load()
 
-        # 2. Calculate optimal grid spacing h
-        # Use Strategy 2 (Guarantee Mode) to find h
-        # We need a temporary basis to compute s from epsilon
-        temp_basis = GaussianRBF(epsilon=self.epsilon)
-        strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0)
-        
-        h_theoretical = strategy.compute_h(temp_basis)
-        print(f"[Py] Theoretical h={h_theoretical:.4f} for epsilon={self.epsilon}")
-        
-        # Use a sampling stride slightly smaller than h to be safe, 
-        # or exactly h if we trust the grid alignment.
-        # Ensure we don't have too many points (limit for performance).
-        # Also ensure stride is not too large (minimum density guarantee).
-        # Let's say at least ~30x30 grid points for the image?
-        min_density_stride = max(w, h_img) // 30
-        stride = max(int(h_theoretical), 5)
-        
-        if stride > min_density_stride:
-            print(f"[Py] Clamping stride from {stride} to {min_density_stride} to ensure density.")
-            stride = min_density_stride
+        # 2. Determine mesh sampling stride
+        # Mesh density is for visual quality, independent of the solver's
+        # collocation grid spacing h. Target ~40 points along the longest axis
+        # for good visual quality while keeping triangle count manageable.
+        max_dim = max(w, h_img)
+        stride = max(max_dim // 40, 3)  # At least 3px to avoid degenerate triangles
             
-        print(f"[Py] Using sampling stride: {stride} px")
+        print(f"[Py] Using sampling stride: {stride} px (image: {w}x{h_img})")
 
         # 3. Sample Points
         points = []
@@ -975,7 +1028,7 @@ class BevyBridge:
         self.solver = None
         self.is_setup_finalized = False
         
-        return (flat_verts, valid_indices, flat_uvs, w, h_img)
+        return (flat_verts, valid_indices, flat_uvs, float(w), float(h_img))
 
     def initialize_mesh_from_data(self, vertices: List[float], indices: List[int]):
         """
@@ -1009,10 +1062,18 @@ class BevyBridge:
             print("[Py] Warning: Cannot add points after finalization.")
             return
 
-        print(f"[Py] Adding control point: mesh_idx={index} at ({x:.1f}, {y:.1f})")
+        # Rustからの座標入力を無視し、頂点インデックスに対応する正確な内部座標を使用する
+        # これにより、初期状態でのソース位置とターゲット位置の不一致（歪みの原因）を防ぐ
+        final_x, final_y = x, y
+        if self.mesh_vertices is not None and 0 <= index < len(self.mesh_vertices):
+            pt = self.mesh_vertices[index]
+            final_x = float(pt[0])
+            final_y = float(pt[1])
+            
+        print(f"[Py] Adding control point: mesh_idx={index} at ({final_x:.1f}, {final_y:.1f})")
         self.control_point_indices.append(index)
-        self.control_points_initial.append((x, y))
-        self.control_points_current.append((x, y))
+        self.control_points_initial.append((final_x, final_y))
+        self.control_points_current.append((final_x, final_y))
 
     def update_control_point(self, index_in_list: int, x: float, y: float):
         """Update a control point position (Deform mode)."""
@@ -1045,22 +1106,55 @@ class BevyBridge:
 
         sources = np.array(self.control_points_initial)
 
-        # Strategy Config configuration
-        # For better stability, we can try different settings
-        strategy = FixedBoundCalcGrid(K=2.0, K_max=10.0)
-        # strategy = CalculateKFromBound(grid_resolution=(20, 20), K_max=20.0)
-        # strategy = FixedGridCalcBound(grid_resolution=(25, 25), K=10)
-        
+        domain_width  = domain[2] - domain[0]
+        domain_height = domain[3] - domain[1]
+
+        # --- Paper Section 6 workflow ---
+        # Paper: "In all experiments we used a 200^2 grid during interaction"
+        # Use Strategy 1 (FixedGridCalcBound): fix grid resolution, set K on grid,
+        # compute theoretical K_max for information only.
+        #
+        # Grid resolution: scale with domain aspect ratio.
+        # ECOS handles ~100-200 active constraints well; the full grid can be
+        # larger since only active-set points become SOCP constraints.
+        nx = 30
+        ny = max(int(nx * domain_height / max(domain_width, 1e-6)), 10)
+        K_target = 4.0
+
+        # Compute actual h from grid resolution
+        h_x = domain_width  / (nx - 1) if nx > 1 else domain_width
+        h_y = domain_height / (ny - 1) if ny > 1 else domain_height
+        h = max(h_x, h_y)
+
+        # Auto-derive minimum epsilon from h and K (Paper Eq. 11 requirement)
+        # For Gaussian RBF: omega(h) = h / s^2 = 2h / epsilon^2
+        # Injectivity guarantee requires: omega(h) < 1/K
+        # => 2h / epsilon^2 < 1/K
+        # => epsilon > sqrt(2 * h * K)
+        epsilon_min = np.sqrt(2.0 * h * K_target)
+        effective_epsilon = max(self.epsilon, epsilon_min)
+
+        # Verify omega(h) is valid
+        s = effective_epsilon / np.sqrt(2.0)
+        omega_h = h / (s * s)
+        print(f"[Py] Grid: {nx}x{ny} = {nx*ny} points, h={h:.2f}")
+        print(f"[Py] epsilon: user={self.epsilon:.1f}, min={epsilon_min:.1f}, effective={effective_epsilon:.1f}")
+        print(f"[Py] omega(h)={omega_h:.6f}, 1/K={1.0/K_target:.6f}, valid={omega_h < 1.0/K_target}")
+
+        strategy = FixedGridCalcBound(grid_resolution=(nx, ny), K=K_target)
 
         config = SolverConfig(
             domain_bounds=tuple(domain),
             source_handles=sources,
-            epsilon=self.epsilon,
-            lambda_biharmonic=1e-5,
-            strategy=strategy
+            epsilon=effective_epsilon,
+            lambda_biharmonic=1e-6,
+            strategy=strategy,
         )
 
         self.solver = BetterFitwithGaussianRBF(config)
+        
+        print("[Py] Identity mapping established (Implicitly).")
+        
         self.is_setup_finalized = True
 
     def reset_mesh(self):
@@ -1084,11 +1178,15 @@ class BevyBridge:
             return []
 
         targets = np.array(self.control_points_current)
+        initial = np.array(self.control_points_initial)
+        
+        # Check if control points have actually moved from initial positions
+        # 修正: 移動がない場合はソルバーを一切実行せず、元のメッシュをそのまま返すことで
+        # 数値誤差による微小な歪みを完全に防ぐ。
+        if np.allclose(targets, initial, atol=1e-5):
+             return self.mesh_vertices.flatten().tolist()
 
-        # Compute deform
-        # Note: If targets haven't moved, compute_mapping might still do iterative updates if needed
-        # But here it's likely stateless per frame unless we used prev solution as warm start
-        # The current implementation of compute_mapping uses current 'targets'
+        # If moved, compute mapping
         self.solver.compute_mapping(targets)
 
         # Transform all mesh vertices

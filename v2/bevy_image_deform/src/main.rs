@@ -339,6 +339,7 @@ async fn python_thread_loop(
                             if let Err(e) = bridge_bound.call_method0("finalize_setup") {
                                 eprintln!("Py Error (Finalize): {}", e);
                             } else {
+                                // Immediately solve to establish identity mapping
                                 should_solve = true;
                             }
                         }
