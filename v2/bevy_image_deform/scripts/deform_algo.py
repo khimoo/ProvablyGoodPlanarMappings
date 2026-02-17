@@ -5,11 +5,11 @@ import cvxpy as cp
 import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Union
 import warnings
 from scipy.spatial import Delaunay
 from PIL import Image
 import os
+from typing import Tuple, Optional, List, cast
 
 # --- Configuration & Strategy ---
 
@@ -141,40 +141,42 @@ class SolverConfig:
 
 class BasisFunction(ABC):
     @abstractmethod
-    def set_centers(self, centers: np.ndarray) -> None:
-        """Set the RBF centers (normally the source handle positions)."""
-        pass
-
-    @abstractmethod
     def evaluate(self, coords: np.ndarray) -> np.ndarray:
-        """
-        Compute Basis Matrix Phi.
-        Args:
-            coords: (M, 2)
-        Returns:
-            Phi: (M, N_basis)
-        """
+        """Compute Basis Matrix Phi (Eq. 3)."""
         pass
 
     @abstractmethod
     def jacobian(self, coords: np.ndarray) -> np.ndarray:
         """
-        Compute Gradient of Basis Matrix.
-        Args:
-            coords: (M, 2)
-        Returns:
-            GradPhi: (M, N_basis, 2)
+        Compute Gradient of Basis Matrix (Eq. 786).
+        Needed for distortion constraints (Eq. 23, 26, 28) and ARAP energy.
         """
         pass
 
     @abstractmethod
-    def compute_omega(self, h: float) -> float:
-        """Calculate modulus of continuity omega(h)."""
+    def hessian(self, coords: np.ndarray) -> np.ndarray:  # <--- 追加
+        """
+        Compute Hessian of Basis Matrix.
+        Needed for Biharmonic regularization energy (Eq. 31, cite: 1002).
+        Returns: (M, N_basis, 2, 2)
+        """
         pass
 
     @abstractmethod
-    def compute_h_strict(self, K: float, K_max: float) -> float:
-        """Calculate grid spacing h to guarantee bounds strictly."""
+    def compute_basis_gradient_modulus(self, h: float) -> float: # <--- 名前をより正確に変更（推奨）
+        """
+        Calculate modulus of continuity omega_nabla_F(h) for the basis itself.
+        Corresponds to Table 1 in the paper.
+        """
+        pass
+
+    @abstractmethod
+    def compute_required_fill_distance(self, K: float, K_max: float, max_coeff_norm: float = 1.0) -> float:
+        """
+        Calculate grid spacing h to guarantee bounds.
+        Corresponds to Eq. 14 & 15.
+        Note: Requires an assumption or bound on |||c||| (max_coeff_norm) as per Eq. 9.
+        """
         pass
 
     @abstractmethod
@@ -189,130 +191,188 @@ class BasisFunction(ABC):
 # --- Gaussian RBF Implementation ---
 
 class GaussianRBF(BasisFunction):
-    def __init__(self, epsilon: float = 100.0):
-        self.epsilon = float(epsilon)
-        # Relationship between epsilon and paper's s: phi(r) = exp(-r^2 / 2s^2)
-        # Implementation uses: exp(-r^2 / epsilon^2)
-        # Thus: 2s^2 = epsilon^2  => s = epsilon / sqrt(2)
-        self.s = self.epsilon / np.sqrt(2.0)
+    def __init__(self, s: float = 1.0):
+        """
+        Initialize Gaussian RBF Basis.
+
+        Args:
+            s (float): The width parameter 's' from the paper (Table 1).
+                       Basis function: phi(r) = exp( -r^2 / (2s^2) )
+        """
+        self.s = float(s)
         self.centers: Optional[np.ndarray] = None
 
     def set_centers(self, centers: np.ndarray) -> None:
         self.centers = np.asarray(centers, dtype=float)
 
-    def _rbf(self, r):
-        # phi(r) = exp( - (r/eps)^2 )
-        return np.exp(-(r / self.epsilon) ** 2)
+    def _get_diff_vectors(self, coords: np.ndarray):
+        """Helper to compute difference vectors (x - c)."""
+        if self.centers is None:
+            raise RuntimeError("GaussianRBF centers not set.")
+
+        x = np.asarray(coords, dtype=float)  # (M, 2)
+        c = self.centers                     # (N, 2)
+
+        # diff: (M, N, 2) -> (x_i - c_j)
+        # Broadcasting: (M, 1, 2) - (1, N, 2)
+        diff = x[:, None, :] - c[None, :, :]
+        return diff
 
     def evaluate(self, coords: np.ndarray) -> np.ndarray:
-        if self.centers is None:
-            raise RuntimeError("GaussianRBF centers not set.")
+        """
+        Compute Phi matrix.
+        Includes Gaussian terms and Affine terms [1, x, y].
+        """
+        diff = self._get_diff_vectors(coords)
 
-        x = np.asarray(coords, dtype=float)    # (M, 2)
-        c = self.centers                       # (N, 2)
-        M = x.shape[0]
-        N = c.shape[0]
+        # r^2 = ||x - c||^2
+        r2 = np.sum(diff**2, axis=2) # (M, N)
 
-        # Pairwise distance squared: |x-c|^2 = |x|^2 + |c|^2 - 2<x,c>
-        # Using broadcasting can be memory intense for very large M*N,
-        # but for typical usage (M~1000-5000, N~10-100) it is fine.
-        x2 = np.sum(x**2, axis=1).reshape((M, 1))
-        c2 = np.sum(c**2, axis=1).reshape((1, N))
-        dist2 = x2 + c2 - 2 * (x @ c.T)
-        dist2 = np.maximum(dist2, 0.0)
-        r = np.sqrt(dist2)
+        # Gaussian: exp( -r^2 / 2s^2 )
+        vals = np.exp(-r2 / (2.0 * self.s**2))
 
-        vals = self._rbf(r)  # (M, N)
-
-        # Affine terms: [1, x, y]
+        # Affine parts: [1, x, y]
+        M = coords.shape[0]
         ones = np.ones((M, 1))
 
-        # Phi = [RBFs, 1, x, y] -> (M, N+3)
-        return np.hstack([vals, ones, x])
+        # Result: [Gaussians, 1, x, y] -> Size: (M, N + 3)
+        return np.hstack([vals, ones, coords])
 
     def jacobian(self, coords: np.ndarray) -> np.ndarray:
-        if self.centers is None:
-            raise RuntimeError("GaussianRBF centers not set.")
+        """
+        Compute Gradient (Jacobian of basis functions).
+        Returns: (M, N_basis, 2)
+        """
+        diff = self._get_diff_vectors(coords) # (M, N, 2)
+        r2 = np.sum(diff**2, axis=2)          # (M, N)
 
-        x = np.asarray(coords, dtype=float) # (M, 2)
-        c = self.centers                    # (N, 2)
-        M = x.shape[0]
-        N = c.shape[0]
+        # phi(r)
+        phi = np.exp(-r2 / (2.0 * self.s**2)) # (M, N)
 
-        # We need gradients with respect to x (input coordinates)
-        # Gradient of RBF part:
-        # phi(r) = exp( - ||x-c||^2 / eps^2 )
-        # d/dx phi = phi * ( -1/eps^2 ) * d/dx ( ||x-c||^2 )
-        #          = phi * ( -1/eps^2 ) * 2(x-c)
-        #          = -2/eps^2 * (x-c) * phi
+        # Gradient of Gaussian:
+        # d/dx phi = phi * (-1/2s^2) * d/dx( ||x-c||^2 )
+        #          = phi * (-1/2s^2) * 2(x-c)
+        #          = -1/s^2 * (x-c) * phi
+        # Shape: (M, N, 2) broadcasted
+        grad_rbf = -(1.0 / self.s**2) * diff * phi[:, :, None]
 
-        # diff: (M, N, 2)  (x_i - c_j)
-        diff = x[:, None, :] - c[None, :, :]
-        r2 = np.sum(diff**2, axis=2) # (M, N)
-        val = np.exp(-r2 / (self.epsilon**2)) # (M, N)
-
-        # grad_rbf: (M, N, 2)
-        grad_rbf = -2.0 / (self.epsilon**2) * diff * val[:, :, None]
-
-        # Gradient of Affine part: [1, x, y]
+        # Gradient of Affine part [1, x, y]
         # d/dx(1) = [0, 0]
         # d/dx(x) = [1, 0]
         # d/dx(y) = [0, 1]
-
+        M = coords.shape[0]
         grad_affine = np.zeros((M, 3, 2))
-        grad_affine[:, 1, 0] = 1.0
-        grad_affine[:, 2, 1] = 1.0
+        grad_affine[:, 1, 0] = 1.0 # Gradient of x w.r.t x
+        grad_affine[:, 2, 1] = 1.0 # Gradient of y w.r.t y
 
-        # GradPhi: (M, N+3, 2)
         return np.concatenate([grad_rbf, grad_affine], axis=1)
 
-    def compute_omega(self, h: float) -> float:
+    def hessian(self, coords: np.ndarray) -> np.ndarray:
         """
-        Paper Table 1: omega(t) approaches t/s^2 for Gaussian kernel.
+        Compute Hessian of Basis Matrix.
+        Required for Biharmonic Energy (Eq. 31).
+        Returns: (M, N_basis, 2, 2)
         """
-        # omega(h) = h / s^2
-        return h / (self.s ** 2)
+        diff = self._get_diff_vectors(coords) # (M, N, 2)
+        r2 = np.sum(diff**2, axis=2)          # (M, N)
+        phi = np.exp(-r2 / (2.0 * self.s**2)) # (M, N)
 
-    def compute_h_strict(self, K: float, K_max: float) -> float:
+        M, N = phi.shape
+
+        # Hessian of Gaussian:
+        # H(phi) = (phi / s^2) * [ ( (x-c)(x-c)^T ) / s^2  -  I ]
+        # See derivation in Appendix A for similar logic
+
+        # 1. Outer product (x-c)(x-c)^T
+        # Shape: (M, N, 2, 2)
+        outer_prod = diff[:, :, :, None] * diff[:, :, None, :]
+
+        # 2. Identity matrix I
+        I = np.eye(2)[None, None, :, :] # Broadcastable to (1, 1, 2, 2)
+
+        # 3. Combine
+        # term_bracket = (outer_prod / s^2) - I
+        term_bracket = (outer_prod / (self.s**2)) - I
+
+        # 4. Multiply by scaling factor (phi / s^2)
+        # phi is (M, N), need (M, N, 1, 1)
+        scale = phi[:, :, None, None] / (self.s**2)
+
+        hess_rbf = scale * term_bracket # (M, N, 2, 2)
+
+        # Hessian of Affine part [1, x, y] is all zeros
+        hess_affine = np.zeros((M, 3, 2, 2))
+
+        return np.concatenate([hess_rbf, hess_affine], axis=1)
+
+    def compute_basis_gradient_modulus(self, h: float) -> float:
         """
-        Calculate grid spacing h to guarantee bounds strictly.
-        Condition: omega(h) <= min( K_max - K, 1/K - 1/K_max )
+        Calculate modulus of continuity omega(h).
+        For Gaussians, Table 1 states: omega(t) = (1/s^2) * t
+        (The paper lists t/s^2 under 'fi' column and mentions L-Lipschitz in Appendix A)
+        """
+        # アフィン部分の勾配は定数（Hessian=0）なので、
+        # 勾配の変動（Modulus）はガウス基底の最大変動に支配されます。
+        return h / (self.s**2)
+
+    def compute_required_fill_distance(self, K: float, K_max: float, max_coeff_norm: float = 1.0) -> float:
+        """
+        Calculate required grid spacing h.
+        Based on Strategy 2 (Eq. 14 & 15).
+
+        omega_global(h) = 2 * |||c||| * omega_basis(h)
+        We need: omega_global(h) <= Threshold
+
+        Thus: 2 * |||c||| * (h / s^2) <= Threshold
+        => h <= Threshold * s^2 / (2 * |||c|||)
         """
         if K_max <= K:
-            warnings.warn("K_max <= K in configuration. Forcing minimal h.")
-            return 0.1 * self.s
-
-        # 1. Upper Bound condition: omega(h) <= K_max - K
-        cond1 = K_max - K
-
-        # 2. Lower Bound (Injectivity) condition: omega(h) <= 1/K - 1/K_max
-        cond2 = (1.0 / K) - (1.0 / K_max)
-
-        # Stricter constraint wins
-        max_omega = min(cond1, cond2)
-
-        if max_omega <= 0:
+             warnings.warn("K_max <= K. Returning minimal spacing.")
              return 0.1 * self.s
 
-        # max_omega = h / s^2  =>  h = max_omega * s^2
-        h = max_omega * (self.s ** 2)
+        # Threshold for Isometric distortion (Eq. 14)
+        # min( K_max - K,  1/K - 1/K_max )
+        val_iso = min(K_max - K, (1.0/K) - (1.0/K_max))
 
-        # Safety factor just in case
-        return h * 0.95
+        # Threshold for Conformal distortion (Eq. 15)
+        # Note: If implementing strictly, one should check which mode is active.
+        # Here we take the safe (smaller) value if we don't know the mode,
+        # or you can split this method. Assuming Isometric for safety:
+        threshold = val_iso
+
+        if threshold <= 0:
+            return 0.1 * self.s
+
+        # omega_basis(h) = h / s^2
+        # Constraint: 2 * max_coeff_norm * (h / s^2) <= threshold
+        # h <= (threshold * s^2) / (2 * max_coeff_norm)
+
+        h_limit = (threshold * (self.s**2)) / (2.0 * max_coeff_norm)
+
+        return h_limit * 0.95  # 5% safety margin
 
     def get_identity_coefficients(self, src_handles: np.ndarray) -> np.ndarray:
+        """
+        Return coefficients c that result in an identity mapping.
+        RBF weights = 0
+        Affine part: u = x, v = y
+        """
         N = src_handles.shape[0]
-        # c shape: (2, N+3)
-        # RBF weights = 0
-        # Affine part: u = x (index N+1), v = y (index N+2)
+        # c shape: (2, N_basis) = (2, N + 3)
         c = np.zeros((2, N + 3), dtype=float)
+
+        # Affine terms are at indices N, N+1, N+2 corresponding to [1, x, y]
+        # u(x,y) = 0*1 + 1*x + 0*y
         c[0, N + 1] = 1.0
+
+        # v(x,y) = 0*1 + 0*x + 1*y
         c[1, N + 2] = 1.0
+
         return c
 
     def get_basis_count(self) -> int:
         if self.centers is None:
-            return 0
+            return 3 # Only affine
         return self.centers.shape[0] + 3
 
 # --- Main Solver Class ---
@@ -344,6 +404,9 @@ class ProvablyGoodPlanarMapping(ABC):
         # 1. Setup Basis (Abstract or via Config in subclass)
         self._setup_basis()
 
+        if self.basis is None:
+            raise RuntimeError("Basis not initialized by _setup_basis()")
+
         # 2. Setup Grid based on Strategy
         self._setup_grid()
 
@@ -356,12 +419,16 @@ class ProvablyGoodPlanarMapping(ABC):
         # 4. Precompute Basis Matrices (Phi, GradPhi) on Grid
         self._precompute_basis_on_grid()
 
+        if self.collocation_grid is None:
+            raise RuntimeError("Collocation grid not setup")
+
         # 5. Initialize Coefficients (Identity)
         self.c = self.basis.get_identity_coefficients(self.config.source_handles)
 
         # 6. Initialize Frames (di)
         # Default direction (1,0) for all grid points
-        M = self.collocation_grid.shape[0]
+        grid = cast(np.ndarray, self.collocation_grid)
+        M = grid.shape[0]
         self.di = np.tile(np.array([1.0, 0.0]), (M, 1))
 
         # 7. K_high, K_low thresholds (Paper Section 5)
@@ -508,9 +575,11 @@ class ProvablyGoodPlanarMapping(ABC):
         if self.collocation_grid is None:
             raise RuntimeError("Grid not setup.")
 
+        grid = cast(np.ndarray, self.collocation_grid)
+
         print("[Solver] Precomputing basis functions on grid...")
-        self.Phi = self.basis.evaluate(self.collocation_grid)
-        self.GradPhi = self.basis.jacobian(self.collocation_grid)
+        self.Phi = self.basis.evaluate(grid)
+        self.GradPhi = self.basis.jacobian(grid)
 
         # Compute Biharmonic Regularization Matrix
         # Algorithm:
@@ -520,10 +589,10 @@ class ProvablyGoodPlanarMapping(ABC):
 
         try:
             # Using Delaunay for generic grid connectivity
-            tri = Delaunay(self.collocation_grid)
+            tri = Delaunay(grid)
             simplices = tri.simplices
 
-            m = self.collocation_grid.shape[0]
+            m = grid.shape[0]
             # Adjacency
             # Note: This loop can be slow for very large grids in Python.
             # But for solver grids (e.g. 50x50=2500) it is fast enough.
@@ -641,7 +710,7 @@ class ProvablyGoodPlanarMapping(ABC):
         points: (K, 2)
         returns: (K, 2)
         """
-        if self.c is None:
+        if self.c is None or self.basis is None:
             return points # Identity if not initialized
 
         Phi_points = self.basis.evaluate(points) # (K, N+3)
@@ -653,6 +722,9 @@ class ProvablyGoodPlanarMapping(ABC):
 
     def _update_frames(self):
         """Update global frames (di) based on CURRENT coefficients c."""
+        if self.c is None or self.GradPhi is None:
+            return
+
         # Calculate gradients
         G = self.GradPhi # (M, N+3, 2)
         grad_u = np.einsum('j,mjk->mk', self.c[0], G)
@@ -679,13 +751,17 @@ class ProvablyGoodPlanarMapping(ABC):
 
         self.di[mask] = fz_vecs[mask] / norm_fz[mask]
 
-    def _compute_distortion_on_grid(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_distortion_on_grid(self) -> Tuple[np.ndarray, dict]:
         """
         Compute distortion K at each grid point.
         Returns:
            K_vals: (M,)
            extras: dict
         """
+        if self.c is None or self.GradPhi is None:
+            # Return dummy values if not initialized
+            return np.array([]), {}
+
         # G: (M, N+3, 2)
         G = self.GradPhi
 
@@ -774,13 +850,16 @@ class ProvablyGoodPlanarMapping(ABC):
         Retrieve frames d_i for specified indices.
         Now simply returns the stored self.di which are updated only when added to active set.
         """
-        if not indices:
+        if not indices or self.di is None:
             return np.zeros((0, 2))
 
         idx_arr = np.array(indices)
         return self.di[idx_arr]
 
     def _optimize_step(self, target_handles: np.ndarray):
+        if self.basis is None:
+            return
+
         # CVXPY Setup
         N_basis = self.basis.get_basis_count() # N + 3 usually
         c_var = cp.Variable((2, N_basis))
@@ -807,7 +886,7 @@ class ProvablyGoodPlanarMapping(ABC):
         position_loss = cp.sum([cp.norm(diff[:, i], 2) for i in range(N_handles)])
 
         # 2. Distortion Constraints (Active Set)
-        if self.activated_indices:
+        if self.activated_indices and self.GradPhi is not None:
             idx_list = self.activated_indices
             G_sub = self.GradPhi[idx_list] # (K, N+3, 2)
 
@@ -904,7 +983,7 @@ class ProvablyGoodPlanarMapping(ABC):
           - K_max_theoretical: theoretical global upper bound
           - injectivity_guaranteed: bool
         """
-        if self.c is None:
+        if self.c is None or self.basis is None:
             return {"error": "No coefficients computed"}
 
         # |||c||| = max over rows of sum of absolute values
@@ -939,10 +1018,6 @@ class ProvablyGoodPlanarMapping(ABC):
         # We need to update ALL d_i to match the new configuration
         # so that when the user starts the NEXT drag operation,
         # the initial linearization frames are correct.
-
-        G = self.GradPhi # (M, N+3, 2)
-        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
-        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
 
         # This method is effectively deprecated since we use _update_frames() in the loop.
         # But keeping it empty or calling _update_frames() is fine.
@@ -1083,7 +1158,7 @@ class BevyBridge:
         self.solver = None
         self.is_setup_finalized = False
 
-        return (flat_verts, valid_indices, flat_uvs, float(w), float(h_img))
+        return (flat_verts, valid_indices, flat_uvs, int(w), int(h_img))
 
     def initialize_mesh_from_data(self, vertices: List[float], indices: List[int]):
         """
@@ -1199,7 +1274,7 @@ class BevyBridge:
         strategy = FixedGridCalcBound(grid_resolution=(nx, ny), K=K_target)
 
         config = SolverConfig(
-            domain_bounds=tuple(domain),
+            domain_bounds=(float(domain[0]), float(domain[1]), float(domain[2]), float(domain[3])),
             source_handles=sources,
             epsilon=effective_epsilon,
             lambda_biharmonic=1e-6,
@@ -1230,6 +1305,9 @@ class BevyBridge:
         if not self.is_setup_finalized or self.solver is None:
             if self.mesh_vertices is not None:
                 return self.mesh_vertices.flatten().tolist()
+            return []
+
+        if self.mesh_vertices is None:
             return []
 
         targets = np.array(self.control_points_current)
