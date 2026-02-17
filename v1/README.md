@@ -9,7 +9,7 @@ typstの数式をmarkdownに直せてないです
 
 ## 実行方法
 ```shell
-nix run github:khimoo/ProvablyGoodPlanarMappings
+nix run github:khimoo/ProvablyGoodPlanarMappings?dir=v1
 ```
 リポジトリをcloneしてnix runでも可
 
