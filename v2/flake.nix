@@ -82,6 +82,25 @@
             export WGPU_BACKEND=vulkan
           '';
         };
+
+        apps.default = {
+          type = "app";
+          program = "${pkgs.writeShellScriptBin "run-app" ''
+            export PYO3_PYTHON="${myPython}/bin/python"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath buildInputs}"
+            export WGPU_BACKEND=vulkan
+            
+            # Cargo.toml の位置を探して実行
+            if [ -f "Cargo.toml" ]; then
+               ${rustToolchain}/bin/cargo run
+            elif [ -f "bevy_image_deform/Cargo.toml" ]; then
+               ${rustToolchain}/bin/cargo run --manifest-path bevy_image_deform/Cargo.toml
+            else
+               echo "Error: Cargo.toml not found in current directory or bevy_image_deform/"
+               exit 1
+            fi
+          ''}/bin/run-app";
+        };
       }
     );
 }
