@@ -86,21 +86,18 @@
         apps.default = {
           type = "app";
           program = "${pkgs.writeShellScriptBin "run-app" ''
-            export PYO3_PYTHON="${myPython}/bin/python"
-            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath buildInputs}"
-            export WGPU_BACKEND=vulkan
+            # nix developと同じ環境で cargo run を実行する
             
-            # Cargo.toml の位置を探して実行
-            if [ -f "Cargo.toml" ]; then
-               ${rustToolchain}/bin/cargo run
-            elif [ -f "bevy_image_deform/Cargo.toml" ]; then
-               ${rustToolchain}/bin/cargo run --manifest-path bevy_image_deform/Cargo.toml
-            else
-               echo "Error: Cargo.toml not found in current directory or bevy_image_deform/"
-               exit 1
-            fi
+            # v2ディレクトリ直下での実行を前提とするため、パスを固定
+            CMD="cargo run --manifest-path bevy_image_deform/Cargo.toml"
+
+            # nix develop の環境内でコマンドを実行
+            # 現在のディレクトリの flake.nix を参照します
+            nix develop --command bash -c "$CMD"
           ''}/bin/run-app";
         };
       }
+    );
+}
     );
 }
