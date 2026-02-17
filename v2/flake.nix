@@ -89,7 +89,7 @@
             # nix developと同じ環境で cargo run を実行する
             
             # v2ディレクトリ直下での実行を前提とするため、パスを固定
-            CMD="cargo run --manifest-path bevy_image_deform/Cargo.toml"
+            CMD="cd ./bevy_image_deform && cargo run"
 
             # nix develop の環境内でコマンドを実行
             # 現在のディレクトリの flake.nix を参照します
