@@ -133,7 +133,7 @@ class SolverConfig:
 
     lambda_biharmonic: float = 1e-4  # Regularization weight
 
-    fps_k: int = 50  # Number of permanently active points Z'' (Farthest Point Sampling)
+    fps_k: int = 4  # Number of permanently active points Z'' (Farthest Point Sampling)
                       # Paper Section 5: "keep a small subset of equally spread collocation
                       # points always active" to stabilize against fast handle movement.
 
@@ -792,11 +792,11 @@ class ProvablyGoodPlanarMapping(ABC):
         Phi_src = self.basis.evaluate(self.config.source_handles)
 
         # Objective: Position fitting
-        # sum |c * phi - target|^2
-        diff = c_var @ Phi_src.T - target_handles.T # (2, N)
-        # L2 norm per point:
-        # We want simple L2 minimization. cp.sum_squares(diff)
-        position_loss = cp.sum_squares(diff)
+        # Paper Eq.(29): E_pos = sum_l ||f(p_l) - q_l||_2
+        # Sum of Euclidean norms (SOCP-representable), no scaling.
+        diff = c_var @ Phi_src.T - target_handles.T # (2, N_handles)
+        N_handles = diff.shape[1]
+        position_loss = cp.sum([cp.norm(diff[:, i], 2) for i in range(N_handles)])
 
         # 2. Distortion Constraints (Active Set)
         if self.activated_indices:
@@ -848,18 +848,20 @@ class ProvablyGoodPlanarMapping(ABC):
                 # Since we enforce Sigma_2 >= 1/K > 0 and Sigma_1 <= K, det(J) > 0 is guaranteed.
 
         # 3. Regularization Term
+        # Paper Eq.(31): Biharmonic energy applied to full coefficient vector.
+        # H_reg is (N_basis, N_basis). Affine columns naturally have
+        # near-zero entries due to zero second derivatives, so including
+        # them is safe and keeps dimensions consistent.
         reg_term = 0
         if self.H_reg is not None and self.config.lambda_biharmonic > 0:
-            # H_reg is (N_basis, N_basis)
-            # Typically applied only to RBF part (first N terms)?
-            # V1 logic applied to RBF only.
-            N = self.config.source_handles.shape[0]
-            H_rbf = self.H_reg[:N, :N]
+            H_full = self.H_reg
+            # Ensure positive semi-definiteness for SOCP solver
+            eigvals = np.linalg.eigvalsh(H_full)
+            min_eig = np.min(eigvals)
+            if min_eig < -1e-10:
+                H_full = H_full + (abs(min_eig) + 1e-8) * np.eye(H_full.shape[0])
 
-            c_rbf_u = c_var[0, :N]
-            c_rbf_v = c_var[1, :N]
-
-            quad = cp.quad_form(c_rbf_u, H_rbf) + cp.quad_form(c_rbf_v, H_rbf)
+            quad = cp.quad_form(c_var[0], H_full) + cp.quad_form(c_var[1], H_full)
             reg_term = self.config.lambda_biharmonic * quad
 
         objective = cp.Minimize(position_loss + reg_term)
@@ -877,6 +879,52 @@ class ProvablyGoodPlanarMapping(ABC):
             self.c = c_var.value
         else:
             warnings.warn(f"Optimization failed: {problem.status}")
+
+    def verify_global_bound(self) -> dict:
+        """
+        Post-hoc verification (Paper Eq. 9, 11).
+        Compute actual omega using current coefficients and report
+        whether the theoretical global distortion bound holds.
+
+        Paper Eq.(9):  omega = 2 * |||c||| * omega_basis(h)
+        Paper Eq.(11): D_iso(x) <= max( K + omega, 1/(1/K - omega) )
+
+        Returns dict with:
+          - c_norm: |||c||| (max row-sum of absolute coefficient values)
+          - omega_basis: omega_nablaF(h) from the basis function
+          - omega_full: 2 * |||c||| * omega_basis(h)
+          - K_on_grid: max distortion observed on collocation points
+          - K_max_theoretical: theoretical global upper bound
+          - injectivity_guaranteed: bool
+        """
+        if self.c is None:
+            return {"error": "No coefficients computed"}
+
+        # |||c||| = max over rows of sum of absolute values
+        c_norm = float(np.max(np.sum(np.abs(self.c), axis=1)))
+
+        omega_basis = self.basis.compute_omega(self.h_grid)
+        omega_full = 2.0 * c_norm * omega_basis
+
+        K_vals, _ = self._compute_distortion_on_grid()
+        K_on_grid = float(np.max(K_vals))
+
+        # Eq.(11): D_iso(x) <= max( K + omega, 1/(1/K - omega) )
+        K_max_theo = float('inf')
+        injective = False
+        if K_on_grid > 1e-12 and (1.0 / K_on_grid) > omega_full:
+            K_max_theo = max(K_on_grid + omega_full,
+                             1.0 / (1.0 / K_on_grid - omega_full))
+            injective = True
+
+        return {
+            "c_norm": c_norm,
+            "omega_basis": float(omega_basis),
+            "omega_full": float(omega_full),
+            "K_on_grid": K_on_grid,
+            "K_max_theoretical": K_max_theo,
+            "injectivity_guaranteed": injective,
+        }
 
     def _postprocess(self):
         """Update global frames (di) based on new coefficients."""
@@ -1119,7 +1167,7 @@ class BevyBridge:
         # larger since only active-set points become SOCP constraints.
         nx = 30
         ny = max(int(nx * domain_height / max(domain_width, 1e-6)), 10)
-        K_target = 4.0
+        K_target = 4
 
         # Compute actual h from grid resolution
         h_x = domain_width  / (nx - 1) if nx > 1 else domain_width
@@ -1147,7 +1195,7 @@ class BevyBridge:
             domain_bounds=tuple(domain),
             source_handles=sources,
             epsilon=effective_epsilon,
-            lambda_biharmonic=1e-6,
+            lambda_biharmonic=1e-1,
             strategy=strategy,
         )
 
