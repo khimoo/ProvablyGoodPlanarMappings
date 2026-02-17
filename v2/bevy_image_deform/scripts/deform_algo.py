@@ -19,7 +19,7 @@ class DistortionStrategyConfig(ABC):
     @abstractmethod
     def compute_h(self, basis: 'BasisFunction') -> float:
         """
-        Calculate required grid spacing h based on strategy. 
+        Calculate required grid spacing h based on strategy.
         Returns -1.0 if h is determined by grid_resolution.
         """
         pass
@@ -68,11 +68,11 @@ class FixedGridCalcBound(DistortionStrategyConfig):
     def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
         # Calculate theoretical K_max for information
         omega = basis.compute_omega(h)
-        
+
         # Valid range for K_max given K and omega?
         # K_max >= K + omega
         # K_max >= 1 / (1/K - omega)
-        
+
         K_max_est = self.K + omega
         if (1.0/self.K) > omega:
              K_max_est = max(K_max_est, 1.0 / (1.0/self.K - omega))
@@ -97,23 +97,23 @@ class CalculateKFromBound(DistortionStrategyConfig):
 
     def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
         omega = basis.compute_omega(h)
-        
+
         # 1. Condition derived from K_max >= K + omega
         # => K <= K_max - omega
         cond1 = self.K_max - omega
-        
+
         # 2. Condition derived from K_max >= 1 / (1/K - omega)  [Injectivity]
         # => 1/K - omega >= 1/K_max
         # => 1/K >= 1/K_max + omega
         # => K <= 1 / (1/K_max + omega)
         cond2 = 1.0 / ((1.0 / self.K_max) + omega)
-        
+
         K_target = min(cond1, cond2)
-        
+
         if K_target < 1.0:
             warnings.warn(f"[Strategy 3] Impossible to guarantee K_max={self.K_max} with h={h:.4f} (omega={omega:.4f}). Grid too coarse.")
             K_target = 1.001 # Minimal valid K
-            
+
         print(f"[Strategy 3] To guarantee K_max <= {self.K_max}, enforcing K <= {K_target:.4f} on grid (h={h:.4f})")
         return (K_target, 1.0 / K_target)
 
@@ -123,7 +123,7 @@ class SolverConfig:
     """Main configuration for the Solver."""
     domain_bounds: Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
     source_handles: np.ndarray  # (N, 2) Initial positions of control points
- 
+
     # Strategy pattern instance
     # デフォルト値を設定して引数順序エラー (non-default argument follows default argument) を回避
     # リファクタリング計画に従い、Strategy 2 (Guarantee Mode) をデフォルトとする。
@@ -287,10 +287,10 @@ class GaussianRBF(BasisFunction):
 
         # 2. Lower Bound (Injectivity) condition: omega(h) <= 1/K - 1/K_max
         cond2 = (1.0 / K) - (1.0 / K_max)
-        
+
         # Stricter constraint wins
         max_omega = min(cond1, cond2)
-        
+
         if max_omega <= 0:
              return 0.1 * self.s
 
@@ -471,11 +471,11 @@ class ProvablyGoodPlanarMapping(ABC):
 
             nx = int(np.ceil(width / h)) + 1
             ny = int(np.ceil(height / h)) + 1
-            
+
             # Recalculate actual h to match domain
-            # Or assume h is strict upper bound. 
+            # Or assume h is strict upper bound.
             # We use the computed h for grid generation which implies actual spacing.
-            
+
             # We removed the clamping logic here to respect the theoretical guarantees.
             # If the grid is too large, it might be slow, but it will be correct.
 
@@ -577,6 +577,16 @@ class ProvablyGoodPlanarMapping(ABC):
 
             self.H_reg = 0.5 * (H + H.T) # Ensure symmetry
 
+            # 基底は [RBF_0, ..., RBF_N, 1, x, y] の順で並んでいるため、
+            # 後ろの3つがアフィン項に対応します。
+            # これらをゼロにすることで、アフィン変換にはペナルティがかからなくなります。
+
+            if self.H_reg is not None:
+                # 最後の3行を0に
+                self.H_reg[-3:, :] = 0.0
+                # 最後の3列を0に
+                self.H_reg[:, -3:] = 0.0
+
         except Exception as e:
             warnings.warn(f"Failed to compute regularization matrix: {e}. Regularization disabled.")
             self.H_reg = None
@@ -584,12 +594,12 @@ class ProvablyGoodPlanarMapping(ABC):
     def compute_mapping(self, target_handles: np.ndarray):
         """
         Main Loop (Algorithm 1 from Paper):
-        
+
         Paper Algorithm 1 order:
           Initialization: Evaluate D(z), find Z_max, update Z' (add/remove)
           Optimization:   Solve SOCP to find c
           Postprocessing: Update d_i using Eq. 27
-        
+
         Loop: Active Set update → Optimize → Frame update
         """
         max_iterations = 10
@@ -662,11 +672,11 @@ class ProvablyGoodPlanarMapping(ABC):
         # If |fz| ~ 0, we simply keep the previous di or default (1,0)
         # We only update where norm is sufficient.
         mask = (norm_fz > 1e-12).flatten()
-        
+
         # In a strict implementation, we might not update di for points NOT in the active set,
         # but updating all helps for future activations.
         # Crucially, we MUST update di for Active Set points to rotate the cut plane.
-        
+
         self.di[mask] = fz_vecs[mask] / norm_fz[mask]
 
     def _compute_distortion_on_grid(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -700,15 +710,17 @@ class ProvablyGoodPlanarMapping(ABC):
         abs_fz  = np.sqrt(re_fz**2 + im_fz**2)
         abs_fzb = np.sqrt(re_fzb**2 + im_fzb**2)
 
-        eps = 1e-12
-        mu = abs_fzb / np.maximum(abs_fz, eps)
+        sigma1 = abs_fz + abs_fzb  # Sigma
+        sigma2 = abs_fz - abs_fzb  # sigma
 
-        # K = (1+|mu|) / (1-|mu|)
-        # Clamp mu to 1-eps to avoid division by zero
-        mu_clamped = np.minimum(mu, 1.0 - 1e-6)
-        K_vals = (1.0 + mu_clamped) / (1.0 - mu_clamped)
+        # D_iso = max(Sigma, 1/sigma)
+        # sigma2がゼロに近い、あるいは負（位相反転）の場合の対策が必要
+        sigma2_safe = np.maximum(sigma2, 1e-6)
 
-        return K_vals, {"abs_fz": abs_fz, "abs_fzb": abs_fzb, "mu": mu}
+        # 論文 Eq(10)や定義に従い、拡大と縮小の両方をペナルティとする
+        K_vals = np.maximum(sigma1, 1.0 / sigma2_safe)
+
+        return K_vals, {"abs_fz": abs_fz, "abs_fzb": abs_fzb}
 
     def _update_active_set(self) -> int:
         """
@@ -768,10 +780,6 @@ class ProvablyGoodPlanarMapping(ABC):
         idx_arr = np.array(indices)
         return self.di[idx_arr]
 
-    def _optimize_step_DISABLED(self, target_handles: np.ndarray):
-        # Renamed old method to avoid confusion, though logic is mostly same
-        pass
-
     def _optimize_step(self, target_handles: np.ndarray):
         # CVXPY Setup
         N_basis = self.basis.get_basis_count() # N + 3 usually
@@ -805,7 +813,7 @@ class ProvablyGoodPlanarMapping(ABC):
 
             # Retrieve fixed local frames di (from start of frame / last valid configuration).
             # We use the cached self.di which is updated only in _postprocess.
-            # This ensures we are always linearizing around a valid (unfolded) state, 
+            # This ensures we are always linearizing around a valid (unfolded) state,
             # forcing the solver to "unfold" if it tries to violate injectivity.
 
             di_local = self._compute_di_local(idx_list) # (K, 2)
@@ -869,8 +877,7 @@ class ProvablyGoodPlanarMapping(ABC):
         problem = cp.Problem(objective, constraints)
 
         try:
-            # ECOS is standard, but sometimes CLARABEL or SCS is available/better.
-            problem.solve(solver=cp.ECOS, verbose=False)
+            problem.solve(solver=cp.CLARABEL, verbose=False)
         except Exception as e:
             warnings.warn(f"Solver failed: {e}")
             return
@@ -930,9 +937,9 @@ class ProvablyGoodPlanarMapping(ABC):
         """Update global frames (di) based on new coefficients."""
         # For visualization or next frame warm start visualisation
         # We need to update ALL d_i to match the new configuration
-        # so that when the user starts the NEXT drag operation, 
+        # so that when the user starts the NEXT drag operation,
         # the initial linearization frames are correct.
-        
+
         G = self.GradPhi # (M, N+3, 2)
         grad_u = np.einsum('j,mjk->mk', self.c[0], G)
         grad_v = np.einsum('j,mjk->mk', self.c[1], G)
@@ -961,7 +968,7 @@ class BevyBridge:
         # Data stored during setup
         self.mesh_vertices: Optional[np.ndarray] = None # (N_verts, 2)
         self.mesh_indices: Optional[List[int]] = None
-        
+
         self.epsilon: float = 100.0  # Default epsilon, updated by load_image
         self.image_width: int = 0
         self.image_height: int = 0
@@ -982,13 +989,13 @@ class BevyBridge:
             raise FileNotFoundError(f"Image not found: {image_path}")
 
         self.epsilon = float(epsilon)
-        
+
         # 1. Load Image
         img = Image.open(image_path)
         w, h_img = img.size
         self.image_width = w
         self.image_height = h_img
-        
+
         # Access pixel data (RGBA)
         if img.mode != 'RGBA':
             img = img.convert('RGBA')
@@ -1000,13 +1007,13 @@ class BevyBridge:
         # for good visual quality while keeping triangle count manageable.
         max_dim = max(w, h_img)
         stride = max(max_dim // 40, 3)  # At least 3px to avoid degenerate triangles
-            
+
         print(f"[Py] Using sampling stride: {stride} px (image: {w}x{h_img})")
 
         # 3. Sample Points
         points = []
         uvs = []
-        
+
         # Grid sampling
         for y in range(0, h_img, stride):
             for x in range(0, w, stride):
@@ -1018,18 +1025,18 @@ class BevyBridge:
                     # Let's map 1:1 to Image Coordinates for simpler debugging first?
                     # NO, the Plan says "Internal data unified to Solver coordinates".
                     # And Solver coordinates usually match the domain.
-                    # Let's use Image Coordinates internally (0,0 is Top-Left) 
+                    # Let's use Image Coordinates internally (0,0 is Top-Left)
                     # because RBF doesn't care about origin, and it's easier to map back to UV.
                     # The Rust side expects Bevy World Coordinates for display?
                     # Actually, the previous implementation did the conversion in Rust.
                     # "Internal data stored in Solver mode" -> Let's keep Image Coordinates (0..W, 0..H)
                     # and let Rust transform to World for Bevy display.
-                    
+
                     points.append([float(x), float(y)])
                     uvs.append([x / w, 1.0 - (y / h_img)]) # UV (0..1), V is 1 at Top if we want? No, usually V=1 is Top in Bevy?
-                    # Bevy: UV (0,0) is bottom-left? 
-                    # Standard: (0,0) Top-Left often in textures. 
-                    # Bevy standard: (0,0) Top-Left or Bottom-Left? 
+                    # Bevy: UV (0,0) is bottom-left?
+                    # Standard: (0,0) Top-Left often in textures.
+                    # Bevy standard: (0,0) Top-Left or Bottom-Left?
                     # In main.rs: uvs.push([x as f32 / width_f, 1.0 - (y as f32 / height_f)]);
                     # This implies V=0 at Top (because y=0 -> V=1). Wait.
                     # y=0(Top) -> 1.0 - 0 = 1.0. So V=1 is Top.
@@ -1037,7 +1044,7 @@ class BevyBridge:
                     # This matches OpenGL/Bevy usually (0,0) is Bottom-Left.
 
         points_np = np.array(points, dtype=np.float64)
-        print(f"[Py] Sampled {len(points)} points.") 
+        print(f"[Py] Sampled {len(points)} points.")
 
         if len(points) < 3:
              print("[Py] Not enough points to triangulate.")
@@ -1045,14 +1052,14 @@ class BevyBridge:
 
         # 4. Delaunay Triangulation
         tri = Delaunay(points_np)
-        
+
         # 5. Filter Triangles (Centroid check)
         valid_indices = []
         for simplex in tri.simplices: # simplex is (3,) indices
             pts = points_np[simplex]
             centroid = np.mean(pts, axis=0) # (2,)
             cx, cy = int(centroid[0]), int(centroid[1])
-            
+
             # Check bounds
             if 0 <= cx < w and 0 <= cy < h_img:
                 # Check alpha
@@ -1062,11 +1069,11 @@ class BevyBridge:
                         valid_indices.extend(simplex)
                 except IndexError:
                     pass
-        
+
         # Prepare Return Data
         flat_verts = points_np.flatten().tolist()
         flat_uvs = np.array(uvs).flatten().tolist()
-        
+
         # Store locally
         self.mesh_vertices = points_np
         self.mesh_indices = valid_indices
@@ -1075,7 +1082,7 @@ class BevyBridge:
         self.control_points_current = []
         self.solver = None
         self.is_setup_finalized = False
-        
+
         return (flat_verts, valid_indices, flat_uvs, float(w), float(h_img))
 
     def initialize_mesh_from_data(self, vertices: List[float], indices: List[int]):
@@ -1117,7 +1124,7 @@ class BevyBridge:
             pt = self.mesh_vertices[index]
             final_x = float(pt[0])
             final_y = float(pt[1])
-            
+
         print(f"[Py] Adding control point: mesh_idx={index} at ({final_x:.1f}, {final_y:.1f})")
         self.control_point_indices.append(index)
         self.control_points_initial.append((final_x, final_y))
@@ -1195,14 +1202,14 @@ class BevyBridge:
             domain_bounds=tuple(domain),
             source_handles=sources,
             epsilon=effective_epsilon,
-            lambda_biharmonic=1e-1,
+            lambda_biharmonic=1e-6,
             strategy=strategy,
         )
 
         self.solver = BetterFitwithGaussianRBF(config)
-        
+
         print("[Py] Identity mapping established (Implicitly).")
-        
+
         self.is_setup_finalized = True
 
     def reset_mesh(self):
@@ -1227,7 +1234,7 @@ class BevyBridge:
 
         targets = np.array(self.control_points_current)
         initial = np.array(self.control_points_initial)
-        
+
         # Check if control points have actually moved from initial positions
         # 修正: 移動がない場合はソルバーを一切実行せず、元のメッシュをそのまま返すことで
         # 数値誤差による微小な歪みを完全に防ぐ。
