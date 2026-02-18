@@ -11,132 +11,6 @@ from PIL import Image
 import os
 from typing import Tuple, Optional, List, cast
 
-# --- Configuration & Strategy ---
-
-@dataclass
-class DistortionStrategyConfig(ABC):
-    """Base configuration for distortion control strategy (Section 4 of Paper)."""
-    @abstractmethod
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        """
-        Calculate required grid spacing h based on strategy.
-        Returns -1.0 if h is determined by grid_resolution.
-        """
-        pass
-
-    @abstractmethod
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        """
-        Calculate solver constraints (K_upper, Sigma_lower) to enforce on grid.
-        Args:
-           basis: The basis function (provides omega(h)).
-           h: The actual grid spacing used.
-        Returns:
-           (K_upper, Sigma_lower)
-        """
-        pass
-
-@dataclass
-class FixedBoundCalcGrid(DistortionStrategyConfig):
-    """
-    Strategy 2 (Guarantee Mode):
-    Given target K on grid and required global K_max, calculate required grid spacing h.
-    Satisfies: omega(h) <= min( K_max - K, 1/K - 1/K_max )
-    """
-    K: float = 2.0       # Target bound for distortion on grid
-    K_max: float = 10.0  # Guaranteed upper bound for distortion everywhere
-
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        return basis.compute_h_strict(self.K, self.K_max)
-
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        # For Strategy 2, K is fixed and given.
-        return (self.K, 1.0 / self.K)
-
-@dataclass
-class FixedGridCalcBound(DistortionStrategyConfig):
-    """
-    Strategy 1 (Fixed Grid Mode):
-    Given grid (h) and target K on grid, calculate resulting K_max (informative).
-    """
-    grid_resolution: Tuple[int, int]
-    K: float = 2.0
-
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        return -1.0
-
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        # Calculate theoretical K_max for information
-        omega = basis.compute_omega(h)
-
-        # Valid range for K_max given K and omega?
-        # K_max >= K + omega
-        # K_max >= 1 / (1/K - omega)
-
-        K_max_est = self.K + omega
-        if (1.0/self.K) > omega:
-             K_max_est = max(K_max_est, 1.0 / (1.0/self.K - omega))
-        else:
-             K_max_est = float('inf')
-
-        print(f"[Strategy 1] With h={h:.4f}, K={self.K} on grid => Theoretical Global K_max <= {K_max_est:.4f}")
-        return (self.K, 1.0 / self.K)
-
-@dataclass
-class CalculateKFromBound(DistortionStrategyConfig):
-    """
-    Strategy 3 (Calculation of K Mode):
-    Given grid (h) and target global K_max, calculate stricter K required on grid.
-    Satisfies: K <= min( K_max - omega(h), 1 / (1/K_max + omega(h)) )
-    """
-    grid_resolution: Tuple[int, int]
-    K_max: float = 10.0
-
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        return -1.0
-
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        omega = basis.compute_omega(h)
-
-        # 1. Condition derived from K_max >= K + omega
-        # => K <= K_max - omega
-        cond1 = self.K_max - omega
-
-        # 2. Condition derived from K_max >= 1 / (1/K - omega)  [Injectivity]
-        # => 1/K - omega >= 1/K_max
-        # => 1/K >= 1/K_max + omega
-        # => K <= 1 / (1/K_max + omega)
-        cond2 = 1.0 / ((1.0 / self.K_max) + omega)
-
-        K_target = min(cond1, cond2)
-
-        if K_target < 1.0:
-            warnings.warn(f"[Strategy 3] Impossible to guarantee K_max={self.K_max} with h={h:.4f} (omega={omega:.4f}). Grid too coarse.")
-            K_target = 1.001 # Minimal valid K
-
-        print(f"[Strategy 3] To guarantee K_max <= {self.K_max}, enforcing K <= {K_target:.4f} on grid (h={h:.4f})")
-        return (K_target, 1.0 / K_target)
-
-
-@dataclass
-class SolverConfig:
-    """Main configuration for the Solver."""
-    domain_bounds: Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
-    source_handles: np.ndarray  # (N, 2) Initial positions of control points
-
-    # Strategy pattern instance
-    # デフォルト値を設定して引数順序エラー (non-default argument follows default argument) を回避
-    # リファクタリング計画に従い、Strategy 2 (Guarantee Mode) をデフォルトとする。
-    strategy: 'DistortionStrategyConfig' = field(default_factory=lambda: FixedBoundCalcGrid())
-
-    epsilon: float = 100.0     # Width parameter for Gaussian RBF
-
-    lambda_biharmonic: float = 1e-4  # Regularization weight
-
-    fps_k: int = 4  # Number of permanently active points Z'' (Farthest Point Sampling)
-                      # Paper Section 5: "keep a small subset of equally spread collocation
-                      # points always active" to stabilize against fast handle movement.
-
 # --- Basis Function Interface ---
 
 class BasisFunction(ABC):
@@ -167,15 +41,6 @@ class BasisFunction(ABC):
         """
         Calculate modulus of continuity omega_nabla_F(h) for the basis itself.
         Corresponds to Table 1 in the paper.
-        """
-        pass
-
-    @abstractmethod
-    def compute_required_fill_distance(self, K: float, K_max: float, max_coeff_norm: float = 1.0) -> float:
-        """
-        Calculate grid spacing h to guarantee bounds.
-        Corresponds to Eq. 14 & 15.
-        Note: Requires an assumption or bound on |||c||| (max_coeff_norm) as per Eq. 9.
         """
         pass
 
@@ -315,42 +180,6 @@ class GaussianRBF(BasisFunction):
         # 勾配の変動（Modulus）はガウス基底の最大変動に支配されます。
         return h / (self.s**2)
 
-    def compute_required_fill_distance(self, K: float, K_max: float, max_coeff_norm: float = 1.0) -> float:
-        """
-        Calculate required grid spacing h.
-        Based on Strategy 2 (Eq. 14 & 15).
-
-        omega_global(h) = 2 * |||c||| * omega_basis(h)
-        We need: omega_global(h) <= Threshold
-
-        Thus: 2 * |||c||| * (h / s^2) <= Threshold
-        => h <= Threshold * s^2 / (2 * |||c|||)
-        """
-        if K_max <= K:
-             warnings.warn("K_max <= K. Returning minimal spacing.")
-             return 0.1 * self.s
-
-        # Threshold for Isometric distortion (Eq. 14)
-        # min( K_max - K,  1/K - 1/K_max )
-        val_iso = min(K_max - K, (1.0/K) - (1.0/K_max))
-
-        # Threshold for Conformal distortion (Eq. 15)
-        # Note: If implementing strictly, one should check which mode is active.
-        # Here we take the safe (smaller) value if we don't know the mode,
-        # or you can split this method. Assuming Isometric for safety:
-        threshold = val_iso
-
-        if threshold <= 0:
-            return 0.1 * self.s
-
-        # omega_basis(h) = h / s^2
-        # Constraint: 2 * max_coeff_norm * (h / s^2) <= threshold
-        # h <= (threshold * s^2) / (2 * max_coeff_norm)
-
-        h_limit = (threshold * (self.s**2)) / (2.0 * max_coeff_norm)
-
-        return h_limit * 0.95  # 5% safety margin
-
     def get_identity_coefficients(self, src_handles: np.ndarray) -> np.ndarray:
         """
         Return coefficients c that result in an identity mapping.
@@ -375,1170 +204,195 @@ class GaussianRBF(BasisFunction):
             return 3 # Only affine
         return self.centers.shape[0] + 3
 
-# --- データ構造定義 (I/O) ---
+# --- Strategy 2 Implementation (Grid & Fill Distance Manager) ---
 
-@dataclass
-class DeformInput:
-    """フロントエンドから受け取る入力データ"""
-    boundary_polygon: List[Tuple[float, float]] # 定義域Ωの頂点リスト [(x,y), ...]
-    source_points: List[Tuple[float, float]]    # ハンドル操作前の位置 p_i
-    target_points: List[Tuple[float, float]]    # ハンドル操作後の位置 q_i
-    K_max: float                                # 許容最大歪み率 (例: 2.0)
-    K_collocation: float = 1.1                  # コロケーション点上での歪み制約 K (< K_max)
-
-@dataclass
-class DeformOutput:
-    """フロントエンドへ返す出力データ"""
-    uvs: List[Tuple[float, float]]              # 元画像上の正規化座標 (0.0~1.0)
-    positions: List[Tuple[float, float]]        # 変形後のスクリーン座標
-    indices: List[int]                          # 三角形メッシュのインデックスリスト
-    final_h: float                              # 最終的なグリッド密度
-    converged: bool                             # 収束したかどうか
-
-# --- メインクラス ---
-
-class ProvablyGoodPlanarMapping:
-    def __init__(self, strategy_class, basis_class: Type):
+class Strategy2:
+    """
+    Manages the collocation points and calculates the required fill distance 'h'
+    based on the current mapping distortion to guarantee bounds (Strategy 2).
+    """
+    def __init__(self, domain_bounds: Tuple[float, float, float, float]):
         """
         Args:
-            strategy_class: Strategy2などの戦略クラス
-            basis_class: GaussianRBFなどの基底クラス（インスタンスではなく型を渡す）
+            domain_bounds: (x_min, x_max, y_min, y_max) defining the bounding box of the image/domain.
         """
-        self.StrategyClass = strategy_class
-        self.BasisClass = basis_class
+        self.bounds = domain_bounds
 
-        # 内部状態
-        self.basis = None
-        self.coeffs = None
-
-        # 最適化ソルバーの設定（実際にはMosekやGurobi等のSOCPソルバー推奨）
-        # ここでは抽象化しています
-        self.solver_type = "SOCP_Placeholder"
-
-    def fit(self, input_data: DeformInput, max_iterations: int = 10) -> DeformOutput:
+    def compute_required_h(self,
+                           basis: BasisFunction,
+                           K_current: float,
+                           K_max: float,
+                           c: np.ndarray) -> float:
         """
-        Strategy 2 に基づくメインループ
+        Calculate required grid spacing (fill distance) h based on current distortion.
+        Eq. 14 (Isometric) or Eq. 15 (Conformal) in the paper.
+
+        Args:
+            basis: The BasisFunction instance (to get continuity modulus).
+            K_current: The maximum distortion evaluated at current collocation points.
+            K_max: The global maximum allowed distortion constraint.
+            c: The current mapping coefficients matrix (2, N_basis).
         """
-        # 1. 境界情報の解析
-        poly_path = mpl_path.Path(input_data.boundary_polygon)
-        bounds = poly_path.get_extents().extents # (xmin, ymin, xmax, ymax)
+        if K_max <= K_current:
+            warnings.warn("K_current has exceeded K_max. Returning minimal safety spacing.")
+            # return a very small default h if constraints are violated
+            return 0.01
 
-        # 初期グリッド密度 h の設定 (例えば短辺の1/10からスタート)
-        width = bounds[2] - bounds[0]
-        height = bounds[3] - bounds[1]
-        current_h = min(width, height) / 8.0
+        # Calculate isometric distortion tolerance margin
+        # min(K_max - K, 1/K - 1/K_max)
+        margin = min(K_max - K_current, (1.0 / K_current) - (1.0 / K_max))
+        if margin <= 0:
+            return 0.01
 
-        # Strategy インスタンスの作成 (基底は後でセット)
-        # 注: Strategy2の初期化にはダミーの基底を渡すか、設計を調整してください。
-        # ここでは概念的に strategy.compute_required_fill_distance が使える状態とします。
+        # Calculate max coefficient norm |||c|||
+        # The paper uses various norms, typically max row sum of absolute values
+        max_coeff_norm = np.max(np.sum(np.abs(c), axis=1))
 
-        print(f"Start fitting: K_max={input_data.K_max}, Initial h={current_h:.4f}")
+        # We need: 2 * max_coeff_norm * omega_basis(h) <= margin
+        # Assuming omega_basis(h) is linear w.r.t h (which is true for Gaussians: h / s^2)
+        # omega_basis(1.0) gives us the constant factor C.
+        C = basis.compute_basis_gradient_modulus(1.0)
 
-        final_coeffs = None
-        final_basis = None
+        if C == 0 or max_coeff_norm == 0:
+            return float('inf') # No practical limit
 
-        for iteration in range(max_iterations):
-            print(f"--- Iteration {iteration+1} (h={current_h:.4f}) ---")
+        # Solve for h
+        h_limit = margin / (2.0 * max_coeff_norm * C)
 
-            # 2. グリッド生成 & フィルタリング
-            # 境界ボックス内にh間隔で点を打ち、ポリゴン内部の点のみ残す
-            collocation_points = self._generate_masked_grid(bounds, current_h, poly_path)
+        return h_limit * 0.95  # 5% safety margin to ensure strict inequality
 
-            if len(collocation_points) < 3:
-                # 点が少なすぎる場合はhを強制的に小さくする
-                current_h *= 0.5
-                continue
-
-            # 3. 基底の初期化
-            # グリッド密度 h に合わせて GaussianRBF(s=h) を生成
-            # Strategy 2 では s と h は連動している必要がある
-            basis = self.BasisClass(s=current_h)
-            basis.set_centers(collocation_points)
-
-            # Strategyに現在の基底をセット（計算用）
-            strategy = self.StrategyClass(basis)
-
-            # 4. 最適化実行 (Solver)
-            # 制約: f(p_i) = q_i,  Distortion(z_j) <= K
-            try:
-                coeffs = self._solve_optimization(
-                    basis,
-                    collocation_points,
-                    np.array(input_data.source_points),
-                    np.array(input_data.target_points),
-                    input_data.K_collocation
-                )
-            except Exception as e:
-                print(f"Optimization failed: {e}")
-                break
-
-            # 5. Strategy 2 による判定
-            # 係数のノルムを計算
-            c_norm = strategy.compute_coefficient_norm(coeffs)
-
-            # 必要な h を逆算
-            required_h = strategy.compute_required_fill_distance(
-                K=input_data.K_collocation,
-                K_max=input_data.K_max,
-                max_coeff_norm=c_norm
-            )
-
-            print(f"  Current h: {current_h:.5f} / Required h: {required_h:.5f} / Norm: {c_norm:.2f}")
-
-            # 6. 収束判定
-            if current_h <= required_h:
-                print("  Converged! Strategy 2 condition satisfied.")
-                final_coeffs = coeffs
-                final_basis = basis
-                break
-            else:
-                print("  Refining grid...")
-                # 次のイテレーション用にhを更新
-                # 安全係数 0.9 を掛けて少し小さめにする
-                current_h = required_h * 0.9
-
-                # 無限ループ防止: hが極端に小さくなったら打ち切り
-                if current_h < 1e-5:
-                    print("  h is too small. Stopping.")
-                    final_coeffs = coeffs
-                    final_basis = basis
-                    break
-
-        if final_coeffs is None:
-            raise RuntimeError("Fitting failed to produce coefficients.")
-
-        # 7. 結果メッシュの生成
-        return self._generate_output_mesh(final_basis, final_coeffs, bounds, current_h, poly_path)
-
-    def _generate_masked_grid(self, bounds, h, poly_path):
+    def generate_grid(self, h: float) -> np.ndarray:
         """
-        バウンディングボックス内にグリッドを生成し、
-        ポリゴン（poly_path）に含まれる点だけを抽出して返す。
+        Generates a regular grid of collocation points covering the domain with spacing h.
+        (In a full implementation, points outside the non-convex domain mask would be filtered out here).
         """
-        x_min, y_min, x_max, y_max = bounds
+        x_min, x_max, y_min, y_max = self.bounds
 
-        # マージンを持たせて生成
-        xs = np.arange(x_min, x_max + h, h)
-        ys = np.arange(y_min, y_max + h, h)
-        XX, YY = np.meshgrid(xs, ys)
+        # Create 1D arrays for x and y
+        x_coords = np.arange(x_min, x_max + h, h)
+        y_coords = np.arange(y_min, y_max + h, h)
 
-        grid_points = np.vstack([XX.ravel(), YY.ravel()]).T
+        # Create 2D meshgrid
+        X, Y = np.meshgrid(x_coords, y_coords)
 
-        # ポリゴン内外判定 (matplotlib.path を使用)
-        mask = poly_path.contains_points(grid_points)
+        # Flatten to (M, 2) array
+        grid_points = np.vstack([X.ravel(), Y.ravel()]).T
+        return grid_points
 
-        return grid_points[mask]
 
-    def _solve_optimization(self, basis, collocation_pts, src_pts, tgt_pts, K):
-        """
-        最適化ソルバーのラッパー。
-        論文では SOCP (Second-Order Cone Programming) を使用。
-        ここではPython実装用に簡略化したインターフェースを示します。
-        """
-        # 実際にはここに scipy.optimize.minimize や cvxpy (Mosek/Gurobi) のコードが入ります。
-        #
-        # 目的関数: E_bh (Biharmonic Energy) -> c.T * H * c
-        # 制約1 (位置): basis.evaluate(src_pts) @ c == tgt_pts
-        # 制約2 (歪み): ||Df(z)|| + ... <= K (SOCP制約)
-
-        # ダミー実装: 恒等写像に近い解を返す（動作確認用）
-        # 本番では必ず適切なソルバーを実装してください
-
-        # 初期値としてIdentityに近い係数を取得
-        c_identity = basis.get_identity_coefficients(collocation_pts)
-
-        # ハンドル制約を満たすための最小二乗法的な補正（擬似コード）
-        # 実際にはここで最適化を行います
-        return c_identity
-
-    def _generate_output_mesh(self, basis, coeffs, bounds, h, poly_path):
-        """
-        最終的な変形情報をメッシュ形式で出力する
-        """
-        # 可視化・レンダリング用に、計算に使ったグリッドより少し細かいメッシュを切るか、
-        # あるいは計算に使ったコロケーションポイントをそのまま頂点として使う。
-        # ここでは計算に使ったポイントを再生成して利用します。
-
-        points = self._generate_masked_grid(bounds, h, poly_path)
-
-        # 1. Delaunay三角分割でインデックス（トポロジー）を生成
-        tri = Delaunay(points)
-        indices = tri.simplices.flatten().tolist()
-
-        # 2. 変形後の位置を計算
-        # f(x) = Phi(x) * c
-        Phi = basis.evaluate(points)
-
-        # coeffs: (2, N) -> Transpose to (N, 2) usually needed depending on formula
-        # 論文の定義に合わせて計算: u = sum c_i phi_i
-        # 実装上の行列積: Positions = Phi @ coeffs.T
-        deformed_points = Phi @ coeffs.T
-
-        # 3. UV座標の計算
-        # 画像全体に対する正規化座標 (0.0 - 1.0)
-        width = bounds[2] - bounds[0]
-        height = bounds[3] - bounds[1]
-        uvs = (points - [bounds[0], bounds[1]]) / [width, height]
-
-        # データクラスに詰めて返す
-        return DeformOutput(
-            uvs=uvs.tolist(),
-            positions=deformed_points.tolist(),
-            indices=indices,
-            final_h=h,
-            converged=True
-        )
-
-# --- Main Solver Class ---
+# --- Main Mapping Class ---
 
 class ProvablyGoodPlanarMapping(ABC):
-    def __init__(self, config: SolverConfig):
-        self.config = config
+    """
+    メッシュレス画像変形フレームワークの抽象基底クラス。
+    共通の数学的評価（評価、ヤコビアン、歪み計算、Strategy2のグリッド更新）を提供する。
+    """
+    def __init__(self, basis: 'BasisFunction', strategy: 'Strategy2', K_max: float = 5.0):
+        self.basis = basis
+        self.strategy = strategy
+        self.K_max = K_max
+        self.coefficients: Optional[np.ndarray] = None
+        self.collocation_points: Optional[np.ndarray] = None
 
-        # Internal State
-        self.basis: Optional[BasisFunction] = None
-        self.collocation_grid: Optional[np.ndarray] = None # Z
-        self.Phi: Optional[np.ndarray] = None
-        self.GradPhi: Optional[np.ndarray] = None
-        self.h_grid: float = 0.0                     # Actual grid spacing h
+    def evaluate_map(self, coords: np.ndarray) -> np.ndarray:
+        """ f(x) = c * Phi(x) を評価して変換後の座標を返す """
+        if self.coefficients is None:
+            raise RuntimeError("マッピング係数が初期化されていません。")
+        phi = self.basis.evaluate(coords)
+        return phi @ self.coefficients.T
 
-        self.c: Optional[np.ndarray] = None          # Coefficients (2, N+3)
-        self.di: Optional[np.ndarray] = None         # Frame directions for checking (M, 2)
-        self.activated_indices: List[int] = []       # Active set indices
+    def evaluate_jacobian(self, coords: np.ndarray) -> np.ndarray:
+        """ ヤコビアン J_f(x) を計算する """
+        if self.coefficients is None:
+            raise RuntimeError("マッピング係数が初期化されていません。")
+        grad_phi = self.basis.jacobian(coords)
+        J = np.einsum('dj, mjk -> mdk', self.coefficients, grad_phi)
+        return J
 
-        self.H_reg: Optional[np.ndarray] = None      # Regularization matrix (Biharmonic)
+    def compute_max_distortion(self, coords: np.ndarray) -> float:
+        """ 与えられた座標群における最大アイソメトリック歪み K を計算する """
+        J = self.evaluate_jacobian(coords)
+        _, S, _ = np.linalg.svd(J)
 
-        # Initialize
-        self._initialize_solver()
+        sigma_1 = S[:, 0]
+        sigma_2 = np.maximum(S[:, 1], 1e-8) # ゼロ除算防止
 
-    def _initialize_solver(self):
-        """Constructs grid, precomputes matrices, and sets initial identity state."""
-        print("[Solver] Initializing...")
+        point_distortions = np.maximum(sigma_1, 1.0 / sigma_2)
+        return float(np.max(point_distortions))
 
-        # 1. Setup Basis (Abstract or via Config in subclass)
-        self._setup_basis()
+    def update_collocation_grid(self):
+        """ Strategy 2: 現在の歪みに基づいてコロケーションポイントのグリッドを更新する """
+        if self.collocation_points is None or self.coefficients is None:
+            return
 
-        if self.basis is None:
-            raise RuntimeError("Basis not initialized by _setup_basis()")
-
-        # 2. Setup Grid based on Strategy
-        self._setup_grid()
-
-        # 3. Resolve Constraints (Strategy 3 needs h_grid which is now set)
-        self.K_upper, self.Sigma_lower = self.config.strategy.resolve_constraints(
-            self.basis, self.h_grid
+        K_current = self.compute_max_distortion(self.collocation_points)
+        required_h = self.strategy.compute_required_h(
+            basis=self.basis,
+            K_current=K_current,
+            K_max=self.K_max,
+            c=self.coefficients
         )
-        print(f"[Solver] Constraints set: K <= {self.K_upper:.4f}, Sigma >= {self.Sigma_lower:.4f}")
+        self.collocation_points = self.strategy.generate_grid(required_h)
+        print(f"[Grid Update] New h = {required_h:.4f}, Active Points = {len(self.collocation_points)}")
 
-        # 4. Precompute Basis Matrices (Phi, GradPhi) on Grid
-        self._precompute_basis_on_grid()
-
-        if self.collocation_grid is None:
-            raise RuntimeError("Collocation grid not setup")
-
-        # 5. Initialize Coefficients (Identity)
-        self.c = self.basis.get_identity_coefficients(self.config.source_handles)
-
-        # 6. Initialize Frames (di)
-        # Default direction (1,0) for all grid points
-        grid = cast(np.ndarray, self.collocation_grid)
-        M = grid.shape[0]
-        self.di = np.tile(np.array([1.0, 0.0]), (M, 1))
-
-        # 7. K_high, K_low thresholds (Paper Section 5)
-        # K_high = 0.1 + 0.9*K: points above this are added to active set
-        # K_low  = 0.5 + 0.5*K: points below this are removed from active set
-        self.K_high = 0.1 + 0.9 * self.K_upper
-        self.K_low  = 0.5 + 0.5 * self.K_upper
-
-        # 8. Z'': Farthest Point Sampling for stabilization (Algorithm 1)
-        # These points are always active and never removed.
-        self.permanent_indices = self._farthest_point_sampling(self.config.fps_k)
-
-        # 9. Initialize active set with Z''
-        self.activated_indices = list(self.permanent_indices)
-
-        print(f"[Solver] Initialized. Grid size: {M} points. h={self.h_grid:.4f}")
-        print(f"[Solver] K_high={self.K_high:.4f}, K_low={self.K_low:.4f}")
-        print(f"[Solver] Z'' (permanent active points): {len(self.permanent_indices)}")
-
+    # ==========================================
+    # サブクラスで実装すべき抽象メソッド
+    # ==========================================
     @abstractmethod
-    def _setup_basis(self):
-        """Initialize self.basis"""
+    def initialize_mapping(self, src_handles: np.ndarray) -> None:
+        """ 初期状態（恒等写像など）をセットアップする """
         pass
 
-    def _farthest_point_sampling(self, k: int) -> List[int]:
-        """
-        FPS on collocation grid to select Z'' (permanently active points).
-        Paper Algorithm 1: "Initialize set Z'' with farthest point samples."
-        Paper Section 5: "keep a small subset of equally spread collocation
-        points always active" for stabilization.
-        """
-        points = self.collocation_grid
-        m = points.shape[0]
-        if k >= m:
-            return list(range(m))
-        if k <= 0:
-            return []
+    @abstractmethod
+    def optimize_mapping(self, target_handles: np.ndarray, num_iterations: int) -> None:
+        """ 指定されたハンドル位置に向けて、係数 self.coefficients を最適化する """
+        pass
 
-        indices = np.empty(k, dtype=int)
-        # Start from the point with minimum x-coordinate (deterministic)
-        indices[0] = int(np.argmin(points[:, 0]))
 
-        chosen = points[indices[0]]
-        min_d2 = np.sum((points - chosen) ** 2, axis=1)
-
-        for i in range(1, k):
-            next_idx = int(np.argmax(min_d2))
-            indices[i] = next_idx
-            d2 = np.sum((points - points[next_idx]) ** 2, axis=1)
-            min_d2 = np.minimum(min_d2, d2)
-
-        return indices.tolist()
-
-    def _find_local_maxima(self, K_vals: np.ndarray) -> np.ndarray:
-        """
-        Find local maxima of distortion on the collocation grid (4-neighborhood).
-        Paper Algorithm 1: "Find the set Z_max of local maxima of D(z)."
-
-        Uses >= for comparisons to handle plateaus where distortion is
-        uniformly high. In such cases, all plateau points are treated as
-        local maxima, ensuring they can be added to the active set if
-        they exceed K_high. This is conservative but safe.
-
-        Args:
-            K_vals: (M,) distortion values at each grid point
-        Returns:
-            Array of indices that are local maxima
-        """
-        nx, ny = self.grid_shape
-        # collocation_grid is built from meshgrid(x, y) with y as outer loop
-        # so the grid layout is (ny, nx) when reshaped
-        K_grid = K_vals.reshape(ny, nx)
-
-        # A point is a local maximum if it is >= all its existing neighbors.
-        # Using >= instead of > to handle plateaus (uniform distortion regions).
-        # On a plateau, every point qualifies, which is conservative but prevents
-        # the scenario where no local maxima are found despite high distortion.
-        local_max_mask = np.ones((ny, nx), dtype=bool)
-
-        local_max_mask[1:, :]  &= K_grid[1:, :]  >= K_grid[:-1, :]   # vs above
-        local_max_mask[:-1, :] &= K_grid[:-1, :] >= K_grid[1:, :]    # vs below
-        local_max_mask[:, 1:]  &= K_grid[:, 1:]  >= K_grid[:, :-1]   # vs left
-        local_max_mask[:, :-1] &= K_grid[:, :-1] >= K_grid[:, 1:]    # vs right
-
-        # Boundary points: only compare with existing neighbors (already handled
-        # by the slicing above - boundary edges have fewer comparisons, which is
-        # conservative and correct)
-
-        return np.where(local_max_mask.ravel())[0]
-
-    def _setup_grid(self):
-        strategy = self.config.strategy
-        bounds = self.config.domain_bounds
-        min_x, min_y, max_x, max_y = bounds
-        width = max_x - min_x
-        height = max_y - min_y
-
-        nx, ny = 20, 20 # Default fallback
-        h: float = -1.0
-
-        if isinstance(strategy, FixedBoundCalcGrid):
-            h = strategy.compute_h(self.basis)
-            print(f"[Solver] Strategy: FixedBoundCalcGrid. Calculated h={h:.4f} for K={strategy.K}, K_max={strategy.K_max}")
-
-            # Simple safeguard against infinite grid
-            if h < 1e-4: h = 1e-4
-
-            nx = int(np.ceil(width / h)) + 1
-            ny = int(np.ceil(height / h)) + 1
-
-            # Recalculate actual h to match domain
-            # Or assume h is strict upper bound.
-            # We use the computed h for grid generation which implies actual spacing.
-
-            # We removed the clamping logic here to respect the theoretical guarantees.
-            # If the grid is too large, it might be slow, but it will be correct.
-
-        elif isinstance(strategy, (FixedGridCalcBound, CalculateKFromBound)):
-            nx, ny = strategy.grid_resolution
-            print(f"[Solver] Strategy: Fixed Resolution {nx}x{ny}")
-            # Calculate h from resolution
-            h_x = width / (nx - 1) if nx > 1 else width
-            h_y = height / (ny - 1) if ny > 1 else height
-            h = max(h_x, h_y)
-
-        # Fallback calculation if h was not set by strategy (e.g. unknown strategy with default 20x20)
-        if h < 0:
-            h_x = width / (nx - 1) if nx > 1 else width
-            h_y = height / (ny - 1) if ny > 1 else height
-            h = max(h_x, h_y)
-            print(f"[Solver] Strategy: Unknown/Fallback. Using defaults {nx}x{ny}, h={h:.4f}")
-
-        x = np.linspace(min_x, max_x, nx)
-        y = np.linspace(min_y, max_y, ny)
-        xv, yv = np.meshgrid(x, y)
-
-        # Z: (M, 2)
-        self.collocation_grid = np.column_stack([xv.ravel(), yv.ravel()])
-        self.grid_shape = (nx, ny)
-        self.h_grid = h
-
-    def _precompute_basis_on_grid(self):
-        """Precomputes Phi, GradPhi and Regularization Matrix H_reg."""
-        if self.collocation_grid is None:
-            raise RuntimeError("Grid not setup.")
-
-        grid = cast(np.ndarray, self.collocation_grid)
-
-        print("[Solver] Precomputing basis functions on grid...")
-        self.Phi = self.basis.evaluate(grid)
-        self.GradPhi = self.basis.jacobian(grid)
-
-        # Compute Biharmonic Regularization Matrix
-        # Algorithm:
-        # 1. Build discrete Laplacian L on the grid (using Delaunay or grid connectivity)
-        # 2. M = L^T L
-        # 3. H_reg = Phi^T M Phi
-
-        try:
-            # Using Delaunay for generic grid connectivity
-            tri = Delaunay(grid)
-            simplices = tri.simplices
-
-            m = grid.shape[0]
-            # Adjacency
-            # Note: This loop can be slow for very large grids in Python.
-            # But for solver grids (e.g. 50x50=2500) it is fast enough.
-
-            # Helper for faster adjacency filling
-            edges = set()
-            for s in simplices:
-                s = np.sort(s)
-                edges.add((s[0], s[1]))
-                edges.add((s[1], s[2]))
-                edges.add((s[0], s[2]))
-
-            rows = []
-            cols = []
-            values = []
-
-            # Build L = D - A directly?
-            # We use dense matrix for M because m is small enough usually.
-            # If m is large, we should use sparse matrices.
-            # For robustness with cvxpy, keeping it dense if N is small is better,
-            # BUT H_reg is (N_basis x N_basis), which is small.
-            # L is (M x M).
-
-            # Let's use sparse for L construction
-            from scipy import sparse
-
-            row_idx = []
-            col_idx = []
-            data = []
-
-            for (i, j) in edges:
-                # A[i, j] = 1
-                row_idx.extend([i, j])
-                col_idx.extend([j, i])
-                data.extend([1.0, 1.0])
-
-            A = sparse.coo_matrix((data, (row_idx, col_idx)), shape=(m, m))
-            deg = np.array(A.sum(axis=1)).flatten()
-            D = sparse.diags(deg)
-            L = D - A
-
-            # M = L.T @ L
-            M_mat = L.T @ L
-
-            # H_reg = Phi.T @ M @ Phi
-            # Phi is dense (M, N_basis). M_mat is sparse(M, M).
-            # Result H_reg is dense (N_basis, N_basis).
-
-            M_dot_Phi = M_mat @ self.Phi # (M, N_basis)
-            H = self.Phi.T @ M_dot_Phi   # (N_basis, N_basis)
-
-            self.H_reg = 0.5 * (H + H.T) # Ensure symmetry
-
-            # 基底は [RBF_0, ..., RBF_N, 1, x, y] の順で並んでいるため、
-            # 後ろの3つがアフィン項に対応します。
-            # これらをゼロにすることで、アフィン変換にはペナルティがかからなくなります。
-
-            if self.H_reg is not None:
-                # 最後の3行を0に
-                self.H_reg[-3:, :] = 0.0
-                # 最後の3列を0に
-                self.H_reg[:, -3:] = 0.0
-
-        except Exception as e:
-            warnings.warn(f"Failed to compute regularization matrix: {e}. Regularization disabled.")
-            self.H_reg = None
-
-    def compute_mapping(self, target_handles: np.ndarray):
-        """
-        Main Loop (Algorithm 1 from Paper):
-
-        Paper Algorithm 1 order:
-          Initialization: Evaluate D(z), find Z_max, update Z' (add/remove)
-          Optimization:   Solve SOCP to find c
-          Postprocessing: Update d_i using Eq. 27
-
-        Loop: Active Set update → Optimize → Frame update
-        """
-        max_iterations = 10
-        iteration = 0
-
-        while iteration < max_iterations:
-            # 1. Update frames based on current c (Eq. 27)
-            #    On first call after _initialize_solver, c is identity and di is (1,0).
-            #    This is consistent with the paper's initialization.
-            self._update_frames()
-
-            # 2. Evaluate distortion and update active set (Algorithm 1: Initialization)
-            #    - Evaluate D(z) for all z in Z
-            #    - Find local maxima Z_max of D(z)
-            #    - Insert z in Z_max with D(z) > K_high into Z'
-            #    - Remove z in Z' with D(z) < K_low from Z' (except Z'')
-            new_violations = self._update_active_set()
-
-            # 3. Solve SOCP with updated active set (Algorithm 1: Optimization)
-            self._optimize_step(target_handles)
-
-            # 4. Convergence check:
-            #    On iteration 0, always continue (handle positions changed).
-            #    After that, if no new violations were added, we have converged.
-            if new_violations == 0 and iteration > 0:
-                break
-
-            iteration += 1
-
-        if iteration == max_iterations:
-            warnings.warn(f"[Solver] Max iterations ({max_iterations}) reached. Solution might not be fully valid.")
-
-        # Final frame update for next call's warm start (Algorithm 1: Postprocessing)
-        self._update_frames()
-
-    def transform(self, points: np.ndarray) -> np.ndarray:
-        """
-        Apply current mapping to arbitrary points (e.g. render mesh).
-        points: (K, 2)
-        returns: (K, 2)
-        """
-        if self.c is None or self.basis is None:
-            return points # Identity if not initialized
-
-        Phi_points = self.basis.evaluate(points) # (K, N+3)
-        # c is (2, N+3)
-        # result = (Phi * c^T) -> (K, 2)
-        return Phi_points @ self.c.T
-
-    # --- Internal Methods ---
-
-    def _update_frames(self):
-        """Update global frames (di) based on CURRENT coefficients c."""
-        if self.c is None or self.GradPhi is None:
-            return
-
-        # Calculate gradients
-        G = self.GradPhi # (M, N+3, 2)
-        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
-        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
-
-        ux, uy = grad_u[:, 0], grad_u[:, 1]
-        vx, vy = grad_v[:, 0], grad_v[:, 1]
-
-        # f_z = 0.5 * (ux + vy + i(vx - uy))
-        re_fz = 0.5 * (ux + vy)
-        im_fz = 0.5 * (vx - uy)
-
-        fz_vecs = np.stack([re_fz, im_fz], axis=1) # (M, 2)
-        norm_fz = np.linalg.norm(fz_vecs, axis=1, keepdims=True)
-
-        # Avoid zero division
-        # If |fz| ~ 0, we simply keep the previous di or default (1,0)
-        # We only update where norm is sufficient.
-        mask = (norm_fz > 1e-12).flatten()
-
-        # In a strict implementation, we might not update di for points NOT in the active set,
-        # but updating all helps for future activations.
-        # Crucially, we MUST update di for Active Set points to rotate the cut plane.
-
-        self.di[mask] = fz_vecs[mask] / norm_fz[mask]
-
-    def _compute_distortion_on_grid(self) -> Tuple[np.ndarray, dict]:
-        """
-        Compute distortion K at each grid point.
-        Returns:
-           K_vals: (M,)
-           extras: dict
-        """
-        if self.c is None or self.GradPhi is None:
-            # Return dummy values if not initialized
-            return np.array([]), {}
-
-        # G: (M, N+3, 2)
-        G = self.GradPhi
-
-        # c: (2, N+3)
-        # u = c[0] @ Phi^T  => grad_u = c[0] @ GradPhi
-
-        # grad_u: (M, 2)
-        grad_u = np.einsum('j,mjk->mk', self.c[0], G)
-        grad_v = np.einsum('j,mjk->mk', self.c[1], G)
-
-        # f_z  = 0.5 * ( (ux + vy) + i(vx - uy) )
-        # f_zb = 0.5 * ( (ux - vy) + i(vx + uy) )
-
-        ux, uy = grad_u[:, 0], grad_u[:, 1]
-        vx, vy = grad_v[:, 0], grad_v[:, 1]
-
-        re_fz  = 0.5 * (ux + vy)
-        im_fz  = 0.5 * (vx - uy)
-        re_fzb = 0.5 * (ux - vy)
-        im_fzb = 0.5 * (vx + uy)
-
-        abs_fz  = np.sqrt(re_fz**2 + im_fz**2)
-        abs_fzb = np.sqrt(re_fzb**2 + im_fzb**2)
-
-        sigma1 = abs_fz + abs_fzb  # Sigma
-        sigma2 = abs_fz - abs_fzb  # sigma
-
-        # D_iso = max(Sigma, 1/sigma)
-        # sigma2がゼロに近い、あるいは負（位相反転）の場合の対策が必要
-        sigma2_safe = np.maximum(sigma2, 1e-6)
-
-        # 論文 Eq(10)や定義に従い、拡大と縮小の両方をペナルティとする
-        K_vals = np.maximum(sigma1, 1.0 / sigma2_safe)
-
-        return K_vals, {"abs_fz": abs_fz, "abs_fzb": abs_fzb}
-
-    def _update_active_set(self) -> int:
-        """
-        Update Active Set Z' based on distortion evaluation (Algorithm 1).
-
-        Paper Algorithm 1:
-          1. Evaluate D(z) for z in Z
-          2. Find Z_max = local maxima of D(z)
-          3. foreach z in Z_max with D(z) > K_high: insert z into Z'
-          4. foreach z in Z' with D(z) < K_low: remove z from Z' (but never remove Z'')
-
-        Paper Section 5:
-          K_high = 0.1 + 0.9*K  (add threshold, slightly below K)
-          K_low  = 0.5 + 0.5*K  (remove threshold)
-
-        Returns: number of new points added to the active set.
-        """
-        # 1. Evaluate distortion D(z) at all collocation points
-        K_vals, _ = self._compute_distortion_on_grid()
-
-        # 2. Find local maxima of D(z) on the grid
-        local_maxima = self._find_local_maxima(K_vals)
-
-        # 3. Remove points with D(z) < K_low from Z' (but protect Z'')
-        permanent_set = set(self.permanent_indices)
-        remaining = []
-        for idx in self.activated_indices:
-            if idx in permanent_set:
-                remaining.append(idx)  # Z'' is never removed
-            elif K_vals[idx] >= self.K_low:
-                remaining.append(idx)  # Distortion still significant, keep
-            # else: distortion sufficiently below bound, remove from active set
-        self.activated_indices = remaining
-
-        # 4. Add local maxima with D(z) > K_high to Z'
-        current_set = set(self.activated_indices)
-        new_added_count = 0
-
-        for idx in local_maxima:
-            idx = int(idx)
-            if K_vals[idx] > self.K_high and idx not in current_set:
-                current_set.add(idx)
-                new_added_count += 1
-
-        self.activated_indices = sorted(list(current_set))
-
-        return new_added_count
-
-    def _compute_di_local(self, indices: List[int]) -> np.ndarray:
-        """
-        Retrieve frames d_i for specified indices.
-        Now simply returns the stored self.di which are updated only when added to active set.
-        """
-        if not indices or self.di is None:
-            return np.zeros((0, 2))
-
-        idx_arr = np.array(indices)
-        return self.di[idx_arr]
-
-    def _optimize_step(self, target_handles: np.ndarray):
-        if self.basis is None:
-            return
-
-        # CVXPY Setup
-        N_basis = self.basis.get_basis_count() # N + 3 usually
-        c_var = cp.Variable((2, N_basis))
-
-        constraints = []
-
-        # 1. Positional Constraints (Soft)
-        # Minimize sum of distances to target_handles
-        # or constrain them?
-        # Usually soft constraints (Minimize ||Phi c - target||)
-
-        # Basis at source handles (centers)
-        # Note: Provide direct way to get Phi for handles without re-evaluating?
-        # It's evaluating at centers.
-        # self.basis.evaluate(self.config.source_handles)
-        # This is (N, N+3).
-        Phi_src = self.basis.evaluate(self.config.source_handles)
-
-        # Objective: Position fitting
-        # Paper Eq.(29): E_pos = sum_l ||f(p_l) - q_l||_2
-        # Sum of Euclidean norms (SOCP-representable), no scaling.
-        diff = c_var @ Phi_src.T - target_handles.T # (2, N_handles)
-        N_handles = diff.shape[1]
-        position_loss = cp.sum([cp.norm(diff[:, i], 2) for i in range(N_handles)])
-
-        # 2. Distortion Constraints (Active Set)
-        if self.activated_indices and self.GradPhi is not None:
-            idx_list = self.activated_indices
-            G_sub = self.GradPhi[idx_list] # (K, N+3, 2)
-
-            # Retrieve fixed local frames di (from start of frame / last valid configuration).
-            # We use the cached self.di which is updated only in _postprocess.
-            # This ensures we are always linearizing around a valid (unfolded) state,
-            # forcing the solver to "unfold" if it tries to violate injectivity.
-
-            di_local = self._compute_di_local(idx_list) # (K, 2)
-            # Constraints construction based on Poranne & Lipman 2014
-            # We enforce 3 guarantees on the collocation points:
-            # 1. Upper Bound on Distortion (Max Singular Value): Sigma_1 <= K
-            # 2. Lower Bound on Distortion (Min Singular Value): Sigma_2 >= 1/K (Injectivity)
-            # 3. Orientation Preservation det(J) > 0 (Implicitly satisfied by Sigma_2 > 0)
-
-            for k, idx in enumerate(idx_list):
-                G_k = G_sub[k] # (N+3, 2)
-                d_k = di_local[k] # (2,)
-
-                grad_u_k = c_var[0] @ G_k # (2,)
-                grad_v_k = c_var[1] @ G_k # (2,)
-
-                # fz components
-                fz_re = 0.5 * (grad_u_k[0] + grad_v_k[1])
-                fz_im = 0.5 * (grad_v_k[0] - grad_u_k[1])
-
-                fzb_re = 0.5 * (grad_u_k[0] - grad_v_k[1])
-                fzb_im = 0.5 * (grad_v_k[0] + grad_u_k[1])
-
-                fz_vec = cp.hstack([fz_re, fz_im])
-                fzb_vec = cp.hstack([fzb_re, fzb_im])
-
-                # Guarantee 1: Upper Bound (Sigma_1 <= K)
-                # |fz| + |fzb| <= K
-                constraints.append(cp.norm(fz_vec, 2) + cp.norm(fzb_vec, 2) <= self.K_upper)
-
-                # Guarantee 2: Injectivity / Lower Bound (Sigma_2 >= 1/K)
-                # Linearized constraint: Re(<fz, d>) - |fzb| >= 1/K
-                # This ensures |fz| - |fzb| >= 1/K, hence Sigma_2 >= 1/K.
-                # d_k is the normalized direction of fz from previous iteration.
-                dot_prod = fz_re * float(d_k[0]) + fz_im * float(d_k[1])
-                constraints.append(dot_prod - cp.norm(fzb_vec, 2) >= self.Sigma_lower)
-
-                # Guarantee 3: Orientation (Jacobian Determinant > 0)
-                # det(J) = |fz|^2 - |fzb|^2 = (|fz|-|fzb|)(|fz|+|fzb|) = Sigma_2 * Sigma_1
-                # Since we enforce Sigma_2 >= 1/K > 0 and Sigma_1 <= K, det(J) > 0 is guaranteed.
-
-        # 3. Regularization Term
-        # Paper Eq.(31): Biharmonic energy applied to full coefficient vector.
-        # H_reg is (N_basis, N_basis). Affine columns naturally have
-        # near-zero entries due to zero second derivatives, so including
-        # them is safe and keeps dimensions consistent.
-        reg_term = 0
-        if self.H_reg is not None and self.config.lambda_biharmonic > 0:
-            H_full = self.H_reg
-            # Ensure positive semi-definiteness for SOCP solver
-            eigvals = np.linalg.eigvalsh(H_full)
-            min_eig = np.min(eigvals)
-            if min_eig < -1e-10:
-                H_full = H_full + (abs(min_eig) + 1e-8) * np.eye(H_full.shape[0])
-
-            quad = cp.quad_form(c_var[0], H_full) + cp.quad_form(c_var[1], H_full)
-            reg_term = self.config.lambda_biharmonic * quad
-
-        objective = cp.Minimize(position_loss + reg_term)
-
-        problem = cp.Problem(objective, constraints)
-
-        try:
-            problem.solve(solver=cp.CLARABEL, verbose=False)
-        except Exception as e:
-            warnings.warn(f"Solver failed: {e}")
-            return
-
-        if problem.status not in ["infeasible", "unbounded"]:
-            self.c = c_var.value
-        else:
-            warnings.warn(f"Optimization failed: {problem.status}")
-
-    def verify_global_bound(self) -> dict:
-        """
-        Post-hoc verification (Paper Eq. 9, 11).
-        Compute actual omega using current coefficients and report
-        whether the theoretical global distortion bound holds.
-
-        Paper Eq.(9):  omega = 2 * |||c||| * omega_basis(h)
-        Paper Eq.(11): D_iso(x) <= max( K + omega, 1/(1/K - omega) )
-
-        Returns dict with:
-          - c_norm: |||c||| (max row-sum of absolute coefficient values)
-          - omega_basis: omega_nablaF(h) from the basis function
-          - omega_full: 2 * |||c||| * omega_basis(h)
-          - K_on_grid: max distortion observed on collocation points
-          - K_max_theoretical: theoretical global upper bound
-          - injectivity_guaranteed: bool
-        """
-        if self.c is None or self.basis is None:
-            return {"error": "No coefficients computed"}
-
-        # |||c||| = max over rows of sum of absolute values
-        c_norm = float(np.max(np.sum(np.abs(self.c), axis=1)))
-
-        omega_basis = self.basis.compute_omega(self.h_grid)
-        omega_full = 2.0 * c_norm * omega_basis
-
-        K_vals, _ = self._compute_distortion_on_grid()
-        K_on_grid = float(np.max(K_vals))
-
-        # Eq.(11): D_iso(x) <= max( K + omega, 1/(1/K - omega) )
-        K_max_theo = float('inf')
-        injective = False
-        if K_on_grid > 1e-12 and (1.0 / K_on_grid) > omega_full:
-            K_max_theo = max(K_on_grid + omega_full,
-                             1.0 / (1.0 / K_on_grid - omega_full))
-            injective = True
-
-        return {
-            "c_norm": c_norm,
-            "omega_basis": float(omega_basis),
-            "omega_full": float(omega_full),
-            "K_on_grid": K_on_grid,
-            "K_max_theoretical": K_max_theo,
-            "injectivity_guaranteed": injective,
-        }
-
-    def _postprocess(self):
-        """Update global frames (di) based on new coefficients."""
-        # For visualization or next frame warm start visualisation
-        # We need to update ALL d_i to match the new configuration
-        # so that when the user starts the NEXT drag operation,
-        # the initial linearization frames are correct.
-
-        # This method is effectively deprecated since we use _update_frames() in the loop.
-        # But keeping it empty or calling _update_frames() is fine.
-        self._update_frames()
-
-class BetterFitwithGaussianRBF(ProvablyGoodPlanarMapping):
+class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
     """
-    Concrete implementation of Provably Good Planar Mappings using Gaussian RBF.
+    ガウス基底関数を用いて実際の変形処理（最適化）を担当する具象クラス。
     """
-    def _setup_basis(self):
-        # Create the basis instance
-        self.basis = GaussianRBF(epsilon=self.config.epsilon)
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], s_param: float = 1.0, K_max: float = 5.0):
+        # このクラス自身がGaussianRBFとStrategy2をインスタンス化し、親クラスに渡す
+        basis = GaussianRBF(s=s_param)
+        strategy = Strategy2(domain_bounds)
+        super().__init__(basis=basis, strategy=strategy, K_max=K_max)
 
-        # Setup centers
-        self.basis.set_centers(self.config.source_handles)
-
-# --- Bevy Interface ---
-
-class BevyBridge:
-    def __init__(self):
-        self.solver: Optional[ProvablyGoodPlanarMapping] = None
-
-        # Data stored during setup
-        self.mesh_vertices: Optional[np.ndarray] = None # (N_verts, 2)
-        self.mesh_indices: Optional[List[int]] = None
-
-        self.epsilon: float = 100.0  # Default epsilon, updated by load_image
-        self.image_width: int = 0
-        self.image_height: int = 0
-
-        self.control_point_indices: List[int] = []
-        self.control_points_initial: List[Tuple[float, float]] = []
-        self.control_points_current: List[Tuple[float, float]] = []
-
-        self.is_setup_finalized = False
-
-    def load_image_and_generate_mesh(self, image_path: str, epsilon: float) -> Tuple[List[float], List[int], List[float], int, int]:
+    def initialize_mapping(self, src_handles: np.ndarray) -> None:
         """
-        Load image, calculate guaranteed h, generate mesh.
-        Returns: (flat_vertices, flat_indices, flat_uvs, width, height)
+        ソースハンドル（制御点）の位置をRBFのセンターとして設定し、
+        恒等写像（動いていない状態）の係数で初期化する。
         """
-        print(f"[Py] Loading image: {image_path} with epsilon={epsilon}")
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
+        # GaussianRBF特有のセットアップ
+        self.basis.set_centers(src_handles)
+        self.coefficients = self.basis.get_identity_coefficients(src_handles)
 
-        self.epsilon = float(epsilon)
+        # 初期の粗いグリッドを生成 (ドメインサイズに応じて適宜調整)
+        initial_h = (self.strategy.bounds[1] - self.strategy.bounds[0]) / 10.0
+        self.collocation_points = self.strategy.generate_grid(initial_h)
+        print("Initialized BetterFitwithGaussian mapping.")
 
-        # 1. Load Image
-        img = Image.open(image_path)
-        w, h_img = img.size
-        self.image_width = w
-        self.image_height = h_img
-
-        # Access pixel data (RGBA)
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
-        pixels = img.load()
-
-        # 2. Determine mesh sampling stride
-        # Mesh density is for visual quality, independent of the solver's
-        # collocation grid spacing h. Target ~40 points along the longest axis
-        # for good visual quality while keeping triangle count manageable.
-        max_dim = max(w, h_img)
-        stride = max(max_dim // 40, 3)  # At least 3px to avoid degenerate triangles
-
-        print(f"[Py] Using sampling stride: {stride} px (image: {w}x{h_img})")
-
-        # 3. Sample Points
-        points = []
-        uvs = []
-
-        # Grid sampling
-        for y in range(0, h_img, stride):
-            for x in range(0, w, stride):
-                r, g, b, a = pixels[x, y]
-                if a > 10: # Threshold
-                    # Bevy World Coordinates: Center Origin, Y-Up
-                    # Image Coordinates: TopLeft Origin, Y-Down
-                    # We store in SOLVER COORDINATES (Internal).
-                    # Let's map 1:1 to Image Coordinates for simpler debugging first?
-                    # NO, the Plan says "Internal data unified to Solver coordinates".
-                    # And Solver coordinates usually match the domain.
-                    # Let's use Image Coordinates internally (0,0 is Top-Left)
-                    # because RBF doesn't care about origin, and it's easier to map back to UV.
-                    # The Rust side expects Bevy World Coordinates for display?
-                    # Actually, the previous implementation did the conversion in Rust.
-                    # "Internal data stored in Solver mode" -> Let's keep Image Coordinates (0..W, 0..H)
-                    # and let Rust transform to World for Bevy display.
-
-                    points.append([float(x), float(y)])
-                    uvs.append([x / w, 1.0 - (y / h_img)]) # UV (0..1), V is 1 at Top if we want? No, usually V=1 is Top in Bevy?
-                    # Bevy: UV (0,0) is bottom-left?
-                    # Standard: (0,0) Top-Left often in textures.
-                    # Bevy standard: (0,0) Top-Left or Bottom-Left?
-                    # In main.rs: uvs.push([x as f32 / width_f, 1.0 - (y as f32 / height_f)]);
-                    # This implies V=0 at Top (because y=0 -> V=1). Wait.
-                    # y=0(Top) -> 1.0 - 0 = 1.0. So V=1 is Top.
-                    # y=H(Bottom) -> 1.0 - 1 = 0.0. So V=0 is Bottom.
-                    # This matches OpenGL/Bevy usually (0,0) is Bottom-Left.
-
-        points_np = np.array(points, dtype=np.float64)
-        print(f"[Py] Sampled {len(points)} points.")
-
-        if len(points) < 3:
-             print("[Py] Not enough points to triangulate.")
-             return ([], [], [], w, h_img)
-
-        # 4. Delaunay Triangulation
-        tri = Delaunay(points_np)
-
-        # 5. Filter Triangles (Centroid check)
-        valid_indices = []
-        for simplex in tri.simplices: # simplex is (3,) indices
-            pts = points_np[simplex]
-            centroid = np.mean(pts, axis=0) # (2,)
-            cx, cy = int(centroid[0]), int(centroid[1])
-
-            # Check bounds
-            if 0 <= cx < w and 0 <= cy < h_img:
-                # Check alpha
-                try:
-                    r, g, b, a = pixels[cx, cy]
-                    if a > 10:
-                        valid_indices.extend(simplex)
-                except IndexError:
-                    pass
-
-        # Prepare Return Data
-        flat_verts = points_np.flatten().tolist()
-        flat_uvs = np.array(uvs).flatten().tolist()
-
-        # Store locally
-        self.mesh_vertices = points_np
-        self.mesh_indices = valid_indices
-        self.control_point_indices = []
-        self.control_points_initial = []
-        self.control_points_current = []
-        self.solver = None
-        self.is_setup_finalized = False
-
-        return (flat_verts, valid_indices, flat_uvs, int(w), int(h_img))
-
-    def initialize_mesh_from_data(self, vertices: List[float], indices: List[int]):
+    def optimize_mapping(self, target_handles: np.ndarray, num_iterations: int = 5) -> None:
         """
-        Receive mesh data from Bevy.
-        vertices: Flat list [x0, y0, x1, y1, ...]
-        indices: Flat list of triangle indices
+        実際の最適化ループ。
+        変形エネルギー（ARAPやBiharmonic）を最小化しつつ、K_maxの制約を満たすように
+        係数 c を更新していく。
         """
-        print(f"[Py] initializing mesh: {len(vertices)//2} verts, {len(indices)//3} tris")
-        # Ensure flat list to numpy array
-        if isinstance(vertices, list):
-            verts_array = np.array(vertices, dtype=np.float32)
-        else:
-             # If it comes as something else (e.g. from pyo3 it might be a list)
-             verts_array = np.array(vertices, dtype=np.float32)
+        for i in range(num_iterations):
+            print(f"--- Iteration {i+1}/{num_iterations} ---")
 
-        self.mesh_vertices = verts_array.reshape(-1, 2)
-        self.mesh_indices = indices
+            # 1. 現在の状態に合わせて監視点（コロケーションポイント）の密度を自動調整
+            self.update_collocation_grid()
 
-        # Reset control points when new mesh is loaded
-        # self.reset_mesh()
-        # Actually reset_mesh clears everything including solver state
-        self.control_point_indices = []
-        self.control_points_initial = []
-        self.control_points_current = []
-        self.solver = None
-        self.is_setup_finalized = False
+            # 2. ここに実際の最適化ソルバ（SciPyのminimizeや独自のニュートン法など）を記述
+            # 目的関数: E_data(c) + E_reg(c)
+            # 制約条件: self.compute_max_distortion(self.collocation_points) <= self.K_max
+            #
+            # (※ 実装時は self.coefficients を更新します)
 
-    def add_control_point(self, index: int, x: float, y: float):
-        """Add a control point during setup."""
-        if self.is_setup_finalized:
-            print("[Py] Warning: Cannot add points after finalization.")
-            return
+            # [ダミーコード] 今回は更新されたフリをする
+            # self.coefficients = updated_c
+            pass
 
-        # Rustからの座標入力を無視し、頂点インデックスに対応する正確な内部座標を使用する
-        # これにより、初期状態でのソース位置とターゲット位置の不一致（歪みの原因）を防ぐ
-        final_x, final_y = x, y
-        if self.mesh_vertices is not None and 0 <= index < len(self.mesh_vertices):
-            pt = self.mesh_vertices[index]
-            final_x = float(pt[0])
-            final_y = float(pt[1])
-
-        print(f"[Py] Adding control point: mesh_idx={index} at ({final_x:.1f}, {final_y:.1f})")
-        self.control_point_indices.append(index)
-        self.control_points_initial.append((final_x, final_y))
-        self.control_points_current.append((final_x, final_y))
-
-    def update_control_point(self, index_in_list: int, x: float, y: float):
-        """Update a control point position (Deform mode)."""
-        if index_in_list >= 0 and index_in_list < len(self.control_points_current):
-            self.control_points_current[index_in_list] = (x, y)
-        else:
-            print(f"[Py] Warning: update index {index_in_list} out of range")
-
-    def finalize_setup(self):
-        """Build the solver."""
-        if not self.control_points_initial:
-            print("[Py] No control points. Cannot finalize.")
-            return
-
-        print("[Py] Finalizing setup. Building solver...")
-
-        if self.mesh_vertices is None:
-            print("[Py] Error: No mesh vertices.")
-            return
-
-        bounds_min = np.min(self.mesh_vertices, axis=0)
-        bounds_max = np.max(self.mesh_vertices, axis=0)
-
-        # Add some margin
-        margin = 50.0
-        domain = [
-            float(bounds_min[0] - margin), float(bounds_min[1] - margin),
-            float(bounds_max[0] + margin), float(bounds_max[1] + margin)
-        ]
-
-        sources = np.array(self.control_points_initial)
-
-        domain_width  = domain[2] - domain[0]
-        domain_height = domain[3] - domain[1]
-
-        # --- Paper Section 6 workflow ---
-        # Paper: "In all experiments we used a 200^2 grid during interaction"
-        # Use Strategy 1 (FixedGridCalcBound): fix grid resolution, set K on grid,
-        # compute theoretical K_max for information only.
-        #
-        # Grid resolution: scale with domain aspect ratio.
-        # ECOS handles ~100-200 active constraints well; the full grid can be
-        # larger since only active-set points become SOCP constraints.
-        nx = 30
-        ny = max(int(nx * domain_height / max(domain_width, 1e-6)), 10)
-        K_target = 4
-
-        # Compute actual h from grid resolution
-        h_x = domain_width  / (nx - 1) if nx > 1 else domain_width
-        h_y = domain_height / (ny - 1) if ny > 1 else domain_height
-        h = max(h_x, h_y)
-
-        # Auto-derive minimum epsilon from h and K (Paper Eq. 11 requirement)
-        # For Gaussian RBF: omega(h) = h / s^2 = 2h / epsilon^2
-        # Injectivity guarantee requires: omega(h) < 1/K
-        # => 2h / epsilon^2 < 1/K
-        # => epsilon > sqrt(2 * h * K)
-        epsilon_min = np.sqrt(2.0 * h * K_target)
-        effective_epsilon = max(self.epsilon, epsilon_min)
-
-        # Verify omega(h) is valid
-        s = effective_epsilon / np.sqrt(2.0)
-        omega_h = h / (s * s)
-        print(f"[Py] Grid: {nx}x{ny} = {nx*ny} points, h={h:.2f}")
-        print(f"[Py] epsilon: user={self.epsilon:.1f}, min={epsilon_min:.1f}, effective={effective_epsilon:.1f}")
-        print(f"[Py] omega(h)={omega_h:.6f}, 1/K={1.0/K_target:.6f}, valid={omega_h < 1.0/K_target}")
-
-        strategy = FixedGridCalcBound(grid_resolution=(nx, ny), K=K_target)
-
-        config = SolverConfig(
-            domain_bounds=(float(domain[0]), float(domain[1]), float(domain[2]), float(domain[3])),
-            source_handles=sources,
-            epsilon=effective_epsilon,
-            lambda_biharmonic=1e-6,
-            strategy=strategy,
-        )
-
-        self.solver = BetterFitwithGaussianRBF(config)
-
-        print("[Py] Identity mapping established (Implicitly).")
-
-        self.is_setup_finalized = True
-
-    def reset_mesh(self):
-        """Reset control points to initial state."""
-        # Clears everything to start fresh setup
-        print("[Py] Resetting mesh state.")
-        self.control_point_indices = []
-        self.control_points_initial = []
-        self.control_points_current = []
-        self.solver = None
-        self.is_setup_finalized = False
-
-    def solve_frame(self) -> List[float]:
-        """
-        Run one step of optimization and return transformed mesh vertices.
-        """
-        # If not finalized, return original mesh
-        if not self.is_setup_finalized or self.solver is None:
-            if self.mesh_vertices is not None:
-                return self.mesh_vertices.flatten().tolist()
-            return []
-
-        if self.mesh_vertices is None:
-            return []
-
-        targets = np.array(self.control_points_current)
-        initial = np.array(self.control_points_initial)
-
-        # Check if control points have actually moved from initial positions
-        # 修正: 移動がない場合はソルバーを一切実行せず、元のメッシュをそのまま返すことで
-        # 数値誤差による微小な歪みを完全に防ぐ。
-        if np.allclose(targets, initial, atol=1e-5):
-             return self.mesh_vertices.flatten().tolist()
-
-        # If moved, compute mapping
-        self.solver.compute_mapping(targets)
-
-        # Transform all mesh vertices
-        # mesh_vertices: (N, 2)
-        deformed_verts = self.solver.transform(self.mesh_vertices)
-
-        return deformed_verts.flatten().tolist()
-
+        print("Optimization completed.")
