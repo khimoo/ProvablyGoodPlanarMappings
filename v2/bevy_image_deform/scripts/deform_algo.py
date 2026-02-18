@@ -11,123 +11,11 @@ from PIL import Image
 import os
 from typing import Tuple, Optional, List, cast
 
-# --- Configuration & Strategy ---
-
-@dataclass
-class DistortionStrategyConfig(ABC):
-    """Base configuration for distortion control strategy (Section 4 of Paper)."""
-    @abstractmethod
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        """
-        Calculate required grid spacing h based on strategy.
-        Returns -1.0 if h is determined by grid_resolution.
-        """
-        pass
-
-    @abstractmethod
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        """
-        Calculate solver constraints (K_upper, Sigma_lower) to enforce on grid.
-        Args:
-           basis: The basis function (provides omega(h)).
-           h: The actual grid spacing used.
-        Returns:
-           (K_upper, Sigma_lower)
-        """
-        pass
-
-@dataclass
-class FixedBoundCalcGrid(DistortionStrategyConfig):
-    """
-    Strategy 2 (Guarantee Mode):
-    Given target K on grid and required global K_max, calculate required grid spacing h.
-    Satisfies: omega(h) <= min( K_max - K, 1/K - 1/K_max )
-    """
-    K: float = 2.0       # Target bound for distortion on grid
-    K_max: float = 10.0  # Guaranteed upper bound for distortion everywhere
-
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        return basis.compute_h_strict(self.K, self.K_max)
-
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        # For Strategy 2, K is fixed and given.
-        return (self.K, 1.0 / self.K)
-
-@dataclass
-class FixedGridCalcBound(DistortionStrategyConfig):
-    """
-    Strategy 1 (Fixed Grid Mode):
-    Given grid (h) and target K on grid, calculate resulting K_max (informative).
-    """
-    grid_resolution: Tuple[int, int]
-    K: float = 2.0
-
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        return -1.0
-
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        # Calculate theoretical K_max for information
-        omega = basis.compute_omega(h)
-
-        # Valid range for K_max given K and omega?
-        # K_max >= K + omega
-        # K_max >= 1 / (1/K - omega)
-
-        K_max_est = self.K + omega
-        if (1.0/self.K) > omega:
-             K_max_est = max(K_max_est, 1.0 / (1.0/self.K - omega))
-        else:
-             K_max_est = float('inf')
-
-        print(f"[Strategy 1] With h={h:.4f}, K={self.K} on grid => Theoretical Global K_max <= {K_max_est:.4f}")
-        return (self.K, 1.0 / self.K)
-
-@dataclass
-class CalculateKFromBound(DistortionStrategyConfig):
-    """
-    Strategy 3 (Calculation of K Mode):
-    Given grid (h) and target global K_max, calculate stricter K required on grid.
-    Satisfies: K <= min( K_max - omega(h), 1 / (1/K_max + omega(h)) )
-    """
-    grid_resolution: Tuple[int, int]
-    K_max: float = 10.0
-
-    def compute_h(self, basis: 'BasisFunction') -> float:
-        return -1.0
-
-    def resolve_constraints(self, basis: 'BasisFunction', h: float) -> Tuple[float, float]:
-        omega = basis.compute_omega(h)
-
-        # 1. Condition derived from K_max >= K + omega
-        # => K <= K_max - omega
-        cond1 = self.K_max - omega
-
-        # 2. Condition derived from K_max >= 1 / (1/K - omega)  [Injectivity]
-        # => 1/K - omega >= 1/K_max
-        # => 1/K >= 1/K_max + omega
-        # => K <= 1 / (1/K_max + omega)
-        cond2 = 1.0 / ((1.0 / self.K_max) + omega)
-
-        K_target = min(cond1, cond2)
-
-        if K_target < 1.0:
-            warnings.warn(f"[Strategy 3] Impossible to guarantee K_max={self.K_max} with h={h:.4f} (omega={omega:.4f}). Grid too coarse.")
-            K_target = 1.001 # Minimal valid K
-
-        print(f"[Strategy 3] To guarantee K_max <= {self.K_max}, enforcing K <= {K_target:.4f} on grid (h={h:.4f})")
-        return (K_target, 1.0 / K_target)
-
-
 @dataclass
 class SolverConfig:
     """Main configuration for the Solver."""
     domain_bounds: Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
     source_handles: np.ndarray  # (N, 2) Initial positions of control points
-
-    # Strategy pattern instance
-    # デフォルト値を設定して引数順序エラー (non-default argument follows default argument) を回避
-    # リファクタリング計画に従い、Strategy 2 (Guarantee Mode) をデフォルトとする。
-    strategy: 'DistortionStrategyConfig' = field(default_factory=lambda: FixedBoundCalcGrid())
 
     epsilon: float = 100.0     # Width parameter for Gaussian RBF
 
@@ -163,19 +51,15 @@ class BasisFunction(ABC):
         pass
 
     @abstractmethod
-    def compute_basis_gradient_modulus(self, h: float) -> float: # <--- 名前をより正確に変更（推奨）
-        """
-        Calculate modulus of continuity omega_nabla_F(h) for the basis itself.
-        Corresponds to Table 1 in the paper.
-        """
+    def compute_basis_gradient_modulus(self, h: float) -> float:
+        """Calculate omega_nabla_F(h). Forward direction."""
         pass
 
     @abstractmethod
-    def compute_required_fill_distance(self, K: float, K_max: float, max_coeff_norm: float = 1.0) -> float:
+    def inverse_basis_gradient_modulus(self, val: float) -> float:
         """
-        Calculate grid spacing h to guarantee bounds.
-        Corresponds to Eq. 14 & 15.
-        Note: Requires an assumption or bound on |||c||| (max_coeff_norm) as per Eq. 9.
+        Calculate h such that omega_nabla_F(h) = val.
+        Inverse direction, required for Strategy 2 (Eq. 14, 15).
         """
         pass
 
@@ -306,50 +190,12 @@ class GaussianRBF(BasisFunction):
         return np.concatenate([hess_rbf, hess_affine], axis=1)
 
     def compute_basis_gradient_modulus(self, h: float) -> float:
-        """
-        Calculate modulus of continuity omega(h).
-        For Gaussians, Table 1 states: omega(t) = (1/s^2) * t
-        (The paper lists t/s^2 under 'fi' column and mentions L-Lipschitz in Appendix A)
-        """
-        # アフィン部分の勾配は定数（Hessian=0）なので、
-        # 勾配の変動（Modulus）はガウス基底の最大変動に支配されます。
-        return h / (self.s**2)
+        # Table 1: omega(t) = t / s^2
+        return h / (self.s ** 2)
 
-    def compute_required_fill_distance(self, K: float, K_max: float, max_coeff_norm: float = 1.0) -> float:
-        """
-        Calculate required grid spacing h.
-        Based on Strategy 2 (Eq. 14 & 15).
-
-        omega_global(h) = 2 * |||c||| * omega_basis(h)
-        We need: omega_global(h) <= Threshold
-
-        Thus: 2 * |||c||| * (h / s^2) <= Threshold
-        => h <= Threshold * s^2 / (2 * |||c|||)
-        """
-        if K_max <= K:
-             warnings.warn("K_max <= K. Returning minimal spacing.")
-             return 0.1 * self.s
-
-        # Threshold for Isometric distortion (Eq. 14)
-        # min( K_max - K,  1/K - 1/K_max )
-        val_iso = min(K_max - K, (1.0/K) - (1.0/K_max))
-
-        # Threshold for Conformal distortion (Eq. 15)
-        # Note: If implementing strictly, one should check which mode is active.
-        # Here we take the safe (smaller) value if we don't know the mode,
-        # or you can split this method. Assuming Isometric for safety:
-        threshold = val_iso
-
-        if threshold <= 0:
-            return 0.1 * self.s
-
-        # omega_basis(h) = h / s^2
-        # Constraint: 2 * max_coeff_norm * (h / s^2) <= threshold
-        # h <= (threshold * s^2) / (2 * max_coeff_norm)
-
-        h_limit = (threshold * (self.s**2)) / (2.0 * max_coeff_norm)
-
-        return h_limit * 0.95  # 5% safety margin
+    def inverse_basis_gradient_modulus(self, val: float) -> float:
+        # omega(h) = val  =>  h / s^2 = val  =>  h = val * s^2
+        return val * (self.s ** 2)
 
     def get_identity_coefficients(self, src_handles: np.ndarray) -> np.ndarray:
         """
@@ -374,6 +220,83 @@ class GaussianRBF(BasisFunction):
         if self.centers is None:
             return 3 # Only affine
         return self.centers.shape[0] + 3
+
+# 歪み上界を与える三つのstrategyのうちの一つ
+class Strategy2:
+    def __init__(self, basis: BasisFunction):
+        self.basis = basis
+
+    def compute_required_fill_distance(self,
+                                     K: float,
+                                     K_max: float,
+                                     max_coeff_norm: float,
+                                     mode: str = 'isometric',
+                                     delta: float = 0.1) -> float:
+        """
+        Calculate fill distance h using Strategy 2.
+
+        Args:
+            K: Bound enforced on collocation points Z.
+            K_max: Desired global bound (K_max > K).
+            max_coeff_norm: Estimate of |||c||| (Eq. 9).
+            mode: 'isometric' or 'conformal'.
+            delta: Lower bound for sigma (used in conformal mode, Eq. 12).
+
+        Returns:
+            Required fill distance h.
+        """
+        if K_max <= K:
+             # K_max must be strictly greater than K for Strategy 2
+             warnings.warn(f"K_max ({K_max}) <= K ({K}). Strategy 2 requires K_max > K.")
+             return 0.0
+
+        # 1. Calculate the target threshold for the global modulus omega(h)
+        # Based on Eq. 14 (Isometric) or Eq. 15 (Conformal)
+        threshold = 0.0
+
+        if mode == 'isometric':
+            # Eq. 14: omega(h) <= min( K_max - K,  1/K - 1/K_max )
+            cond1 = K_max - K
+            cond2 = (1.0 / K) - (1.0 / K_max)
+            threshold = min(cond1, cond2)
+
+        elif mode == 'conformal':
+            # Eq. 15: omega(h) <= delta * (K_max - K) / (K_max + K)
+            # Note: Paper says h_conf <= omega^-1( delta * ... )
+            threshold = delta * (K_max - K) / (K_max + K)
+
+        else:
+            raise ValueError("Unknown distortion mode")
+
+        if threshold <= 0:
+            return 0.0
+
+        # 2. Convert global threshold to basis threshold
+        # omega_global(h) = 2 * |||c||| * omega_basis(h)  (Eq. 9) [cite: 197]
+        # Therefore: omega_basis(h) <= threshold / (2 * |||c|||)
+
+        basis_val = threshold / (2.0 * max_coeff_norm)
+
+        # 3. Calculate h using the inverse function of the basis
+        h = self.basis.inverse_basis_gradient_modulus(basis_val)
+
+        return h
+
+    @staticmethod
+    def compute_coefficient_norm(c: np.ndarray) -> float:
+        """
+        Compute the matrix norm |||c||| as defined in Eq. (8).
+        Args:
+            c: Coefficients matrix of shape (2, N_basis)
+               Row 0 corresponds to u(x), Row 1 corresponds to v(x).
+        Returns:
+            The norm value used for Strategy 2.
+        """
+        # 各行(axis=1)について、要素の絶対値の和を計算
+        row_sums = np.sum(np.abs(c), axis=1)
+
+        # そのうちの最大値を返す
+        return np.max(row_sums)
 
 # --- Main Solver Class ---
 
