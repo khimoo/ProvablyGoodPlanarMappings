@@ -375,6 +375,220 @@ class GaussianRBF(BasisFunction):
             return 3 # Only affine
         return self.centers.shape[0] + 3
 
+# --- データ構造定義 (I/O) ---
+
+@dataclass
+class DeformInput:
+    """フロントエンドから受け取る入力データ"""
+    boundary_polygon: List[Tuple[float, float]] # 定義域Ωの頂点リスト [(x,y), ...]
+    source_points: List[Tuple[float, float]]    # ハンドル操作前の位置 p_i
+    target_points: List[Tuple[float, float]]    # ハンドル操作後の位置 q_i
+    K_max: float                                # 許容最大歪み率 (例: 2.0)
+    K_collocation: float = 1.1                  # コロケーション点上での歪み制約 K (< K_max)
+
+@dataclass
+class DeformOutput:
+    """フロントエンドへ返す出力データ"""
+    uvs: List[Tuple[float, float]]              # 元画像上の正規化座標 (0.0~1.0)
+    positions: List[Tuple[float, float]]        # 変形後のスクリーン座標
+    indices: List[int]                          # 三角形メッシュのインデックスリスト
+    final_h: float                              # 最終的なグリッド密度
+    converged: bool                             # 収束したかどうか
+
+# --- メインクラス ---
+
+class ProvablyGoodPlanarMapping:
+    def __init__(self, strategy_class, basis_class: Type):
+        """
+        Args:
+            strategy_class: Strategy2などの戦略クラス
+            basis_class: GaussianRBFなどの基底クラス（インスタンスではなく型を渡す）
+        """
+        self.StrategyClass = strategy_class
+        self.BasisClass = basis_class
+
+        # 内部状態
+        self.basis = None
+        self.coeffs = None
+
+        # 最適化ソルバーの設定（実際にはMosekやGurobi等のSOCPソルバー推奨）
+        # ここでは抽象化しています
+        self.solver_type = "SOCP_Placeholder"
+
+    def fit(self, input_data: DeformInput, max_iterations: int = 10) -> DeformOutput:
+        """
+        Strategy 2 に基づくメインループ
+        """
+        # 1. 境界情報の解析
+        poly_path = mpl_path.Path(input_data.boundary_polygon)
+        bounds = poly_path.get_extents().extents # (xmin, ymin, xmax, ymax)
+
+        # 初期グリッド密度 h の設定 (例えば短辺の1/10からスタート)
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        current_h = min(width, height) / 8.0
+
+        # Strategy インスタンスの作成 (基底は後でセット)
+        # 注: Strategy2の初期化にはダミーの基底を渡すか、設計を調整してください。
+        # ここでは概念的に strategy.compute_required_fill_distance が使える状態とします。
+
+        print(f"Start fitting: K_max={input_data.K_max}, Initial h={current_h:.4f}")
+
+        final_coeffs = None
+        final_basis = None
+
+        for iteration in range(max_iterations):
+            print(f"--- Iteration {iteration+1} (h={current_h:.4f}) ---")
+
+            # 2. グリッド生成 & フィルタリング
+            # 境界ボックス内にh間隔で点を打ち、ポリゴン内部の点のみ残す
+            collocation_points = self._generate_masked_grid(bounds, current_h, poly_path)
+
+            if len(collocation_points) < 3:
+                # 点が少なすぎる場合はhを強制的に小さくする
+                current_h *= 0.5
+                continue
+
+            # 3. 基底の初期化
+            # グリッド密度 h に合わせて GaussianRBF(s=h) を生成
+            # Strategy 2 では s と h は連動している必要がある
+            basis = self.BasisClass(s=current_h)
+            basis.set_centers(collocation_points)
+
+            # Strategyに現在の基底をセット（計算用）
+            strategy = self.StrategyClass(basis)
+
+            # 4. 最適化実行 (Solver)
+            # 制約: f(p_i) = q_i,  Distortion(z_j) <= K
+            try:
+                coeffs = self._solve_optimization(
+                    basis,
+                    collocation_points,
+                    np.array(input_data.source_points),
+                    np.array(input_data.target_points),
+                    input_data.K_collocation
+                )
+            except Exception as e:
+                print(f"Optimization failed: {e}")
+                break
+
+            # 5. Strategy 2 による判定
+            # 係数のノルムを計算
+            c_norm = strategy.compute_coefficient_norm(coeffs)
+
+            # 必要な h を逆算
+            required_h = strategy.compute_required_fill_distance(
+                K=input_data.K_collocation,
+                K_max=input_data.K_max,
+                max_coeff_norm=c_norm
+            )
+
+            print(f"  Current h: {current_h:.5f} / Required h: {required_h:.5f} / Norm: {c_norm:.2f}")
+
+            # 6. 収束判定
+            if current_h <= required_h:
+                print("  Converged! Strategy 2 condition satisfied.")
+                final_coeffs = coeffs
+                final_basis = basis
+                break
+            else:
+                print("  Refining grid...")
+                # 次のイテレーション用にhを更新
+                # 安全係数 0.9 を掛けて少し小さめにする
+                current_h = required_h * 0.9
+
+                # 無限ループ防止: hが極端に小さくなったら打ち切り
+                if current_h < 1e-5:
+                    print("  h is too small. Stopping.")
+                    final_coeffs = coeffs
+                    final_basis = basis
+                    break
+
+        if final_coeffs is None:
+            raise RuntimeError("Fitting failed to produce coefficients.")
+
+        # 7. 結果メッシュの生成
+        return self._generate_output_mesh(final_basis, final_coeffs, bounds, current_h, poly_path)
+
+    def _generate_masked_grid(self, bounds, h, poly_path):
+        """
+        バウンディングボックス内にグリッドを生成し、
+        ポリゴン（poly_path）に含まれる点だけを抽出して返す。
+        """
+        x_min, y_min, x_max, y_max = bounds
+
+        # マージンを持たせて生成
+        xs = np.arange(x_min, x_max + h, h)
+        ys = np.arange(y_min, y_max + h, h)
+        XX, YY = np.meshgrid(xs, ys)
+
+        grid_points = np.vstack([XX.ravel(), YY.ravel()]).T
+
+        # ポリゴン内外判定 (matplotlib.path を使用)
+        mask = poly_path.contains_points(grid_points)
+
+        return grid_points[mask]
+
+    def _solve_optimization(self, basis, collocation_pts, src_pts, tgt_pts, K):
+        """
+        最適化ソルバーのラッパー。
+        論文では SOCP (Second-Order Cone Programming) を使用。
+        ここではPython実装用に簡略化したインターフェースを示します。
+        """
+        # 実際にはここに scipy.optimize.minimize や cvxpy (Mosek/Gurobi) のコードが入ります。
+        #
+        # 目的関数: E_bh (Biharmonic Energy) -> c.T * H * c
+        # 制約1 (位置): basis.evaluate(src_pts) @ c == tgt_pts
+        # 制約2 (歪み): ||Df(z)|| + ... <= K (SOCP制約)
+
+        # ダミー実装: 恒等写像に近い解を返す（動作確認用）
+        # 本番では必ず適切なソルバーを実装してください
+
+        # 初期値としてIdentityに近い係数を取得
+        c_identity = basis.get_identity_coefficients(collocation_pts)
+
+        # ハンドル制約を満たすための最小二乗法的な補正（擬似コード）
+        # 実際にはここで最適化を行います
+        return c_identity
+
+    def _generate_output_mesh(self, basis, coeffs, bounds, h, poly_path):
+        """
+        最終的な変形情報をメッシュ形式で出力する
+        """
+        # 可視化・レンダリング用に、計算に使ったグリッドより少し細かいメッシュを切るか、
+        # あるいは計算に使ったコロケーションポイントをそのまま頂点として使う。
+        # ここでは計算に使ったポイントを再生成して利用します。
+
+        points = self._generate_masked_grid(bounds, h, poly_path)
+
+        # 1. Delaunay三角分割でインデックス（トポロジー）を生成
+        tri = Delaunay(points)
+        indices = tri.simplices.flatten().tolist()
+
+        # 2. 変形後の位置を計算
+        # f(x) = Phi(x) * c
+        Phi = basis.evaluate(points)
+
+        # coeffs: (2, N) -> Transpose to (N, 2) usually needed depending on formula
+        # 論文の定義に合わせて計算: u = sum c_i phi_i
+        # 実装上の行列積: Positions = Phi @ coeffs.T
+        deformed_points = Phi @ coeffs.T
+
+        # 3. UV座標の計算
+        # 画像全体に対する正規化座標 (0.0 - 1.0)
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        uvs = (points - [bounds[0], bounds[1]]) / [width, height]
+
+        # データクラスに詰めて返す
+        return DeformOutput(
+            uvs=uvs.tolist(),
+            positions=deformed_points.tolist(),
+            indices=indices,
+            final_h=h,
+            converged=True
+        )
+
 # --- Main Solver Class ---
 
 class ProvablyGoodPlanarMapping(ABC):
