@@ -29,6 +29,9 @@ enum PyCommand {
     LoadImage { path: String, epsilon: f32 },
     AddControlPoint { index: usize, x: f32, y: f32 },
     FinalizeSetup, // セットアップ完了、ソルバー構築指示
+    StartDrag,     // ドラッグ開始 (onMouseDown)
+    UpdatePoint { control_index: usize, x: f32, y: f32 }, // ドラッグ中の更新 (onMouseMove)
+    EndDrag,       // ドラッグ終了 (onMouseUp)
     Reset,
 }
 
@@ -49,7 +52,6 @@ enum PyResult {
 struct PythonChannels {
     tx_command: tokio::sync::mpsc::Sender<PyCommand>,
     rx_result: Receiver<PyResult>,
-    tx_coords: watch::Sender<Option<(usize, f32, f32)>>,
 }
 
 #[derive(Resource, Default)]
@@ -121,8 +123,6 @@ fn setup(
     let (tx_cmd, rx_cmd) = tokio::sync::mpsc::channel::<PyCommand>(10);
     // 結果用 (同期Crossbeam - Bevyが受信)
     let (tx_res, rx_res) = bounded::<PyResult>(5); 
-    // 座標同期用ウォッチチャンネル (初期値: None)
-    let (tx_coords, rx_coords) = watch::channel::<Option<(usize, f32, f32)>>(None);
 
     // Pythonスレッド起動 (Tokio Runtime内で実行)
     std::thread::spawn(move || {
@@ -130,13 +130,12 @@ fn setup(
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(python_thread_loop(rx_cmd, tx_res, rx_coords));
+        rt.block_on(python_thread_loop(rx_cmd, tx_res));
     });
 
     commands.insert_resource(PythonChannels {
         tx_command: tx_cmd.clone(),
         rx_result: rx_res,
-        tx_coords,
     });
 
     // メッシュ
@@ -277,8 +276,7 @@ fn update_mesh_and_gizmos(
 }
 async fn python_thread_loop(
     mut rx_cmd: tokio::sync::mpsc::Receiver<PyCommand>,
-    tx_res: Sender<PyResult>,
-    mut rx_coords: watch::Receiver<Option<(usize, f32, f32)>>
+    tx_res: Sender<PyResult>
 ) {
     pyo3::prepare_freethreaded_python();
     
@@ -292,103 +290,101 @@ async fn python_thread_loop(
                 let _ = path_list.insert(0, script_dir);
             }
         }
-        let module = PyModule::import(py, "deform_algo").expect("Failed to import deform_algo");
+        let module = PyModule::import(py, "bevy_bridge").expect("Failed to import bevy_bridge");
         let bridge_class = module.getattr("BevyBridge").expect("No BevyBridge class");
-        // Rustのスレッド内で保持するため、GILに束縛されない PyObject に変換しておく
         let bridge_instance = bridge_class.call0().expect("Failed to init BevyBridge");
         bridge_instance.into()
     });
 
-    println!("Rust: Python Thread Waiting for Mesh Data...");
+    println!("Rust: Python Thread Ready");
 
     loop {
-        let mut should_solve = false;
-        
-        // select! でイベントを待つ
-        tokio::select! {
-            Some(cmd) = rx_cmd.recv() => {
-                Python::with_gil(|py| {
-                    let bridge_bound = bridge.bind(py);
-                    match cmd {
-                        PyCommand::LoadImage { path, epsilon } => {
-                             println!("Rust->Py: LoadImage {}, eps={}", path, epsilon);
-                             match bridge_bound.call_method1("load_image_and_generate_mesh", (path, epsilon)) {
-                                Ok(res_tuple) => {
-                                    if let Ok((verts, indices, uvs, w, h)) = res_tuple.extract::<(Vec<f32>, Vec<u32>, Vec<f32>, f32, f32)>() {
-                                        let _ = tx_res.send(PyResult::MeshInit {
-                                            vertices: verts,
-                                            indices,
-                                            uvs,
-                                            image_width: w,
-                                            image_height: h,
-                                        });
-                                    } else {
-                                        eprintln!("Py Error: Failed to extract mesh data tuple");
-                                    }
-                                },
-                                Err(e) => eprintln!("Py Error (LoadImage): {}", e),
-                             }
-                        }
-                        PyCommand::AddControlPoint { index, x, y } => {
-                            if let Err(e) = bridge_bound.call_method1("add_control_point", (index, x, y)) {
-                                eprintln!("Py Error (Add): {}", e);
-                            }
-                        }
-                        PyCommand::FinalizeSetup => {
-                            println!("Rust: Finalizing Setup...");
-                            if let Err(e) = bridge_bound.call_method0("finalize_setup") {
-                                eprintln!("Py Error (Finalize): {}", e);
+        let Some(cmd) = rx_cmd.recv().await else {
+            break;
+        };
+
+        Python::with_gil(|py| {
+            let bridge_bound = bridge.bind(py);
+            match cmd {
+                PyCommand::LoadImage { path, epsilon } => {
+                    println!("Rust->Py: LoadImage {}, eps={}", path, epsilon);
+                    match bridge_bound.call_method1("load_image_and_generate_mesh", (path, epsilon)) {
+                        Ok(res_tuple) => {
+                            if let Ok((verts, indices, uvs, w, h)) = res_tuple.extract::<(Vec<f32>, Vec<u32>, Vec<f32>, f32, f32)>() {
+                                let _ = tx_res.send(PyResult::MeshInit {
+                                    vertices: verts,
+                                    indices,
+                                    uvs,
+                                    image_width: w,
+                                    image_height: h,
+                                });
                             } else {
-                                // Immediately solve to establish identity mapping
-                                should_solve = true;
+                                eprintln!("Py Error: Failed to extract mesh data tuple");
                             }
-                        }
-                        PyCommand::Reset => {
-                             if let Err(e) = bridge_bound.call_method0("reset_mesh") {
-                                eprintln!("Py Error (Reset): {}", e);
-                            } else {
-                                should_solve = true;
+                        },
+                        Err(e) => eprintln!("Py Error (LoadImage): {}", e),
+                    }
+                }
+                PyCommand::AddControlPoint { index, x, y } => {
+                    if let Err(e) = bridge_bound.call_method1("add_control_point", (index, x, y)) {
+                        eprintln!("Py Error (Add): {}", e);
+                    }
+                }
+                PyCommand::FinalizeSetup => {
+                    println!("Rust: Finalizing Setup...");
+                    if let Err(e) = bridge_bound.call_method0("finalize_setup") {
+                        eprintln!("Py Error (Finalize): {}", e);
+                    } else {
+                        // Immediately solve to establish identity mapping
+                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
+                            if let Ok(vertices) = res.extract::<Vec<f32>>() {
+                                if !vertices.is_empty() {
+                                    let _ = tx_res.send(PyResult::DeformUpdate(vertices));
+                                }
                             }
                         }
                     }
-                });
-            }
-            Ok(_) = rx_coords.changed() => {
-                let val = *rx_coords.borrow_and_update();
-                if let Some((index, x, y)) = val {
-                    Python::with_gil(|py| {
-                        let bridge_bound = bridge.bind(py);
-                         // println!("Rust->Py: Update Point {} -> ({:.1}, {:.1})", index, x, y);
-                         if let Err(e) = bridge_bound.call_method1("update_control_point", (index, x, y)) {
-                            eprintln!("Py Error (Update): {}", e);
-                        } else {
-                            should_solve = true;
-                        }
-                    });
                 }
-            }
-        }
-
-        if should_solve {
-            let res_verts: Option<Vec<f32>> = Python::with_gil(|py| {
-                let bridge_bound = bridge.bind(py);
-                match bridge_bound.call_method0("solve_frame") {
-                    Ok(res) => {
-                         res.extract::<Vec<f32>>().ok()
-                    },
-                    Err(e) => {
-                        eprintln!("Py Solve Error: {}", e);
-                        None
+                PyCommand::StartDrag => {
+                    if let Err(e) = bridge_bound.call_method0("start_drag_operation") {
+                        eprintln!("Py Error (StartDrag): {}", e);
                     }
                 }
-            });
-
-            if let Some(vertices) = res_verts {
-                if !vertices.is_empty() {
-                    let _ = tx_res.send(PyResult::DeformUpdate(vertices));
+                PyCommand::UpdatePoint { control_index, x, y } => {
+                    if let Err(e) = bridge_bound.call_method1("update_control_point", (control_index, x, y)) {
+                        eprintln!("Py Error (UpdatePoint): {}", e);
+                    } else {
+                        // Solve and send updated mesh
+                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
+                            if let Ok(vertices) = res.extract::<Vec<f32>>() {
+                                if !vertices.is_empty() {
+                                    let _ = tx_res.send(PyResult::DeformUpdate(vertices));
+                                }
+                            }
+                        }
+                    }
+                }
+                PyCommand::EndDrag => {
+                    if let Err(e) = bridge_bound.call_method0("end_drag_operation") {
+                        eprintln!("Py Error (EndDrag): {}", e);
+                    } else {
+                        // Final solve after drag ends
+                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
+                            if let Ok(vertices) = res.extract::<Vec<f32>>() {
+                                if !vertices.is_empty() {
+                                    let _ = tx_res.send(PyResult::DeformUpdate(vertices));
+                                }
+                            }
+                        }
+                    }
+                }
+                PyCommand::Reset => {
+                    if let Err(e) = bridge_bound.call_method0("reset_mesh") {
+                        eprintln!("Py Error (Reset): {}", e);
+                    }
                 }
             }
-        }
+        });
     }
 }
 
