@@ -7,7 +7,7 @@ edition = "2021"
 bevy = { version = "0.15", default-features = false, features = [
     # レンダリング基盤
     "bevy_asset",
-    "bevy_winit",
+    "bevy_winit",         # ウィンドウ管理 + 入力処理を含む
     "bevy_core_pipeline",
     "bevy_render",
     
@@ -18,6 +18,9 @@ bevy = { version = "0.15", default-features = false, features = [
     # UI
     "bevy_ui",
     "bevy_text",
+    
+    # ステート管理
+    "bevy_state",
     
     # 画像フォーマット
     "png",
