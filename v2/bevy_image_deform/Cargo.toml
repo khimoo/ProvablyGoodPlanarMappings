@@ -4,11 +4,36 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = "0.15"
+bevy = { version = "0.15", default-features = false, features = [
+    # レンダリング基盤
+    "bevy_asset",
+    "bevy_winit",
+    "bevy_core_pipeline",
+    "bevy_render",
+    
+    # 2D
+    "bevy_sprite",
+    "bevy_gizmos",
+    
+    # UI
+    "bevy_ui",
+    "bevy_text",
+    
+    # 画像フォーマット
+    "png",
+    
+    # システム
+    "multi_threaded",
+    
+    # Linux用（必要に応じて）
+    "x11",
+    "wayland",
+] }
 bevy_egui = "0.32"
 pyo3 = { version = "0.23", features = ["auto-initialize"] }
 crossbeam-channel = "0.5"
 tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+image = "0.25"
 
 # 最適化設定
 [profile.dev]
