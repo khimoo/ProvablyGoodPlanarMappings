@@ -20,7 +20,11 @@
 
 use bevy::{
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    render::{
+        render_resource::{Extent3d, TextureDimension, TextureFormat, AsBindGroup, ShaderRef},
+        mesh::Mesh2d,
+    },
+    sprite::{Material2d, Material2dPlugin, MeshMaterial2d},
 };
 use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::prelude::*;
@@ -61,6 +65,9 @@ enum PyResult {
         n_rbf: usize,
         image_width: f32,
         image_height: f32,
+        inverse_grid: Vec<Vec<Vec<f32>>>,  // (H, W, 2)
+        grid_width: usize,
+        grid_height: usize,
     },
 }
 
@@ -85,6 +92,9 @@ struct MappingParameters {
     n_rbf: usize,
     image_width: f32,
     image_height: f32,
+    inverse_grid: Vec<Vec<Vec<f32>>>,  // (H, W, 2)
+    grid_width: usize,
+    grid_height: usize,
     is_valid: bool,
 }
 
@@ -100,6 +110,27 @@ struct DeformedImage;
 
 #[derive(Component)]
 struct ModeText;
+
+// Custom material for deformation shader
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct DeformMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    source_texture: Handle<Image>,
+    
+    #[texture(2)]
+    #[sampler(3)]
+    inverse_grid_texture: Handle<Image>,
+    
+    #[uniform(4)]
+    grid_size: Vec2,  // (width, height) of inverse grid
+}
+
+impl Material2d for DeformMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/deform.wgsl".into()
+    }
+}
 
 // 輪郭線抽出: アルファチャンネルから境界を検出
 fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
@@ -159,45 +190,6 @@ fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
     contour_points
 }
 
-// Gaussian RBF を評価する関数
-fn evaluate_gaussian_rbf(
-    pos: Vec2,
-    coeffs: &[Vec<f32>],
-    centers: &[Vec<f32>],
-    s: f32,
-) -> Vec2 {
-    let mut result = Vec2::ZERO;
-    let n_rbf = centers.len();
-    
-    // RBF項
-    for i in 0..n_rbf {
-        let center = Vec2::new(centers[i][0], centers[i][1]);
-        let diff = pos - center;
-        let r2 = diff.length_squared();
-        let phi = (-r2 / (2.0 * s * s)).exp();
-        
-        result.x += coeffs[0][i] * phi;
-        result.y += coeffs[1][i] * phi;
-    }
-    
-    // アフィン項: [1, x, y]
-    if coeffs[0].len() >= n_rbf + 3 {
-        // 定数項
-        result.x += coeffs[0][n_rbf];
-        result.y += coeffs[1][n_rbf];
-        
-        // x項
-        result.x += coeffs[0][n_rbf + 1] * pos.x;
-        result.y += coeffs[1][n_rbf + 1] * pos.x;
-        
-        // y項
-        result.x += coeffs[0][n_rbf + 2] * pos.y;
-        result.y += coeffs[1][n_rbf + 2] * pos.y;
-    }
-    
-    result
-}
-
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -208,6 +200,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(Material2dPlugin::<DeformMaterial>::default())
         .init_state::<AppMode>()
         .init_resource::<ControlPoints>()
         .init_resource::<MappingParameters>()
@@ -216,6 +209,8 @@ fn main() {
             handle_input,
             receive_python_results,
             render_deformed_image,
+        ))
+        .add_systems(Update, (
             draw_control_points,
             update_ui_text,
         ))
@@ -225,6 +220,8 @@ fn main() {
 fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<DeformMaterial>>,
 ) {
     commands.spawn(Camera2d::default());
 
@@ -274,9 +271,20 @@ fn setup(
         handle: image_handle.clone(),
     });
 
-    // 画像を表示（初期状態）
+    // Create a quad mesh for the deformed image
+    let quad_handle = meshes.add(Rectangle::new(image_width, image_height));
+    
+    // Create initial material (will be updated when deformation happens)
+    let material_handle = materials.add(DeformMaterial {
+        source_texture: image_handle.clone(),
+        inverse_grid_texture: Handle::default(),
+        grid_size: Vec2::new(1.0, 1.0),
+    });
+
+    // Spawn the deformed image entity using new Bevy 0.15 API
     commands.spawn((
-        Sprite::from_image(image_handle),
+        Mesh2d(quad_handle),
+        MeshMaterial2d(material_handle),
         Transform::from_xyz(0.0, 0.0, 0.0),
         DeformedImage,
     ));
@@ -388,8 +396,12 @@ async fn python_thread_loop(
                                 let n = extract_from_dict(params, "n_rbf");
                                 let w = extract_from_dict(params, "image_width");
                                 let h = extract_from_dict(params, "image_height");
+                                let inv_grid = extract_from_dict(params, "inverse_grid");
+                                let grid_w = extract_from_dict(params, "grid_width");
+                                let grid_h = extract_from_dict(params, "grid_height");
                                 
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h)) = (coeffs, centers, s, n, w, h) {
+                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) = 
+                                    (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
                                     let _ = tx_res.send(PyResult::MappingParameters {
                                         coefficients: coeffs,
                                         centers,
@@ -397,6 +409,9 @@ async fn python_thread_loop(
                                         n_rbf: n,
                                         image_width: w,
                                         image_height: h,
+                                        inverse_grid: inv_grid,
+                                        grid_width: grid_w,
+                                        grid_height: grid_h,
                                     });
                                 }
                             }
@@ -417,8 +432,12 @@ async fn python_thread_loop(
                                 let n = extract_from_dict(params, "n_rbf");
                                 let w = extract_from_dict(params, "image_width");
                                 let h = extract_from_dict(params, "image_height");
+                                let inv_grid = extract_from_dict(params, "inverse_grid");
+                                let grid_w = extract_from_dict(params, "grid_width");
+                                let grid_h = extract_from_dict(params, "grid_height");
                                 
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h)) = (coeffs, centers, s, n, w, h) {
+                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) = 
+                                    (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
                                     let _ = tx_res.send(PyResult::MappingParameters {
                                         coefficients: coeffs,
                                         centers,
@@ -426,6 +445,9 @@ async fn python_thread_loop(
                                         n_rbf: n,
                                         image_width: w,
                                         image_height: h,
+                                        inverse_grid: inv_grid,
+                                        grid_width: grid_w,
+                                        grid_height: grid_h,
                                     });
                                 }
                             }
@@ -458,14 +480,20 @@ fn receive_python_results(
                 n_rbf,
                 image_width,
                 image_height,
+                inverse_grid,
+                grid_width,
+                grid_height,
             } => {
-                println!("Received mapping parameters: {} RBFs", n_rbf);
+                println!("Received mapping parameters: {} RBFs, inverse grid {}x{}", n_rbf, grid_width, grid_height);
                 mapping_params.coefficients = coefficients;
                 mapping_params.centers = centers;
                 mapping_params.s_param = s_param;
                 mapping_params.n_rbf = n_rbf;
                 mapping_params.image_width = image_width;
                 mapping_params.image_height = image_height;
+                mapping_params.inverse_grid = inverse_grid;
+                mapping_params.grid_width = grid_width;
+                mapping_params.grid_height = grid_height;
                 mapping_params.is_valid = true;
             }
         }
@@ -474,102 +502,59 @@ fn receive_python_results(
 
 fn render_deformed_image(
     mapping_params: Res<MappingParameters>,
-    image_data: Res<ImageData>,
     mut images: ResMut<Assets<Image>>,
-    mut query: Query<&mut Sprite, With<DeformedImage>>,
-    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<DeformMaterial>>,
+    query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
 ) {
     // マッピングパラメータが有効でない場合は何もしない
     if !mapping_params.is_valid {
         return;
     }
 
-    // 元画像を取得
-    let Some(src_image) = images.get(&image_data.handle) else {
+    // Get the material handle
+    let Ok(material_2d) = query.get_single() else {
         return;
     };
 
-    let width = src_image.width();
-    let height = src_image.height();
+    // Get the material
+    let Some(material) = materials.get_mut(&material_2d.0) else {
+        return;
+    };
 
-    // 新しい画像を作成
-    let mut deformed_data = vec![0u8; (width * height * 4) as usize];
-
-    // 各ピクセルで変形写像 f(x) を評価
-    for y in 0..height {
-        for x in 0..width {
-            let pixel_idx = ((y * width + x) * 4) as usize;
-
-            // ピクセル位置（画像座標系: 左上が原点、Y-Down）
-            let src_pos = Vec2::new(x as f32, y as f32);
-
-            // 変形写像を評価: f(src_pos) = deformed_pos
-            let deformed_pos = evaluate_gaussian_rbf(
-                src_pos,
-                &mapping_params.coefficients,
-                &mapping_params.centers,
-                mapping_params.s_param,
-            );
-
-            // 変形後の位置から元画像をサンプリング
-            let sample_x = deformed_pos.x.clamp(0.0, (width - 1) as f32);
-            let sample_y = deformed_pos.y.clamp(0.0, (height - 1) as f32);
-
-            // バイリニア補間でサンプリング
-            let x0 = sample_x.floor() as u32;
-            let y0 = sample_y.floor() as u32;
-            let x1 = (x0 + 1).min(width - 1);
-            let y1 = (y0 + 1).min(height - 1);
-
-            let fx = sample_x - x0 as f32;
-            let fy = sample_y - y0 as f32;
-
-            // 4つの隣接ピクセルを取得
-            let get_pixel = |px: u32, py: u32| -> [f32; 4] {
-                let idx = ((py * width + px) * 4) as usize;
-                [
-                    src_image.data[idx] as f32,
-                    src_image.data[idx + 1] as f32,
-                    src_image.data[idx + 2] as f32,
-                    src_image.data[idx + 3] as f32,
-                ]
-            };
-
-            let p00 = get_pixel(x0, y0);
-            let p10 = get_pixel(x1, y0);
-            let p01 = get_pixel(x0, y1);
-            let p11 = get_pixel(x1, y1);
-
-            // バイリニア補間
-            for c in 0..4 {
-                let top = p00[c] * (1.0 - fx) + p10[c] * fx;
-                let bottom = p01[c] * (1.0 - fx) + p11[c] * fx;
-                let value = top * (1.0 - fy) + bottom * fy;
-                deformed_data[pixel_idx + c] = value.clamp(0.0, 255.0) as u8;
-            }
+    // Convert inverse grid to texture
+    let grid_w = mapping_params.grid_width;
+    let grid_h = mapping_params.grid_height;
+    
+    // Create RG32Float texture for inverse mapping (2 channels for x, y)
+    let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8); // 2 floats * 4 bytes each
+    
+    for y in 0..grid_h {
+        for x in 0..grid_w {
+            let src_x = mapping_params.inverse_grid[y][x][0];
+            let src_y = mapping_params.inverse_grid[y][x][1];
+            
+            // Write as little-endian f32
+            grid_data.extend_from_slice(&src_x.to_le_bytes());
+            grid_data.extend_from_slice(&src_y.to_le_bytes());
         }
     }
-
-    // 新しい画像を作成
-    let deformed_image = Image::new(
+    
+    let inverse_grid_image = Image::new(
         Extent3d {
-            width,
-            height,
+            width: grid_w as u32,
+            height: grid_h as u32,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        deformed_data,
-        TextureFormat::Rgba8UnormSrgb,
+        grid_data,
+        TextureFormat::Rg32Float,
         Default::default(),
     );
-
-    // 画像をアセットに追加
-    let deformed_handle = images.add(deformed_image);
-
-    // スプライトの画像を更新
-    if let Ok(mut sprite) = query.get_single_mut() {
-        sprite.image = deformed_handle;
-    }
+    
+    // Add to assets and update material
+    let inverse_grid_handle = images.add(inverse_grid_image);
+    material.inverse_grid_texture = inverse_grid_handle;
+    material.grid_size = Vec2::new(grid_w as f32, grid_h as f32);
 }
 
 fn draw_control_points(
