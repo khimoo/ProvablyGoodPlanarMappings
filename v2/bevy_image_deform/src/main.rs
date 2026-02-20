@@ -32,7 +32,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule};
 use std::env;
-use imageproc::contours::{find_contours, BorderType};
+use imageproc::contours::find_contours;
 use geo::{Contains, Polygon, Coord};
 
 // --- アプリケーションの状態 (モード) ---
@@ -826,6 +826,9 @@ fn handle_input(
                     );
                 }
             }
+        }
+        AppMode::Finalizing => {
+            // 操作不可（上部で早期リターン済みだが、念のため）
         }
         AppMode::Deform => {
             if buttons.just_pressed(MouseButton::Left) {
