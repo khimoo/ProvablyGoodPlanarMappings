@@ -39,8 +39,9 @@ use geo::{Contains, Polygon, Coord};
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 enum AppMode {
     #[default]
-    Setup,   // 点を追加するモード (変形なし)
-    Deform,  // 点をドラッグして変形するモード
+    Setup,       // 点を追加するモード (変形なし)
+    Finalizing,  // セットアップ完了処理中（操作不可）
+    Deform,      // 点をドラッグして変形するモード
 }
 
 // --- 通信コマンド ---
@@ -58,6 +59,7 @@ enum PyCommand {
 // --- 通信結果 ---
 enum PyResult {
     DomainInitialized,
+    SetupFinalized,  // セットアップ完了通知
     MappingParameters {
         coefficients: Vec<Vec<f32>>,  // (2, N+3)
         centers: Vec<Vec<f32>>,        // (N, 2)
@@ -490,6 +492,9 @@ async fn python_thread_loop(
                     println!("Rust: Finalizing Setup...");
                     if let Err(e) = bridge_bound.call_method0("finalize_setup") {
                         eprintln!("Py Error (Finalize): {}", e);
+                    } else {
+                        // セットアップ完了を通知
+                        let _ = tx_res.send(PyResult::SetupFinalized);
                     }
                 }
                 PyCommand::StartDrag => {
@@ -582,11 +587,20 @@ async fn python_thread_loop(
 fn receive_python_results(
     channels: Res<PythonChannels>,
     mut mapping_params: ResMut<MappingParameters>,
+    mut next_state: ResMut<NextState<AppMode>>,
+    state: Res<State<AppMode>>,
 ) {
     while let Ok(res) = channels.rx_result.try_recv() {
         match res {
             PyResult::DomainInitialized => {
                 println!("Domain initialized");
+            }
+            PyResult::SetupFinalized => {
+                println!("Setup finalized, switching to Deform mode");
+                // Finalizingモードの場合のみDeformモードに遷移
+                if *state.get() == AppMode::Finalizing {
+                    next_state.set(AppMode::Deform);
+                }
             }
             PyResult::MappingParameters {
                 coefficients,
@@ -679,8 +693,9 @@ fn draw_control_points(
 ) {
     // モードによって制御点の色を変える
     let point_color = match state.get() {
-        AppMode::Setup => Color::srgb(1.0, 1.0, 0.0),   // YELLOW
-        AppMode::Deform => Color::srgb(0.0, 1.0, 1.0),  // CYAN
+        AppMode::Setup => Color::srgb(1.0, 1.0, 0.0),       // YELLOW
+        AppMode::Finalizing => Color::srgb(0.5, 0.5, 0.5),  // GRAY (processing)
+        AppMode::Deform => Color::srgb(0.0, 1.0, 1.0),      // CYAN
     };
 
     for (i, (_, pos)) in control_points.points.iter().enumerate() {
@@ -716,15 +731,20 @@ fn handle_input(
         return;
     }
 
-    // --- 共通: Enterキーでモード切替 (Setup -> Deform) ---
+    // --- 共通: Enterキーでモード切替 (Setup -> Finalizing) ---
     if *state.get() == AppMode::Setup && keys.just_pressed(KeyCode::Enter) {
         if control_points.points.is_empty() {
             println!("No control points added!");
             return;
         }
-        println!("Switching to Deform Mode");
+        println!("Starting finalization...");
         let _ = channels.tx_command.try_send(PyCommand::FinalizeSetup);
-        next_state.set(AppMode::Deform);
+        next_state.set(AppMode::Finalizing);
+        return;
+    }
+
+    // --- Finalizingモード中は操作を受け付けない ---
+    if *state.get() == AppMode::Finalizing {
         return;
     }
 
@@ -857,6 +877,10 @@ fn update_ui_text(
             AppMode::Setup => {
                 **text = "Mode: SETUP\n[Click] Add Point\n[Enter] Start Deform\n[R] Reset".to_string();
                 color.0 = Color::srgb(0.0, 1.0, 0.0); // Green
+            },
+            AppMode::Finalizing => {
+                **text = "Mode: FINALIZING...\nPlease wait...".to_string();
+                color.0 = Color::srgb(1.0, 1.0, 0.0); // Yellow
             },
             AppMode::Deform => {
                 **text = "Mode: DEFORM\n[Drag] Move Points\n[R] Reset".to_string();
