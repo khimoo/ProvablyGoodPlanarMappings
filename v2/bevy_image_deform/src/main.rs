@@ -21,246 +21,21 @@
 use bevy::{
     prelude::*,
     render::{
-        render_resource::{Extent3d, TextureDimension, TextureFormat, AsBindGroup, ShaderRef},
-        mesh::Mesh2d,
+        render_resource::{Extent3d, TextureDimension, TextureFormat},
         camera::OrthographicProjection,
     },
-    sprite::{Material2d, Material2dPlugin, MeshMaterial2d},
+    sprite::{Material2dPlugin, MeshMaterial2d},
 };
 use image::GenericImageView;
-use crossbeam_channel::{bounded, Receiver, Sender};
-use pyo3::prelude::*;
-use pyo3::types::{PyList, PyModule};
-use std::env;
-use imageproc::contours::find_contours;
-use geo::{Contains, Polygon, Coord};
 
-// --- アプリケーションの状態 (モード) ---
-#[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
-enum AppMode {
-    #[default]
-    Setup,       // 点を追加するモード (変形なし)
-    Finalizing,  // セットアップ完了処理中（操作不可）
-    Deform,      // 点をドラッグして変形するモード
-}
-
-// --- 通信コマンド ---
-enum PyCommand {
-    InitializeDomain { width: f32, height: f32, epsilon: f32 },
-    SetContour { contour: Vec<(f32, f32)> },
-    AddControlPoint { index: usize, x: f32, y: f32 },
-    FinalizeSetup,
-    StartDrag,
-    UpdatePoint { control_index: usize, x: f32, y: f32 },
-    EndDrag,
-    Reset,
-}
-
-// --- 通信結果 ---
-enum PyResult {
-    DomainInitialized,
-    SetupFinalized,  // セットアップ完了通知
-    MappingParameters {
-        coefficients: Vec<Vec<f32>>,  // (2, N+3)
-        centers: Vec<Vec<f32>>,        // (N, 2)
-        s_param: f32,
-        n_rbf: usize,
-        image_width: f32,
-        image_height: f32,
-        inverse_grid: Vec<Vec<Vec<f32>>>,  // (H, W, 2)
-        grid_width: usize,
-        grid_height: usize,
-    },
-}
-
-// --- リソース ---
-#[derive(Resource)]
-struct PythonChannels {
-    tx_command: tokio::sync::mpsc::Sender<PyCommand>,
-    rx_result: Receiver<PyResult>,
-}
-
-#[derive(Resource, Default)]
-struct ControlPoints {
-    points: Vec<(usize, Vec2)>,  // (control_index, position in world coords)
-    dragging_index: Option<usize>,
-}
-
-#[derive(Resource, Default)]
-struct MappingParameters {
-    coefficients: Vec<Vec<f32>>,  // (2, N+3)
-    centers: Vec<Vec<f32>>,        // (N, 2) in image coords
-    s_param: f32,
-    n_rbf: usize,
-    image_width: f32,
-    image_height: f32,
-    inverse_grid: Vec<Vec<Vec<f32>>>,  // (H, W, 2)
-    grid_width: usize,
-    grid_height: usize,
-    is_valid: bool,
-}
-
-#[derive(Resource)]
-struct ImageData {
-    width: f32,
-    height: f32,
-    handle: Handle<Image>,
-    contour: Vec<(f32, f32)>,  // Contour points for boundary checking
-}
-
-#[derive(Component)]
-struct DeformedImage;
-
-#[derive(Component)]
-struct ModeText;
-
-#[derive(Component)]
-struct MainCamera;
-
-// Custom material for deformation shader
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-struct DeformMaterial {
-    #[texture(0)]
-    #[sampler(1)]
-    source_texture: Handle<Image>,
-
-    #[texture(2)]
-    #[sampler(3)]
-    inverse_grid_texture: Handle<Image>,
-
-    #[uniform(4)]
-    grid_size: Vec2,  // (width, height) of inverse grid
-}
-
-impl Material2d for DeformMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/deform.wgsl".into()
-    }
-}
-
-// 輪郭線抽出の設定
-const CONTOUR_TARGET_POINTS: usize = 1024;
-const ALPHA_THRESHOLD: u8 = 128;
-
-// 輪郭線抽出: imageprocを使用してアルファチャンネルから境界を検出
-fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
-    let img = match image::open(image_path) {
-        Ok(img) => img,
-        Err(e) => {
-            eprintln!("Failed to load image for contour extraction: {}", e);
-            return vec![];
-        }
-    };
-
-    let (width, height) = img.dimensions();
-    let rgba = img.to_rgba8();
-
-    println!("Extracting contour from {}x{} image", width, height);
-
-    // アルファ値のバイナリマップを作成
-    let binary_image = imageproc::map::map_pixels(&rgba, |_x, _y, p| {
-        if p[3] >= ALPHA_THRESHOLD {
-            image::Luma([255u8])
-        } else {
-            image::Luma([0u8])
-        }
-    });
-
-    // imageprocで輪郭線を検出
-    let contours = find_contours::<u32>(&binary_image);
-
-    if contours.is_empty() {
-        println!("No contours found, using full image rectangle");
-        return vec![
-            (0.0, 0.0),
-            (width as f32, 0.0),
-            (width as f32, height as f32),
-            (0.0, height as f32),
-        ];
-    }
-
-    // 最も長い輪郭を選択（通常は外側の境界）
-    let longest_contour = contours
-        .iter()
-        .max_by_key(|c| c.points.len())
-        .unwrap();
-
-    println!("Found contour with {} points", longest_contour.points.len());
-
-    // imageproc::contours::Pointをf32タプルに変換
-    let contour_points: Vec<(f32, f32)> = longest_contour
-        .points
-        .iter()
-        .map(|p| (p.x as f32, p.y as f32))
-        .collect();
-
-    // 輪郭線を目標点数にリサンプリング
-    let resampled = resample_contour(&contour_points, CONTOUR_TARGET_POINTS);
-
-    println!("Resampled contour to {} points", resampled.len());
-
-    resampled
-}
-
-// 輪郭線を等間隔にリサンプリング
-fn resample_contour(contour: &[(f32, f32)], target_points: usize) -> Vec<(f32, f32)> {
-    if contour.len() <= target_points {
-        return contour.to_vec();
-    }
-
-    // 輪郭線の総長を計算
-    let mut total_length = 0.0;
-    for i in 0..contour.len() - 1 {
-        let dx = contour[i + 1].0 - contour[i].0;
-        let dy = contour[i + 1].1 - contour[i].1;
-        total_length += (dx * dx + dy * dy).sqrt();
-    }
-
-    if total_length == 0.0 {
-        return contour.to_vec();
-    }
-
-    // 目標間隔
-    let target_spacing = total_length / target_points as f32;
-
-    let mut resampled = Vec::new();
-    resampled.push(contour[0]);
-
-    let mut accumulated_dist = 0.0;
-    let mut next_sample_dist = target_spacing;
-
-    for i in 0..contour.len() - 1 {
-        let p1 = contour[i];
-        let p2 = contour[i + 1];
-        let dx = p2.0 - p1.0;
-        let dy = p2.1 - p1.1;
-        let segment_length = (dx * dx + dy * dy).sqrt();
-
-        if segment_length == 0.0 {
-            continue;
-        }
-
-        let segment_end_dist = accumulated_dist + segment_length;
-
-        // このセグメント内にサンプル点がある場合
-        while next_sample_dist <= segment_end_dist && resampled.len() < target_points {
-            let t = (next_sample_dist - accumulated_dist) / segment_length;
-            let sample_x = p1.0 + dx * t;
-            let sample_y = p1.1 + dy * t;
-            resampled.push((sample_x, sample_y));
-            next_sample_dist += target_spacing;
-        }
-
-        accumulated_dist = segment_end_dist;
-    }
-
-    // 目標点数に達していない場合、最後の点を追加
-    if resampled.len() < target_points {
-        resampled.push(*contour.last().unwrap());
-    }
-
-    resampled
-}
+use bevy_image_deform::{
+    state::{AppMode, ControlPoints, MappingParameters, DeformedImage, ModeText, MainCamera},
+    python::{PythonChannels, PyCommand, PyResult, python_thread_loop},
+    image::{ImageData, extract_contour_from_image},
+    rendering::{DeformMaterial, render_deformed_image},
+    input::handle_input,
+    ui::{update_ui_text, draw_control_points},
+};
 
 fn main() {
     App::new()
@@ -299,7 +74,6 @@ fn setup(
 ) {
     commands.spawn((Camera2d::default(), MainCamera));
 
-    // UIテキスト
     commands.spawn((
         Text::new("Mode: Setup\n[Click] Add Point\n[Enter] Start Deform\n[R] Reset"),
         TextColor(Color::WHITE),
@@ -312,12 +86,9 @@ fn setup(
         ModeText,
     ));
 
-    // イベント用 (非同期MPSC)
     let (tx_cmd, rx_cmd) = tokio::sync::mpsc::channel::<PyCommand>(10);
-    // 結果用 (同期Crossbeam - Bevyが受信)
-    let (tx_res, rx_res) = bounded::<PyResult>(5);
+    let (tx_res, rx_res) = crossbeam_channel::bounded::<PyResult>(5);
 
-    // Pythonスレッド起動 (Tokio Runtime内で実行)
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -331,11 +102,9 @@ fn setup(
         rx_result: rx_res,
     });
 
-    // 画像をロード
     let image_path = "texture.png";
     let image_handle = asset_server.load(image_path);
 
-    // 画像サイズを実際のファイルから取得
     let full_image_path = format!("assets/{}", image_path);
     let (image_width, image_height) = match image::open(&full_image_path) {
         Ok(img) => {
@@ -349,7 +118,6 @@ fn setup(
         }
     };
 
-    // 輪郭線を抽出
     let contour = extract_contour_from_image(&full_image_path);
     if contour.is_empty() {
         println!("No contour extracted, using full image domain");
@@ -364,17 +132,14 @@ fn setup(
         contour: contour.clone(),
     });
 
-    // Create a quad mesh for the deformed image
     let quad_handle = meshes.add(Rectangle::new(image_width, image_height));
 
-    // Create identity inverse grid for initial state (no deformation)
     let grid_w = image_width as usize;
     let grid_h = image_height as usize;
     let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8);
 
     for y in 0..grid_h {
         for x in 0..grid_w {
-            // Identity mapping: each pixel maps to itself
             let src_x = x as f32;
             let src_y = y as f32;
             grid_data.extend_from_slice(&src_x.to_le_bytes());
@@ -396,14 +161,12 @@ fn setup(
 
     let identity_grid_handle = images.add(identity_grid_image);
 
-    // Create initial material with identity mapping
     let material_handle = materials.add(DeformMaterial {
         source_texture: image_handle.clone(),
         inverse_grid_texture: identity_grid_handle,
         grid_size: Vec2::new(grid_w as f32, grid_h as f32),
     });
 
-    // Spawn the deformed image entity using new Bevy 0.15 API
     commands.spawn((
         Mesh2d(quad_handle),
         MeshMaterial2d(material_handle),
@@ -411,7 +174,6 @@ fn setup(
         DeformedImage,
     ));
 
-    // Pythonへドメイン初期化コマンドを送信
     let epsilon = 50.0;
     println!(
         "Initializing domain: {}x{}, epsilon={}",
@@ -423,164 +185,8 @@ fn setup(
         epsilon,
     });
 
-    // 輪郭線をPythonに送信
     if !contour.is_empty() {
         let _ = tx_cmd.try_send(PyCommand::SetContour { contour });
-    }
-}
-
-async fn python_thread_loop(
-    mut rx_cmd: tokio::sync::mpsc::Receiver<PyCommand>,
-    tx_res: Sender<PyResult>,
-) {
-    pyo3::prepare_freethreaded_python();
-
-    // Pythonオブジェクトをループ外で保持
-    let bridge: PyObject = Python::with_gil(|py| {
-        let sys = py.import("sys").unwrap();
-        let current_dir = env::current_dir().unwrap();
-        let script_dir = current_dir.join("scripts");
-        if let Ok(path) = sys.getattr("path") {
-            if let Ok(path_list) = path.downcast::<PyList>() {
-                let _ = path_list.insert(0, script_dir);
-            }
-        }
-        let module = PyModule::import(py, "bevy_bridge").expect("Failed to import bevy_bridge");
-        let bridge_class = module.getattr("BevyBridge").expect("No BevyBridge class");
-        let bridge_instance = bridge_class.call0().expect("Failed to init BevyBridge");
-        bridge_instance.into()
-    });
-
-    println!("Rust: Python Thread Ready");
-
-    // Helper function to extract from PyDict
-    fn extract_from_dict<T>(dict: &pyo3::Bound<'_, pyo3::types::PyDict>, key: &str) -> Option<T>
-    where
-        T: for<'a> pyo3::FromPyObject<'a>,
-    {
-        dict.get_item(key).ok().flatten().and_then(|v| v.extract::<T>().ok())
-    }
-
-    loop {
-        let Some(cmd) = rx_cmd.recv().await else {
-            break;
-        };
-
-        Python::with_gil(|py| {
-            let bridge_bound = bridge.bind(py);
-            match cmd {
-                PyCommand::InitializeDomain { width, height, epsilon } => {
-                    println!("Rust->Py: InitializeDomain {}x{}, eps={}", width, height, epsilon);
-                    if let Err(e) = bridge_bound.call_method1("initialize_domain", (width, height, epsilon)) {
-                        eprintln!("Py Error (InitializeDomain): {}", e);
-                    } else {
-                        let _ = tx_res.send(PyResult::DomainInitialized);
-                    }
-                }
-                PyCommand::SetContour { contour } => {
-                    println!("Rust->Py: SetContour with {} points", contour.len());
-                    if let Err(e) = bridge_bound.call_method1("set_contour", (contour,)) {
-                        eprintln!("Py Error (SetContour): {}", e);
-                    }
-                }
-                PyCommand::AddControlPoint { index, x, y } => {
-                    if let Err(e) = bridge_bound.call_method1("add_control_point", (index, x, y)) {
-                        eprintln!("Py Error (Add): {}", e);
-                    }
-                }
-                PyCommand::FinalizeSetup => {
-                    println!("Rust: Finalizing Setup...");
-                    if let Err(e) = bridge_bound.call_method0("finalize_setup") {
-                        eprintln!("Py Error (Finalize): {}", e);
-                    } else {
-                        // セットアップ完了を通知
-                        let _ = tx_res.send(PyResult::SetupFinalized);
-                    }
-                }
-                PyCommand::StartDrag => {
-                    if let Err(e) = bridge_bound.call_method0("start_drag_operation") {
-                        eprintln!("Py Error (StartDrag): {}", e);
-                    }
-                }
-                PyCommand::UpdatePoint { control_index, x, y } => {
-                    // Update the control point position
-                    if let Err(e) = bridge_bound.call_method1("update_control_point", (control_index, x, y)) {
-                        eprintln!("Py Error (UpdatePoint): {}", e);
-                    } else {
-                        // Solve and send mapping parameters
-                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
-                            if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
-                                let coeffs = extract_from_dict(params, "coefficients");
-                                let centers = extract_from_dict(params, "centers");
-                                let s = extract_from_dict(params, "s_param");
-                                let n = extract_from_dict(params, "n_rbf");
-                                let w = extract_from_dict(params, "image_width");
-                                let h = extract_from_dict(params, "image_height");
-                                let inv_grid = extract_from_dict(params, "inverse_grid");
-                                let grid_w = extract_from_dict(params, "grid_width");
-                                let grid_h = extract_from_dict(params, "grid_height");
-
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) =
-                                    (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
-                                    let _ = tx_res.send(PyResult::MappingParameters {
-                                        coefficients: coeffs,
-                                        centers,
-                                        s_param: s,
-                                        n_rbf: n,
-                                        image_width: w,
-                                        image_height: h,
-                                        inverse_grid: inv_grid,
-                                        grid_width: grid_w,
-                                        grid_height: grid_h,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                PyCommand::EndDrag => {
-                    // Call end_drag_operation which may refine the grid
-                    if let Err(e) = bridge_bound.call_method0("end_drag_operation") {
-                        eprintln!("Py Error (EndDrag): {}", e);
-                    } else {
-                        // Final solve after drag ends (may use refined grid)
-                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
-                            if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
-                                let coeffs = extract_from_dict(params, "coefficients");
-                                let centers = extract_from_dict(params, "centers");
-                                let s = extract_from_dict(params, "s_param");
-                                let n = extract_from_dict(params, "n_rbf");
-                                let w = extract_from_dict(params, "image_width");
-                                let h = extract_from_dict(params, "image_height");
-                                let inv_grid = extract_from_dict(params, "inverse_grid");
-                                let grid_w = extract_from_dict(params, "grid_width");
-                                let grid_h = extract_from_dict(params, "grid_height");
-
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) =
-                                    (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
-                                    let _ = tx_res.send(PyResult::MappingParameters {
-                                        coefficients: coeffs,
-                                        centers,
-                                        s_param: s,
-                                        n_rbf: n,
-                                        image_width: w,
-                                        image_height: h,
-                                        inverse_grid: inv_grid,
-                                        grid_width: grid_w,
-                                        grid_height: grid_h,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                PyCommand::Reset => {
-                    if let Err(e) = bridge_bound.call_method0("reset_mesh") {
-                        eprintln!("Py Error (Reset): {}", e);
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -597,7 +203,6 @@ fn receive_python_results(
             }
             PyResult::SetupFinalized => {
                 println!("Setup finalized, switching to Deform mode");
-                // Finalizingモードの場合のみDeformモードに遷移
                 if *state.get() == AppMode::Finalizing {
                     next_state.set(AppMode::Deform);
                 }
@@ -629,277 +234,12 @@ fn receive_python_results(
     }
 }
 
-fn render_deformed_image(
-    mapping_params: Res<MappingParameters>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<DeformMaterial>>,
-    query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
-) {
-    // マッピングパラメータが有効でない場合は何もしない
-    if !mapping_params.is_valid {
-        return;
-    }
-
-    // Get the material handle
-    let Ok(material_2d) = query.get_single() else {
-        return;
-    };
-
-    // Get the material
-    let Some(material) = materials.get_mut(&material_2d.0) else {
-        return;
-    };
-
-    // Convert inverse grid to texture
-    let grid_w = mapping_params.grid_width;
-    let grid_h = mapping_params.grid_height;
-
-    // Create RG32Float texture for inverse mapping (2 channels for x, y)
-    let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8); // 2 floats * 4 bytes each
-
-    for y in 0..grid_h {
-        for x in 0..grid_w {
-            let src_x = mapping_params.inverse_grid[y][x][0];
-            let src_y = mapping_params.inverse_grid[y][x][1];
-
-            // Write as little-endian f32
-            grid_data.extend_from_slice(&src_x.to_le_bytes());
-            grid_data.extend_from_slice(&src_y.to_le_bytes());
-        }
-    }
-
-    let inverse_grid_image = Image::new(
-        Extent3d {
-            width: grid_w as u32,
-            height: grid_h as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        grid_data,
-        TextureFormat::Rg32Float,
-        Default::default(),
-    );
-
-    // Add to assets and update material
-    let inverse_grid_handle = images.add(inverse_grid_image);
-    material.inverse_grid_texture = inverse_grid_handle;
-    material.grid_size = Vec2::new(grid_w as f32, grid_h as f32);
-}
-
-fn draw_control_points(
-    control_points: Res<ControlPoints>,
-    mut gizmos: Gizmos,
-    state: Res<State<AppMode>>,
-) {
-    // モードによって制御点の色を変える
-    let point_color = match state.get() {
-        AppMode::Setup => Color::srgb(1.0, 1.0, 0.0),       // YELLOW
-        AppMode::Finalizing => Color::srgb(0.5, 0.5, 0.5),  // GRAY (processing)
-        AppMode::Deform => Color::srgb(0.0, 1.0, 1.0),      // CYAN
-    };
-
-    for (i, (_, pos)) in control_points.points.iter().enumerate() {
-        let color = if Some(i) == control_points.dragging_index {
-            Color::srgb(1.0, 0.0, 0.0)  // RED when dragging
-        } else {
-            point_color
-        };
-        gizmos.circle_2d(*pos, 8.0, color);
-    }
-}
-
-fn handle_input(
-    buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform)>,
-    channels: Res<PythonChannels>,
-    mut control_points: ResMut<ControlPoints>,
-    state: Res<State<AppMode>>,
-    mut next_state: ResMut<NextState<AppMode>>,
-    image_data: Res<ImageData>,
-) {
-    let Ok(window) = windows.get_single() else { return };
-    let Ok((camera, cam_transform)) = camera_q.get_single() else { return };
-
-    // --- 共通: リセット (R) ---
-    if keys.just_pressed(KeyCode::KeyR) {
-        control_points.points.clear();
-        control_points.dragging_index = None;
-        let _ = channels.tx_command.try_send(PyCommand::Reset);
-        next_state.set(AppMode::Setup);
-        return;
-    }
-
-    // --- 共通: Enterキーでモード切替 (Setup -> Finalizing) ---
-    if *state.get() == AppMode::Setup && keys.just_pressed(KeyCode::Enter) {
-        if control_points.points.is_empty() {
-            println!("No control points added!");
-            return;
-        }
-        println!("Starting finalization...");
-        let _ = channels.tx_command.try_send(PyCommand::FinalizeSetup);
-        next_state.set(AppMode::Finalizing);
-        return;
-    }
-
-    // --- Finalizingモード中は操作を受け付けない ---
-    if *state.get() == AppMode::Finalizing {
-        return;
-    }
-
-    // --- マウス操作 ---
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok(ray) = camera.viewport_to_world(cam_transform, cursor_pos) else { return };
-    let world_pos = ray.origin.truncate();
-
-    // ワールド座標 -> Python画像座標変換
-    // Bevy: center(0,0), Y-Up
-    // Python(Image): TopLeft(0,0), Y-Down
-    let img_w = image_data.width;
-    let img_h = image_data.height;
-
-    let py_x = world_pos.x + img_w / 2.0;
-    let py_y = img_h / 2.0 - world_pos.y; // Y軸反転
-
-    // 範囲外チェック
-    if py_x < 0.0 || py_x > img_w || py_y < 0.0 || py_y > img_h {
-        if control_points.dragging_index.is_some() && buttons.just_released(MouseButton::Left) {
-            control_points.dragging_index = None;
-            let _ = channels.tx_command.try_send(PyCommand::EndDrag);
-        }
-        return;
-    }
-
-    match state.get() {
-        AppMode::Setup => {
-            if buttons.just_pressed(MouseButton::Left) {
-                // In setup mode, add control point at clicked location
-                // Check if point is inside contour using geo crate
-                if !image_data.contour.is_empty() {
-                    // geo::Polygonを構築
-                    let coords: Vec<Coord<f32>> = image_data.contour
-                        .iter()
-                        .map(|&(x, y)| Coord { x, y })
-                        .collect();
-
-                    let polygon = Polygon::new(
-                        geo::LineString::from(coords),
-                        vec![]
-                    );
-
-                    let point = Coord { x: py_x, y: py_y };
-                    let is_inside = polygon.contains(&point);
-
-                    println!(
-                        "Click at ({:.1}, {:.1}) - Inside contour: {} (contour has {} points)",
-                        py_x, py_y, is_inside, image_data.contour.len()
-                    );
-
-                    if !is_inside {
-                        println!("Cannot add control point outside contour");
-                        return;
-                    }
-                }
-
-                // Check if we already have a control point nearby
-                let threshold = 20.0; // pixels in world space
-                let too_close = control_points
-                    .points
-                    .iter()
-                    .any(|(_, pos)| pos.distance(world_pos) < threshold);
-
-                if !too_close {
-                    // Add new control point
-                    let control_idx = control_points.points.len();
-                    control_points.points.push((control_idx, world_pos));
-
-                    // Send to Python
-                    let _ = channels.tx_command.try_send(PyCommand::AddControlPoint {
-                        index: control_idx,
-                        x: py_x,
-                        y: py_y,
-                    });
-                    println!(
-                        "Added control point {} at ({:.1}, {:.1})",
-                        control_idx, py_x, py_y
-                    );
-                }
-            }
-        }
-        AppMode::Finalizing => {
-            // 操作不可（上部で早期リターン済みだが、念のため）
-        }
-        AppMode::Deform => {
-            if buttons.just_pressed(MouseButton::Left) {
-                // Find which control point is being clicked
-                if let Some(idx) = control_points
-                    .points
-                    .iter()
-                    .position(|(_, pos)| pos.distance(world_pos) < 20.0)
-                {
-                    control_points.dragging_index = Some(idx);
-                    // Notify Python that drag started
-                    let _ = channels.tx_command.try_send(PyCommand::StartDrag);
-                }
-            }
-
-            if buttons.pressed(MouseButton::Left) {
-                if let Some(idx) = control_points.dragging_index {
-                    if idx < control_points.points.len() {
-                        // Update visual position
-                        control_points.points[idx].1 = world_pos;
-
-                        // Send update to Python
-                        let _ = channels.tx_command.try_send(PyCommand::UpdatePoint {
-                            control_index: idx,
-                            x: py_x,
-                            y: py_y,
-                        });
-                    }
-                }
-            }
-
-            if buttons.just_released(MouseButton::Left) {
-                if control_points.dragging_index.is_some() {
-                    // Notify Python that drag ended (triggers Strategy 2 verification)
-                    let _ = channels.tx_command.try_send(PyCommand::EndDrag);
-                    control_points.dragging_index = None;
-                }
-            }
-        }
-    }
-}
-
-fn update_ui_text(
-    state: Res<State<AppMode>>,
-    mut query: Query<(&mut Text, &mut TextColor), With<ModeText>>,
-) {
-    if let Ok((mut text, mut color)) = query.get_single_mut() {
-        match state.get() {
-            AppMode::Setup => {
-                **text = "Mode: SETUP\n[Click] Add Point\n[Enter] Start Deform\n[R] Reset".to_string();
-                color.0 = Color::srgb(0.0, 1.0, 0.0); // Green
-            },
-            AppMode::Finalizing => {
-                **text = "Mode: FINALIZING...\nPlease wait...".to_string();
-                color.0 = Color::srgb(1.0, 1.0, 0.0); // Yellow
-            },
-            AppMode::Deform => {
-                **text = "Mode: DEFORM\n[Drag] Move Points\n[R] Reset".to_string();
-                color.0 = Color::srgb(1.0, 0.5, 0.5); // Redish
-            },
-        }
-    }
-}
-
 fn setup_camera_scale(
     image_data: Option<Res<ImageData>>,
     windows: Query<&Window>,
     mut camera_q: Query<&mut OrthographicProjection, (With<MainCamera>, Without<Camera2d>)>,
     mut done: Local<bool>,
 ) {
-    // 一度だけ実行
     if *done {
         return;
     }
@@ -921,14 +261,11 @@ fn setup_camera_scale(
     let image_width = image_data.width;
     let image_height = image_data.height;
 
-    // 画像がウィンドウに収まるようにスケールを計算
-    // マージンを考慮（10%のパディング）
     let margin = 0.9;
     let scale_x = (window_width * margin) / image_width;
     let scale_y = (window_height * margin) / image_height;
     let scale = scale_x.min(scale_y);
 
-    // OrthographicProjectionのスケールを設定
     projection.scale = 1.0 / scale;
 
     println!(
