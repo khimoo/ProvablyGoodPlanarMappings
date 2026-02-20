@@ -222,6 +222,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     commands.spawn(Camera2d::default());
 
@@ -274,11 +275,40 @@ fn setup(
     // Create a quad mesh for the deformed image
     let quad_handle = meshes.add(Rectangle::new(image_width, image_height));
     
-    // Create initial material (will be updated when deformation happens)
+    // Create identity inverse grid for initial state (no deformation)
+    let grid_w = image_width as usize;
+    let grid_h = image_height as usize;
+    let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8);
+    
+    for y in 0..grid_h {
+        for x in 0..grid_w {
+            // Identity mapping: each pixel maps to itself
+            let src_x = x as f32;
+            let src_y = y as f32;
+            grid_data.extend_from_slice(&src_x.to_le_bytes());
+            grid_data.extend_from_slice(&src_y.to_le_bytes());
+        }
+    }
+    
+    let identity_grid_image = Image::new(
+        Extent3d {
+            width: grid_w as u32,
+            height: grid_h as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        grid_data,
+        TextureFormat::Rg32Float,
+        Default::default(),
+    );
+    
+    let identity_grid_handle = images.add(identity_grid_image);
+    
+    // Create initial material with identity mapping
     let material_handle = materials.add(DeformMaterial {
         source_texture: image_handle.clone(),
-        inverse_grid_texture: Handle::default(),
-        grid_size: Vec2::new(1.0, 1.0),
+        inverse_grid_texture: identity_grid_handle,
+        grid_size: Vec2::new(grid_w as f32, grid_h as f32),
     });
 
     // Spawn the deformed image entity using new Bevy 0.15 API
