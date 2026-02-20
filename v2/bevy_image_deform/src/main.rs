@@ -23,13 +23,17 @@ use bevy::{
     render::{
         render_resource::{Extent3d, TextureDimension, TextureFormat, AsBindGroup, ShaderRef},
         mesh::Mesh2d,
+        camera::OrthographicProjection,
     },
     sprite::{Material2d, Material2dPlugin, MeshMaterial2d},
 };
+use image::GenericImageView;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule};
 use std::env;
+use imageproc::contours::{find_contours, BorderType};
+use geo::{Contains, Polygon, Coord};
 
 // --- デフォルト定数（ウィンドウサイズ用） ---
 const WINDOW_WIDTH: f32 = 1000.0;
@@ -103,6 +107,7 @@ struct ImageData {
     width: f32,
     height: f32,
     handle: Handle<Image>,
+    contour: Vec<(f32, f32)>,  // Contour points for boundary checking
 }
 
 #[derive(Component)]
@@ -110,6 +115,9 @@ struct DeformedImage;
 
 #[derive(Component)]
 struct ModeText;
+
+#[derive(Component)]
+struct MainCamera;
 
 // Custom material for deformation shader
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -132,10 +140,12 @@ impl Material2d for DeformMaterial {
     }
 }
 
-// 輪郭線抽出: アルファチャンネルから境界を検出
+// 輪郭線抽出の設定
+const CONTOUR_TARGET_POINTS: usize = 1024;
+const ALPHA_THRESHOLD: u8 = 128;
+
+// 輪郭線抽出: imageprocを使用してアルファチャンネルから境界を検出
 fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
-    use image::GenericImageView;
-    
     let img = match image::open(image_path) {
         Ok(img) => img,
         Err(e) => {
@@ -147,47 +157,111 @@ fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
     let (width, height) = img.dimensions();
     let rgba = img.to_rgba8();
     
-    // 簡単な輪郭抽出: アルファ値が閾値以上のピクセルの境界を見つける
-    let alpha_threshold = 128;
-    let mut contour_points = Vec::new();
+    println!("Extracting contour from {}x{} image", width, height);
     
-    // 画像の外周をスキャンして輪郭を抽出
-    // 簡易実装: 矩形の境界を返す（完全な輪郭抽出は複雑なので）
-    // TODO: より高度な輪郭抽出アルゴリズム（マーチングスクエアなど）
-    
-    // とりあえず、アルファ値が閾値以上の領域の矩形境界を返す
-    let mut min_x = width;
-    let mut max_x = 0;
-    let mut min_y = height;
-    let mut max_y = 0;
-    
-    for y in 0..height {
-        for x in 0..width {
-            let pixel = rgba.get_pixel(x, y);
-            if pixel[3] >= alpha_threshold {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
+    // アルファ値のバイナリマップを作成
+    let binary_image = imageproc::map::map_pixels(&rgba, |_x, _y, p| {
+        if p[3] >= ALPHA_THRESHOLD {
+            image::Luma([255u8])
+        } else {
+            image::Luma([0u8])
         }
+    });
+    
+    // imageprocで輪郭線を検出
+    let contours = find_contours::<u32>(&binary_image);
+    
+    if contours.is_empty() {
+        println!("No contours found, using full image rectangle");
+        return vec![
+            (0.0, 0.0),
+            (width as f32, 0.0),
+            (width as f32, height as f32),
+            (0.0, height as f32),
+        ];
     }
     
-    // 矩形の4隅を輪郭として返す
-    if max_x >= min_x && max_y >= min_y {
-        contour_points.push((min_x as f32, min_y as f32));
-        contour_points.push((max_x as f32, min_y as f32));
-        contour_points.push((max_x as f32, max_y as f32));
-        contour_points.push((min_x as f32, max_y as f32));
-    } else {
-        // アルファ値が閾値以上のピクセルがない場合、画像全体を使用
-        contour_points.push((0.0, 0.0));
-        contour_points.push((width as f32, 0.0));
-        contour_points.push((width as f32, height as f32));
-        contour_points.push((0.0, height as f32));
+    // 最も長い輪郭を選択（通常は外側の境界）
+    let longest_contour = contours
+        .iter()
+        .max_by_key(|c| c.points.len())
+        .unwrap();
+    
+    println!("Found contour with {} points", longest_contour.points.len());
+    
+    // imageproc::contours::Pointをf32タプルに変換
+    let contour_points: Vec<(f32, f32)> = longest_contour
+        .points
+        .iter()
+        .map(|p| (p.x as f32, p.y as f32))
+        .collect();
+    
+    // 輪郭線を目標点数にリサンプリング
+    let resampled = resample_contour(&contour_points, CONTOUR_TARGET_POINTS);
+    
+    println!("Resampled contour to {} points", resampled.len());
+    
+    resampled
+}
+
+// 輪郭線を等間隔にリサンプリング
+fn resample_contour(contour: &[(f32, f32)], target_points: usize) -> Vec<(f32, f32)> {
+    if contour.len() <= target_points {
+        return contour.to_vec();
     }
     
-    contour_points
+    // 輪郭線の総長を計算
+    let mut total_length = 0.0;
+    for i in 0..contour.len() - 1 {
+        let dx = contour[i + 1].0 - contour[i].0;
+        let dy = contour[i + 1].1 - contour[i].1;
+        total_length += (dx * dx + dy * dy).sqrt();
+    }
+    
+    if total_length == 0.0 {
+        return contour.to_vec();
+    }
+    
+    // 目標間隔
+    let target_spacing = total_length / target_points as f32;
+    
+    let mut resampled = Vec::new();
+    resampled.push(contour[0]);
+    
+    let mut accumulated_dist = 0.0;
+    let mut next_sample_dist = target_spacing;
+    
+    for i in 0..contour.len() - 1 {
+        let p1 = contour[i];
+        let p2 = contour[i + 1];
+        let dx = p2.0 - p1.0;
+        let dy = p2.1 - p1.1;
+        let segment_length = (dx * dx + dy * dy).sqrt();
+        
+        if segment_length == 0.0 {
+            continue;
+        }
+        
+        let segment_end_dist = accumulated_dist + segment_length;
+        
+        // このセグメント内にサンプル点がある場合
+        while next_sample_dist <= segment_end_dist && resampled.len() < target_points {
+            let t = (next_sample_dist - accumulated_dist) / segment_length;
+            let sample_x = p1.0 + dx * t;
+            let sample_y = p1.1 + dy * t;
+            resampled.push((sample_x, sample_y));
+            next_sample_dist += target_spacing;
+        }
+        
+        accumulated_dist = segment_end_dist;
+    }
+    
+    // 目標点数に達していない場合、最後の点を追加
+    if resampled.len() < target_points {
+        resampled.push(*contour.last().unwrap());
+    }
+    
+    resampled
 }
 
 fn main() {
@@ -206,6 +280,7 @@ fn main() {
         .init_resource::<MappingParameters>()
         .add_systems(Startup, setup)
         .add_systems(Update, (
+            setup_camera_scale,
             handle_input,
             receive_python_results,
             render_deformed_image,
@@ -224,7 +299,7 @@ fn setup(
     mut materials: ResMut<Assets<DeformMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    commands.spawn(Camera2d::default());
+    commands.spawn((Camera2d::default(), MainCamera));
 
     // UIテキスト
     commands.spawn((
@@ -262,14 +337,33 @@ fn setup(
     let image_path = "texture.png";
     let image_handle = asset_server.load(image_path);
 
-    // TODO: 画像サイズを取得（現在はハードコード）
-    let image_width = 512.0;
-    let image_height = 512.0;
+    // 画像サイズを実際のファイルから取得
+    let full_image_path = format!("assets/{}", image_path);
+    let (image_width, image_height) = match image::open(&full_image_path) {
+        Ok(img) => {
+            let (w, h) = img.dimensions();
+            println!("Loaded image: {}x{}", w, h);
+            (w as f32, h as f32)
+        }
+        Err(e) => {
+            eprintln!("Failed to load image for size detection: {}, using default 512x512", e);
+            (512.0, 512.0)
+        }
+    };
+
+    // 輪郭線を抽出
+    let contour = extract_contour_from_image(&full_image_path);
+    if contour.is_empty() {
+        println!("No contour extracted, using full image domain");
+    } else {
+        println!("Extracted contour with {} points", contour.len());
+    }
 
     commands.insert_resource(ImageData {
         width: image_width,
         height: image_height,
         handle: image_handle.clone(),
+        contour: contour.clone(),
     });
 
     // Create a quad mesh for the deformed image
@@ -331,14 +425,9 @@ fn setup(
         epsilon,
     });
 
-    // 輪郭線を抽出してPythonに送信
-    let full_image_path = format!("assets/{}", image_path);
-    let contour = extract_contour_from_image(&full_image_path);
+    // 輪郭線をPythonに送信
     if !contour.is_empty() {
-        println!("Extracted contour with {} points", contour.len());
         let _ = tx_cmd.try_send(PyCommand::SetContour { contour });
-    } else {
-        println!("No contour extracted, using full image domain");
     }
 }
 
@@ -591,7 +680,7 @@ fn draw_control_points(
     control_points: Res<ControlPoints>,
     mut gizmos: Gizmos,
     state: Res<State<AppMode>>,
-) {
+) {   
     // モードによって制御点の色を変える
     let point_color = match state.get() {
         AppMode::Setup => Color::srgb(1.0, 1.0, 0.0),   // YELLOW
@@ -670,6 +759,33 @@ fn handle_input(
         AppMode::Setup => {
             if buttons.just_pressed(MouseButton::Left) {
                 // In setup mode, add control point at clicked location
+                // Check if point is inside contour using geo crate
+                if !image_data.contour.is_empty() {
+                    // geo::Polygonを構築
+                    let coords: Vec<Coord<f32>> = image_data.contour
+                        .iter()
+                        .map(|&(x, y)| Coord { x, y })
+                        .collect();
+                    
+                    let polygon = Polygon::new(
+                        geo::LineString::from(coords),
+                        vec![]
+                    );
+                    
+                    let point = Coord { x: py_x, y: py_y };
+                    let is_inside = polygon.contains(&point);
+                    
+                    println!(
+                        "Click at ({:.1}, {:.1}) - Inside contour: {} (contour has {} points)",
+                        py_x, py_y, is_inside, image_data.contour.len()
+                    );
+                    
+                    if !is_inside {
+                        println!("Cannot add control point outside contour");
+                        return;
+                    }
+                }
+                
                 // Check if we already have a control point nearby
                 let threshold = 20.0; // pixels in world space
                 let too_close = control_points
@@ -754,4 +870,48 @@ fn update_ui_text(
     }
 }
 
+fn setup_camera_scale(
+    image_data: Option<Res<ImageData>>,
+    windows: Query<&Window>,
+    mut camera_q: Query<&mut OrthographicProjection, (With<MainCamera>, Without<Camera2d>)>,
+    mut done: Local<bool>,
+) {
+    // 一度だけ実行
+    if *done {
+        return;
+    }
 
+    let Some(image_data) = image_data else {
+        return;
+    };
+
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+
+    let Ok(mut projection) = camera_q.get_single_mut() else {
+        return;
+    };
+
+    let window_width = window.width();
+    let window_height = window.height();
+    let image_width = image_data.width;
+    let image_height = image_data.height;
+
+    // 画像がウィンドウに収まるようにスケールを計算
+    // マージンを考慮（10%のパディング）
+    let margin = 0.9;
+    let scale_x = (window_width * margin) / image_width;
+    let scale_y = (window_height * margin) / image_height;
+    let scale = scale_x.min(scale_y);
+
+    // OrthographicProjectionのスケールを設定
+    projection.scale = 1.0 / scale;
+
+    println!(
+        "Camera scale adjusted: window={}x{}, image={}x{}, scale={}",
+        window_width, window_height, image_width, image_height, projection.scale
+    );
+
+    *done = true;
+}

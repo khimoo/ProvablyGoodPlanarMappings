@@ -37,6 +37,8 @@ pyo3 = { version = "0.23", features = ["auto-initialize"] }
 crossbeam-channel = "0.5"
 tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 image = "0.25"
+imageproc = "0.25"
+geo = "0.28"
 
 # 最適化設定
 [profile.dev]
