@@ -1,13 +1,13 @@
 /*
  * Bevy Image Deformer - Provably Good Planar Mappings
- * 
+ *
  * Architecture:
  * - The deformation algorithm is MESHLESS (uses Gaussian RBF basis functions)
  * - Rust extracts contour from PNG image
  * - Python computes deformation coefficients with provable distortion bounds
  * - Python sends mapping parameters (coefficients, centers, s) to Rust
  * - Rust evaluates f(x) = Σ c_i * φ_i(x) for each pixel to render deformed image
- * 
+ *
  * Workflow:
  * 1. Setup Mode: User clicks to add control points
  * 2. Finalize: Build solver with basis functions centered at control points
@@ -34,10 +34,6 @@ use pyo3::types::{PyList, PyModule};
 use std::env;
 use imageproc::contours::{find_contours, BorderType};
 use geo::{Contains, Polygon, Coord};
-
-// --- デフォルト定数（ウィンドウサイズ用） ---
-const WINDOW_WIDTH: f32 = 1000.0;
-const WINDOW_HEIGHT: f32 = 800.0;
 
 // --- アプリケーションの状態 (モード) ---
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
@@ -125,11 +121,11 @@ struct DeformMaterial {
     #[texture(0)]
     #[sampler(1)]
     source_texture: Handle<Image>,
-    
+
     #[texture(2)]
     #[sampler(3)]
     inverse_grid_texture: Handle<Image>,
-    
+
     #[uniform(4)]
     grid_size: Vec2,  // (width, height) of inverse grid
 }
@@ -153,12 +149,12 @@ fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
             return vec![];
         }
     };
-    
+
     let (width, height) = img.dimensions();
     let rgba = img.to_rgba8();
-    
+
     println!("Extracting contour from {}x{} image", width, height);
-    
+
     // アルファ値のバイナリマップを作成
     let binary_image = imageproc::map::map_pixels(&rgba, |_x, _y, p| {
         if p[3] >= ALPHA_THRESHOLD {
@@ -167,10 +163,10 @@ fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
             image::Luma([0u8])
         }
     });
-    
+
     // imageprocで輪郭線を検出
     let contours = find_contours::<u32>(&binary_image);
-    
+
     if contours.is_empty() {
         println!("No contours found, using full image rectangle");
         return vec![
@@ -180,27 +176,27 @@ fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
             (0.0, height as f32),
         ];
     }
-    
+
     // 最も長い輪郭を選択（通常は外側の境界）
     let longest_contour = contours
         .iter()
         .max_by_key(|c| c.points.len())
         .unwrap();
-    
+
     println!("Found contour with {} points", longest_contour.points.len());
-    
+
     // imageproc::contours::Pointをf32タプルに変換
     let contour_points: Vec<(f32, f32)> = longest_contour
         .points
         .iter()
         .map(|p| (p.x as f32, p.y as f32))
         .collect();
-    
+
     // 輪郭線を目標点数にリサンプリング
     let resampled = resample_contour(&contour_points, CONTOUR_TARGET_POINTS);
-    
+
     println!("Resampled contour to {} points", resampled.len());
-    
+
     resampled
 }
 
@@ -209,7 +205,7 @@ fn resample_contour(contour: &[(f32, f32)], target_points: usize) -> Vec<(f32, f
     if contour.len() <= target_points {
         return contour.to_vec();
     }
-    
+
     // 輪郭線の総長を計算
     let mut total_length = 0.0;
     for i in 0..contour.len() - 1 {
@@ -217,33 +213,33 @@ fn resample_contour(contour: &[(f32, f32)], target_points: usize) -> Vec<(f32, f
         let dy = contour[i + 1].1 - contour[i].1;
         total_length += (dx * dx + dy * dy).sqrt();
     }
-    
+
     if total_length == 0.0 {
         return contour.to_vec();
     }
-    
+
     // 目標間隔
     let target_spacing = total_length / target_points as f32;
-    
+
     let mut resampled = Vec::new();
     resampled.push(contour[0]);
-    
+
     let mut accumulated_dist = 0.0;
     let mut next_sample_dist = target_spacing;
-    
+
     for i in 0..contour.len() - 1 {
         let p1 = contour[i];
         let p2 = contour[i + 1];
         let dx = p2.0 - p1.0;
         let dy = p2.1 - p1.1;
         let segment_length = (dx * dx + dy * dy).sqrt();
-        
+
         if segment_length == 0.0 {
             continue;
         }
-        
+
         let segment_end_dist = accumulated_dist + segment_length;
-        
+
         // このセグメント内にサンプル点がある場合
         while next_sample_dist <= segment_end_dist && resampled.len() < target_points {
             let t = (next_sample_dist - accumulated_dist) / segment_length;
@@ -252,15 +248,15 @@ fn resample_contour(contour: &[(f32, f32)], target_points: usize) -> Vec<(f32, f
             resampled.push((sample_x, sample_y));
             next_sample_dist += target_spacing;
         }
-        
+
         accumulated_dist = segment_end_dist;
     }
-    
+
     // 目標点数に達していない場合、最後の点を追加
     if resampled.len() < target_points {
         resampled.push(*contour.last().unwrap());
     }
-    
+
     resampled
 }
 
@@ -368,12 +364,12 @@ fn setup(
 
     // Create a quad mesh for the deformed image
     let quad_handle = meshes.add(Rectangle::new(image_width, image_height));
-    
+
     // Create identity inverse grid for initial state (no deformation)
     let grid_w = image_width as usize;
     let grid_h = image_height as usize;
     let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8);
-    
+
     for y in 0..grid_h {
         for x in 0..grid_w {
             // Identity mapping: each pixel maps to itself
@@ -383,7 +379,7 @@ fn setup(
             grid_data.extend_from_slice(&src_y.to_le_bytes());
         }
     }
-    
+
     let identity_grid_image = Image::new(
         Extent3d {
             width: grid_w as u32,
@@ -395,9 +391,9 @@ fn setup(
         TextureFormat::Rg32Float,
         Default::default(),
     );
-    
+
     let identity_grid_handle = images.add(identity_grid_image);
-    
+
     // Create initial material with identity mapping
     let material_handle = materials.add(DeformMaterial {
         source_texture: image_handle.clone(),
@@ -414,7 +410,7 @@ fn setup(
     ));
 
     // Pythonへドメイン初期化コマンドを送信
-    let epsilon = 100.0;
+    let epsilon = 50.0;
     println!(
         "Initializing domain: {}x{}, epsilon={}",
         image_width, image_height, epsilon
@@ -518,8 +514,8 @@ async fn python_thread_loop(
                                 let inv_grid = extract_from_dict(params, "inverse_grid");
                                 let grid_w = extract_from_dict(params, "grid_width");
                                 let grid_h = extract_from_dict(params, "grid_height");
-                                
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) = 
+
+                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) =
                                     (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
                                     let _ = tx_res.send(PyResult::MappingParameters {
                                         coefficients: coeffs,
@@ -554,8 +550,8 @@ async fn python_thread_loop(
                                 let inv_grid = extract_from_dict(params, "inverse_grid");
                                 let grid_w = extract_from_dict(params, "grid_width");
                                 let grid_h = extract_from_dict(params, "grid_height");
-                                
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) = 
+
+                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) =
                                     (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
                                     let _ = tx_res.send(PyResult::MappingParameters {
                                         coefficients: coeffs,
@@ -643,21 +639,21 @@ fn render_deformed_image(
     // Convert inverse grid to texture
     let grid_w = mapping_params.grid_width;
     let grid_h = mapping_params.grid_height;
-    
+
     // Create RG32Float texture for inverse mapping (2 channels for x, y)
     let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8); // 2 floats * 4 bytes each
-    
+
     for y in 0..grid_h {
         for x in 0..grid_w {
             let src_x = mapping_params.inverse_grid[y][x][0];
             let src_y = mapping_params.inverse_grid[y][x][1];
-            
+
             // Write as little-endian f32
             grid_data.extend_from_slice(&src_x.to_le_bytes());
             grid_data.extend_from_slice(&src_y.to_le_bytes());
         }
     }
-    
+
     let inverse_grid_image = Image::new(
         Extent3d {
             width: grid_w as u32,
@@ -669,7 +665,7 @@ fn render_deformed_image(
         TextureFormat::Rg32Float,
         Default::default(),
     );
-    
+
     // Add to assets and update material
     let inverse_grid_handle = images.add(inverse_grid_image);
     material.inverse_grid_texture = inverse_grid_handle;
@@ -680,7 +676,7 @@ fn draw_control_points(
     control_points: Res<ControlPoints>,
     mut gizmos: Gizmos,
     state: Res<State<AppMode>>,
-) {   
+) {
     // モードによって制御点の色を変える
     let point_color = match state.get() {
         AppMode::Setup => Color::srgb(1.0, 1.0, 0.0),   // YELLOW
@@ -766,26 +762,26 @@ fn handle_input(
                         .iter()
                         .map(|&(x, y)| Coord { x, y })
                         .collect();
-                    
+
                     let polygon = Polygon::new(
                         geo::LineString::from(coords),
                         vec![]
                     );
-                    
+
                     let point = Coord { x: py_x, y: py_y };
                     let is_inside = polygon.contains(&point);
-                    
+
                     println!(
                         "Click at ({:.1}, {:.1}) - Inside contour: {} (contour has {} points)",
                         py_x, py_y, is_inside, image_data.contour.len()
                     );
-                    
+
                     if !is_inside {
                         println!("Cannot add control point outside contour");
                         return;
                     }
                 }
-                
+
                 // Check if we already have a control point nearby
                 let threshold = 20.0; // pixels in world space
                 let too_close = control_points
