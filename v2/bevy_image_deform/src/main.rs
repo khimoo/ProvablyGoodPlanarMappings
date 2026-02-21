@@ -20,10 +20,7 @@
 
 use bevy::{
     prelude::*,
-    render::{
-        render_resource::{Extent3d, TextureDimension, TextureFormat},
-        camera::OrthographicProjection,
-    },
+    render::camera::OrthographicProjection,
     sprite::{Material2dPlugin, MeshMaterial2d},
 };
 use image::GenericImageView;
@@ -32,7 +29,7 @@ use bevy_image_deform::{
     state::{AppMode, ControlPoints, MappingParameters, DeformedImage, ModeText, MainCamera},
     python::{PythonChannels, PyCommand, PyResult, python_thread_loop},
     image::{ImageData, extract_contour_from_image},
-    rendering::{DeformMaterial, render_deformed_image},
+    rendering::{DeformMaterial, render_deformed_image, create_grid_mesh},
     input::handle_input,
     ui::{update_ui_text, draw_control_points},
 };
@@ -70,7 +67,6 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
-    mut images: ResMut<Assets<Image>>,
 ) {
     commands.spawn((Camera2d::default(), MainCamera));
 
@@ -132,43 +128,43 @@ fn setup(
         contour: contour.clone(),
     });
 
-    let quad_handle = meshes.add(Rectangle::new(image_width, image_height));
-
-    let grid_w = image_width as usize;
-    let grid_h = image_height as usize;
-    let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8);
-
-    for y in 0..grid_h {
-        for x in 0..grid_w {
-            let src_x = x as f32;
-            let src_y = y as f32;
-            grid_data.extend_from_slice(&src_x.to_le_bytes());
-            grid_data.extend_from_slice(&src_y.to_le_bytes());
-        }
-    }
-
-    let identity_grid_image = Image::new(
-        Extent3d {
-            width: grid_w as u32,
-            height: grid_h as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        grid_data,
-        TextureFormat::Rg32Float,
-        Default::default(),
+    // Create a fine grid mesh (100x100 subdivisions)
+    let grid_mesh = create_grid_mesh(
+        Vec2::new(image_width, image_height),
+        UVec2::new(100, 100),
     );
+    let mesh_handle = meshes.add(grid_mesh);
 
-    let identity_grid_handle = images.add(identity_grid_image);
+    let mut initial_params = bevy_image_deform::rendering::material::DeformUniform::default();
+    initial_params.image_width = image_width;
+    initial_params.image_height = image_height;
+    initial_params.n_rbf = 0;
+    // s_param が 0 だと計算時にゼロ除算やNaNが発生する可能性があるため適当な値を入れておく
+    initial_params.s_param = 50.0;
+
+    // 初期状態を恒等写像(Identity Mapping)に設定
+    // f_x(x,y) = 0*1 + 1*x + 0*y  => x
+    // f_y(x,y) = 0*1 + 0*x + 1*y  => y
+
+    // [0]: 定数項 (shift)
+    initial_params.coeffs[0].x = 0.0;
+    initial_params.coeffs[0].y = 0.0;
+
+    // [1]: xの係数
+    initial_params.coeffs[1].x = 1.0;
+    initial_params.coeffs[1].y = 0.0;
+
+    // [2]: yの係数
+    initial_params.coeffs[2].x = 0.0;
+    initial_params.coeffs[2].y = 1.0;
 
     let material_handle = materials.add(DeformMaterial {
         source_texture: image_handle.clone(),
-        inverse_grid_texture: identity_grid_handle,
-        grid_size: Vec2::new(grid_w as f32, grid_h as f32),
+        params: initial_params,
     });
 
     commands.spawn((
-        Mesh2d(quad_handle),
+        Mesh2d(mesh_handle),
         MeshMaterial2d(material_handle),
         Transform::from_xyz(0.0, 0.0, 0.0),
         DeformedImage,
@@ -195,7 +191,6 @@ fn receive_python_results(
     mut mapping_params: ResMut<MappingParameters>,
     mut next_state: ResMut<NextState<AppMode>>,
     state: Res<State<AppMode>>,
-    image_data: Option<Res<ImageData>>,
 ) {
     while let Ok(res) = channels.rx_result.try_recv() {
         match res {
@@ -215,149 +210,15 @@ fn receive_python_results(
                 n_rbf,
             } => {
                 println!("Received basis function parameters: {} RBFs", n_rbf);
-                
-                // Compute inverse mapping in Rust
-                if let Some(image_data) = &image_data {
-                    let resolution = ((image_data.width as usize).min(image_data.height as usize))/32;
-                    let inverse_grid = compute_inverse_grid_rust(
-                        &coefficients,
-                        &centers,
-                        s_param,
-                        image_data.width as usize,
-                        image_data.height as usize,
-                        resolution,
-                    );
-                    
-                    mapping_params.coefficients = coefficients;
-                    mapping_params.centers = centers;
-                    mapping_params.s_param = s_param;
-                    mapping_params.n_rbf = n_rbf;
-                    mapping_params.image_width = image_data.width;
-                    mapping_params.image_height = image_data.height;
-                    mapping_params.inverse_grid = inverse_grid;
-                    mapping_params.is_valid = true;
-                }
+
+                mapping_params.coefficients = coefficients;
+                mapping_params.centers = centers;
+                mapping_params.s_param = s_param;
+                mapping_params.n_rbf = n_rbf;
+                mapping_params.is_valid = true;
             }
         }
     }
-}
-
-fn compute_inverse_grid_rust(
-    coefficients: &[Vec<f32>],
-    centers: &[Vec<f32>],
-    s_param: f32,
-    image_width: usize,
-    image_height: usize,
-    resolution: usize,
-) -> (usize, usize, Vec<f32>) {
-    // Create output grid
-    let mut flattened_data = Vec::with_capacity(resolution * resolution * 2);
-    
-    let h_x = image_width as f32 / (resolution - 1).max(1) as f32;
-    let h_y = image_height as f32 / (resolution - 1).max(1) as f32;
-    
-    for grid_y in 0..resolution {
-        for grid_x in 0..resolution {
-            let target_x = grid_x as f32 * h_x;
-            let target_y = grid_y as f32 * h_y;
-            
-            // Newton-Raphson to find source position
-            let mut src_x = target_x;
-            let mut src_y = target_y;
-            
-            for _ in 0..10 {
-                // Evaluate f(src_x, src_y)
-                let (mapped_x, mapped_y) = evaluate_rbf_mapping(
-                    src_x, src_y,
-                    coefficients,
-                    centers,
-                    s_param,
-                );
-                
-                let residual_x = mapped_x - target_x;
-                let residual_y = mapped_y - target_y;
-                
-                if residual_x.abs() < 1e-3 && residual_y.abs() < 1e-3 {
-                    break;
-                }
-                
-                // Compute Jacobian numerically
-                let eps = 1e-4;
-                let (fx_eps, fy_eps) = evaluate_rbf_mapping(
-                    src_x + eps, src_y,
-                    coefficients,
-                    centers,
-                    s_param,
-                );
-                let (fx_y_eps, fy_y_eps) = evaluate_rbf_mapping(
-                    src_x, src_y + eps,
-                    coefficients,
-                    centers,
-                    s_param,
-                );
-                
-                let j00 = (fx_eps - mapped_x) / eps;
-                let j01 = (fx_y_eps - mapped_x) / eps;
-                let j10 = (fy_eps - mapped_y) / eps;
-                let j11 = (fy_y_eps - mapped_y) / eps;
-                
-                // Invert 2x2 Jacobian
-                let det = j00 * j11 - j01 * j10;
-                if det.abs() < 1e-8 {
-                    break;
-                }
-                
-                let inv_j00 = j11 / det;
-                let inv_j01 = -j01 / det;
-                let inv_j10 = -j10 / det;
-                let inv_j11 = j00 / det;
-                
-                // Newton step
-                let delta_x = -(inv_j00 * residual_x + inv_j01 * residual_y);
-                let delta_y = -(inv_j10 * residual_x + inv_j11 * residual_y);
-                
-                src_x += 0.8 * delta_x;
-                src_y += 0.8 * delta_y;
-                
-                // Clamp to domain
-                src_x = src_x.clamp(0.0, image_width as f32);
-                src_y = src_y.clamp(0.0, image_height as f32);
-            }
-            
-            flattened_data.push(src_x);
-            flattened_data.push(src_y);
-        }
-    }
-    
-    (resolution, resolution, flattened_data)
-}
-
-fn evaluate_rbf_mapping(
-    x: f32,
-    y: f32,
-    coefficients: &[Vec<f32>],
-    centers: &[Vec<f32>],
-    s_param: f32,
-) -> (f32, f32) {
-    let mut result = [0.0; 2];
-    
-    // RBF basis functions
-    for (i, center) in centers.iter().enumerate() {
-        let dx = x - center[0];
-        let dy = y - center[1];
-        let r2 = dx * dx + dy * dy;
-        let phi = (-r2 / (2.0 * s_param * s_param)).exp();
-        
-        result[0] += coefficients[0][i] * phi;
-        result[1] += coefficients[1][i] * phi;
-    }
-    
-    // Affine terms (last 3 coefficients)
-    let n = centers.len();
-    result[0] += coefficients[0][n] + coefficients[0][n + 1] * x + coefficients[0][n + 2] * y;
-    result[1] += coefficients[1][n] + coefficients[1][n + 1] * x + coefficients[1][n + 2] * y;
-    
-    (result[0], result[1])
 }
 
 fn setup_camera_scale(

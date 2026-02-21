@@ -22,7 +22,6 @@ pub struct MappingParameters {
     pub n_rbf: usize,
     pub image_width: f32,
     pub image_height: f32,
-    pub inverse_grid: (usize, usize, Vec<f32>),  // (width, height, flattened data)
     pub is_valid: bool,
 }
 

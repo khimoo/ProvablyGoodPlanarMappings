@@ -1,16 +1,14 @@
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::state::{DeformedImage, MappingParameters};
-use super::material::DeformMaterial;
+use super::material::{DeformMaterial, DeformUniform, RBFCenter, RBFCoeff, MAX_RBF_COUNT};
 
 pub fn render_deformed_image(
     mapping_params: Res<MappingParameters>,
-    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
     query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
 ) {
-    if !mapping_params.is_valid {
+    if !mapping_params.is_valid || mapping_params.n_rbf == 0 {
         return;
     }
 
@@ -22,27 +20,34 @@ pub fn render_deformed_image(
         return;
     };
 
-    let (grid_w, grid_h, flattened_data) = &mapping_params.inverse_grid;
+    let n_rbf = mapping_params.n_rbf.min(MAX_RBF_COUNT);
 
-    // Convert flattened data to bytes
-    let mut grid_data = Vec::with_capacity(flattened_data.len() * 4);
-    for &value in flattened_data.iter() {
-        grid_data.extend_from_slice(&value.to_le_bytes());
+    // Build uniform data
+    let mut params = DeformUniform::default();
+    params.image_width = mapping_params.image_width;
+    params.image_height = mapping_params.image_height;
+    params.s_param = mapping_params.s_param;
+    params.n_rbf = n_rbf as u32;
+
+    // Fill centers
+    for (i, center) in mapping_params.centers.iter().enumerate().take(n_rbf) {
+        params.centers[i] = RBFCenter {
+            pos: Vec2::new(center[0], center[1]),
+            _padding: Vec2::ZERO,
+        };
     }
 
-    let inverse_grid_image = Image::new(
-        Extent3d {
-            width: *grid_w as u32,
-            height: *grid_h as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        grid_data,
-        TextureFormat::Rg32Float,
-        Default::default(),
-    );
+    // Fill coefficients
+    let coeffs_x = mapping_params.coefficients.get(0).cloned().unwrap_or_default();
+    let coeffs_y = mapping_params.coefficients.get(1).cloned().unwrap_or_default();
 
-    let inverse_grid_handle = images.add(inverse_grid_image);
-    material.inverse_grid_texture = inverse_grid_handle;
-    material.grid_size = Vec2::new(*grid_w as f32, *grid_h as f32);
+    for i in 0..(n_rbf + 3).min(MAX_RBF_COUNT) {
+        params.coeffs[i] = RBFCoeff {
+            x: coeffs_x.get(i).copied().unwrap_or(0.0),
+            y: coeffs_y.get(i).copied().unwrap_or(0.0),
+            _padding: Vec2::ZERO,
+        };
+    }
+
+    material.params = params;
 }
