@@ -48,6 +48,5 @@ pub fn render_deformed_image(
             _padding: Vec2::ZERO,
         };
     }
-
     material.params = params;
 }

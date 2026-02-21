@@ -219,7 +219,7 @@ class ProvablyGoodPlanarMapping(ABC):
         # --- 事前計算のキャッシュ用 ---
         self._B_mat: Optional[np.ndarray] = None
         self._H_term: Optional[np.ndarray] = None
-        self._W_P: float = 1000.0
+        self._W_P: float = 1e8
         self._W_R: float = 1.0
 
         # [修正点1] 論文 Section 5.3 に基づく Active Set のヒステリシス閾値
@@ -324,7 +324,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         N_basis = self.basis.get_basis_count()
         hess = self.basis.hessian(collocation_points)
         H_mat = np.transpose(hess, (0, 2, 3, 1)).reshape(-1, N_basis)
-        
+
         # [修正点2] 積分(Eq.31)の近似のため、面積要素 (h^2) を掛けてスケーリングする
         # これにより、hを細かくしてもエネルギーのスケールが不変になる
         area_element = self.current_h ** 2
@@ -349,7 +349,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             raise RuntimeError("B_mat not initialized.")
         if self._H_term is None:
             raise RuntimeError("H_term not initialized.")
-        
+
         grid = self.collocation_points
         B_mat = self._B_mat
         H_term = self._H_term
@@ -426,7 +426,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         """
         if self.coefficients is None:
             raise RuntimeError("Coefficients not initialized.")
-        
+
         strict_h = self.strategy.compute_strict_h(
             basis=self.basis,
             K_solver=self.K_solver,

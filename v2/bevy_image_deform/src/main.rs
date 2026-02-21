@@ -131,7 +131,7 @@ fn setup(
     // Create a fine grid mesh (100x100 subdivisions)
     let grid_mesh = create_grid_mesh(
         Vec2::new(image_width, image_height),
-        UVec2::new(100, 100),
+        UVec2::new(300, 300),
     );
     let mesh_handle = meshes.add(grid_mesh);
 
@@ -140,7 +140,7 @@ fn setup(
     initial_params.image_height = image_height;
     initial_params.n_rbf = 0;
     // s_param が 0 だと計算時にゼロ除算やNaNが発生する可能性があるため適当な値を入れておく
-    initial_params.s_param = 50.0;
+    // initial_params.s_param = 50.0;
 
     // 初期状態を恒等写像(Identity Mapping)に設定
     // f_x(x,y) = 0*1 + 1*x + 0*y  => x
@@ -170,7 +170,7 @@ fn setup(
         DeformedImage,
     ));
 
-    let epsilon = 50.0;
+    let epsilon = 110.0;
     println!(
         "Initializing domain: {}x{}, epsilon={}",
         image_width, image_height, epsilon
@@ -209,6 +209,9 @@ fn receive_python_results(
                 s_param,
                 n_rbf,
             } => {
+                println!("DEBUG: RBF Weights X = {:?}", &coefficients[0][..n_rbf]);
+                println!("DEBUG: Affine Terms X = {:?}", &coefficients[0][n_rbf..]);
+                println!("DEBUG: centers[0]={:?}, s_param={}", centers.first(), s_param);
                 println!("Received basis function parameters: {} RBFs", n_rbf);
 
                 mapping_params.coefficients = coefficients;
