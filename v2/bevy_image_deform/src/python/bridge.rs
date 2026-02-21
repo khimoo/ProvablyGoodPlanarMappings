@@ -86,30 +86,20 @@ pub async fn python_thread_loop(
                     if let Err(e) = bridge_bound.call_method1("update_control_point", (control_index, x, y)) {
                         eprintln!("Py Error (UpdatePoint): {}", e);
                     } else {
-                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
+                        if let Ok(res) = bridge_bound.call_method0("get_basis_parameters") {
                             if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
                                 let coeffs = extract_from_dict(params, "coefficients");
                                 let centers = extract_from_dict(params, "centers");
                                 let s = extract_from_dict(params, "s_param");
                                 let n = extract_from_dict(params, "n_rbf");
-                                let w = extract_from_dict(params, "image_width");
-                                let h = extract_from_dict(params, "image_height");
-                                let inv_grid = extract_from_dict(params, "inverse_grid");
-                                let grid_w = extract_from_dict(params, "grid_width");
-                                let grid_h = extract_from_dict(params, "grid_height");
 
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) =
-                                    (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
-                                    let _ = tx_res.send(PyResult::MappingParameters {
+                                if let (Some(coeffs), Some(centers), Some(s), Some(n)) =
+                                    (coeffs, centers, s, n) {
+                                    let _ = tx_res.send(PyResult::BasisFunctionParameters {
                                         coefficients: coeffs,
                                         centers,
                                         s_param: s,
                                         n_rbf: n,
-                                        image_width: w,
-                                        image_height: h,
-                                        inverse_grid: inv_grid,
-                                        grid_width: grid_w,
-                                        grid_height: grid_h,
                                     });
                                 }
                             }
@@ -120,30 +110,20 @@ pub async fn python_thread_loop(
                     if let Err(e) = bridge_bound.call_method0("end_drag_operation") {
                         eprintln!("Py Error (EndDrag): {}", e);
                     } else {
-                        if let Ok(res) = bridge_bound.call_method0("solve_frame") {
+                        if let Ok(res) = bridge_bound.call_method0("get_basis_parameters") {
                             if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
                                 let coeffs = extract_from_dict(params, "coefficients");
                                 let centers = extract_from_dict(params, "centers");
                                 let s = extract_from_dict(params, "s_param");
                                 let n = extract_from_dict(params, "n_rbf");
-                                let w = extract_from_dict(params, "image_width");
-                                let h = extract_from_dict(params, "image_height");
-                                let inv_grid = extract_from_dict(params, "inverse_grid");
-                                let grid_w = extract_from_dict(params, "grid_width");
-                                let grid_h = extract_from_dict(params, "grid_height");
 
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n), Some(w), Some(h), Some(inv_grid), Some(grid_w), Some(grid_h)) =
-                                    (coeffs, centers, s, n, w, h, inv_grid, grid_w, grid_h) {
-                                    let _ = tx_res.send(PyResult::MappingParameters {
+                                if let (Some(coeffs), Some(centers), Some(s), Some(n)) =
+                                    (coeffs, centers, s, n) {
+                                    let _ = tx_res.send(PyResult::BasisFunctionParameters {
                                         coefficients: coeffs,
                                         centers,
                                         s_param: s,
                                         n_rbf: n,
-                                        image_width: w,
-                                        image_height: h,
-                                        inverse_grid: inv_grid,
-                                        grid_width: grid_w,
-                                        grid_height: grid_h,
                                     });
                                 }
                             }

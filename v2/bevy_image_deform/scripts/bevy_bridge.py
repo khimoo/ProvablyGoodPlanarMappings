@@ -217,22 +217,13 @@ class BevyBridge:
 
     def solve_frame(self, inverse_grid_resolution: int = 64) -> Dict:
         """
-        Solve for new deformation and return mapping parameters including inverse grid.
+        Solve for new deformation.
 
         Args:
-            inverse_grid_resolution: Resolution of inverse mapping grid (default 64x64)
+            inverse_grid_resolution: Unused (kept for compatibility)
 
         Returns:
-            Dictionary with:
-            - coefficients: List[List[float]] - (2, N+3) coefficient matrix
-            - centers: List[List[float]] - (N, 2) RBF centers
-            - s_param: float - Gaussian width parameter
-            - n_rbf: int - Number of RBF basis functions
-            - image_width: float
-            - image_height: float
-            - inverse_grid: List[List[List[float]]] - (H, W, 2) inverse mapping grid
-            - grid_width: int - Width of inverse grid
-            - grid_height: int - Height of inverse grid
+            Dictionary with basis function parameters only
         """
         if not self.is_setup_finalized:
             raise RuntimeError("Setup not finalized")
@@ -249,109 +240,40 @@ class BevyBridge:
         # Run optimization (fast during drag, uses cached matrices)
         self.solver.update_drag(target_handles, num_iterations=2)
 
-        # Compute inverse mapping grid
-        inverse_grid = self._compute_inverse_grid(inverse_grid_resolution)
+        # Return only basis function parameters
+        return self.get_basis_parameters()
 
-        # Return mapping parameters
+    def get_basis_parameters(self) -> Dict:
+        """
+        Get current basis function parameters.
+
+        Returns:
+            Dictionary with:
+            - coefficients: List[List[float]] - (2, N+3) coefficient matrix
+            - centers: List[List[float]] - (N, 2) RBF centers
+            - s_param: float - Gaussian width parameter
+            - n_rbf: int - Number of RBF basis functions
+        """
+        if self.solver is None:
+            raise RuntimeError("Solver not initialized")
+
         return {
             'coefficients': self.solver.coefficients.tolist(),  # (2, N+3)
             'centers': self.solver.basis.centers.tolist(),      # (N, 2)
             's_param': float(self.solver.basis.s),
             'n_rbf': len(self.control_points),
-            'image_width': float(self.image_width),
-            'image_height': float(self.image_height),
-            'inverse_grid': inverse_grid.tolist(),  # (H, W, 2)
-            'grid_width': inverse_grid.shape[1],
-            'grid_height': inverse_grid.shape[0],
         }
 
-    def _compute_inverse_grid(self, resolution: int) -> np.ndarray:
-        """
-        Compute inverse mapping f^{-1}(y) at a regular grid using Newton-Raphson.
-
-        For each output pixel y, find x such that f(x) = y.
-
-        Args:
-            resolution: Grid resolution (will create resolution x resolution grid)
-
-        Returns:
-            (H, W, 2) array where [i, j] contains the source coordinates for output pixel (j, i)
-        """
-        if self.solver is None:
-            raise RuntimeError("Solver not initialized")
-
-        # Create output grid (where we want to sample from)
-        y_coords = np.linspace(0, self.image_height, resolution)
-        x_coords = np.linspace(0, self.image_width, resolution)
-        Y, X = np.meshgrid(y_coords, x_coords, indexing='ij')
-
-        # Target positions (output space)
-        target_positions = np.stack([X.ravel(), Y.ravel()], axis=1)  # (N, 2)
-
-        # Initial guess: identity (x = y)
-        source_positions = target_positions.copy()
-
-        # Newton-Raphson iterations
-        max_iterations = 10
-        tolerance = 1e-3
-
-        for iteration in range(max_iterations):
-            # Evaluate forward mapping: f(x_current)
-            mapped = self.solver.evaluate_map(source_positions)  # (N, 2)
-
-            # Residual: f(x) - y
-            residual = mapped - target_positions  # (N, 2)
-
-            # Check convergence
-            max_error = np.max(np.abs(residual))
-            if max_error < tolerance:
-                break
-
-            # Evaluate Jacobian: J_f(x_current)
-            jacobians = self.solver.evaluate_jacobian(source_positions)  # (N, 2, 2)
-
-            # Solve: J * delta_x = -residual for each point
-            # delta_x = -J^{-1} * residual
-            try:
-                # Compute inverse of each 2x2 Jacobian
-                det = jacobians[:, 0, 0] * jacobians[:, 1, 1] - jacobians[:, 0, 1] * jacobians[:, 1, 0]
-                det = np.where(np.abs(det) > 1e-8, det, 1e-8)  # Avoid division by zero
-
-                inv_jac = np.zeros_like(jacobians)
-                inv_jac[:, 0, 0] = jacobians[:, 1, 1] / det
-                inv_jac[:, 0, 1] = -jacobians[:, 0, 1] / det
-                inv_jac[:, 1, 0] = -jacobians[:, 1, 0] / det
-                inv_jac[:, 1, 1] = jacobians[:, 0, 0] / det
-
-                # delta_x = -J^{-1} @ residual
-                delta = -np.einsum('nij,nj->ni', inv_jac, residual)
-
-                # Update with damping for stability
-                damping = 0.8
-                source_positions += damping * delta
-
-            except np.linalg.LinAlgError:
-                print(f"Warning: Singular Jacobian at iteration {iteration}")
-                break
-
-        # Reshape to grid
-        inverse_grid = source_positions.reshape(resolution, resolution, 2)
-
-        return inverse_grid
-
-    def end_drag_operation(self) -> bool:
+    def end_drag_operation(self) -> None:
         """
         Called when user releases mouse button (onMouseUp).
         Performs Strategy 2 verification and refinement if needed.
-
-        Returns:
-            True if grid was refined (requires re-solving), False otherwise
         """
         if not self.is_setup_finalized:
             raise RuntimeError("Setup not finalized")
 
         if self.solver is None:
-            return False
+            return
 
         # Extract target handle positions
         target_handles = np.array(
@@ -372,113 +294,6 @@ class BevyBridge:
                     self.contour
                 )
                 self.solver._update_hessian_term()
-
-        return was_refined
-
-    def compute_full_resolution_inverse_grid(self) -> Dict:
-        """
-        Compute inverse mapping at full image resolution (pixel-by-pixel).
-        This is computationally expensive but provides exact inverse mapping for all pixels.
-
-        Returns:
-            Dictionary with:
-            - inverse_grid: List[List[List[float]]] - (H, W, 2) inverse mapping grid
-            - grid_width: int - Width of inverse grid (image_width)
-            - grid_height: int - Height of inverse grid (image_height)
-            - computation_time: float - Time taken to compute
-        """
-        if not self.is_setup_finalized:
-            raise RuntimeError("Setup not finalized")
-
-        if self.solver is None:
-            raise RuntimeError("Solver not initialized")
-
-        import time
-        start_time = time.time()
-
-        # Use full image resolution
-        resolution_w = int(self.image_width)
-        resolution_h = int(self.image_height)
-
-        print(f"Computing full resolution inverse grid: {resolution_w}x{resolution_h}")
-
-        # Create output grid at full resolution
-        y_coords = np.arange(resolution_h, dtype=np.float32)
-        x_coords = np.arange(resolution_w, dtype=np.float32)
-        Y, X = np.meshgrid(y_coords, x_coords, indexing='ij')
-
-        # Target positions (output space)
-        target_positions = np.stack([X.ravel(), Y.ravel()], axis=1)  # (N, 2)
-
-        # Initial guess: identity (x = y)
-        source_positions = target_positions.copy()
-
-        # Newton-Raphson iterations with adaptive damping
-        max_iterations = 15
-        tolerance = 1e-2
-
-        for iteration in range(max_iterations):
-            # Evaluate forward mapping: f(x_current)
-            mapped = self.solver.evaluate_map(source_positions)  # (N, 2)
-
-            # Residual: f(x) - y
-            residual = mapped - target_positions  # (N, 2)
-
-            # Check convergence
-            max_error = np.max(np.abs(residual))
-            mean_error = np.mean(np.abs(residual))
-
-            if iteration % 3 == 0:
-                print(f"  Iteration {iteration}: max_error={max_error:.6f}, mean_error={mean_error:.6f}")
-
-            if max_error < tolerance:
-                print(f"  Converged at iteration {iteration}")
-                break
-
-            # Evaluate Jacobian: J_f(x_current)
-            jacobians = self.solver.evaluate_jacobian(source_positions)  # (N, 2, 2)
-
-            # Solve: J * delta_x = -residual for each point
-            try:
-                # Compute inverse of each 2x2 Jacobian
-                det = jacobians[:, 0, 0] * jacobians[:, 1, 1] - jacobians[:, 0, 1] * jacobians[:, 1, 0]
-
-                # Clamp determinant to avoid division by zero
-                det_safe = np.where(np.abs(det) > 1e-8, det, 1e-8)
-
-                inv_jac = np.zeros_like(jacobians)
-                inv_jac[:, 0, 0] = jacobians[:, 1, 1] / det_safe
-                inv_jac[:, 0, 1] = -jacobians[:, 0, 1] / det_safe
-                inv_jac[:, 1, 0] = -jacobians[:, 1, 0] / det_safe
-                inv_jac[:, 1, 1] = jacobians[:, 0, 0] / det_safe
-
-                # delta_x = -J^{-1} @ residual
-                delta = -np.einsum('nij,nj->ni', inv_jac, residual)
-
-                # Adaptive damping: reduce step size if error is large
-                damping = 0.5 if max_error > 10.0 else 0.8
-                source_positions += damping * delta
-
-                # Clamp to domain bounds
-                source_positions[:, 0] = np.clip(source_positions[:, 0], 0, self.image_width)
-                source_positions[:, 1] = np.clip(source_positions[:, 1], 0, self.image_height)
-
-            except Exception as e:
-                print(f"Warning: Error during Newton-Raphson at iteration {iteration}: {e}")
-                break
-
-        # Reshape to grid
-        inverse_grid = source_positions.reshape(resolution_h, resolution_w, 2)
-
-        computation_time = time.time() - start_time
-        print(f"Full resolution inverse grid computed in {computation_time:.2f} seconds")
-
-        return {
-            'inverse_grid': inverse_grid.tolist(),  # (H, W, 2)
-            'grid_width': resolution_w,
-            'grid_height': resolution_h,
-            'computation_time': computation_time,
-        }
 
     def reset_mesh(self) -> None:
         """

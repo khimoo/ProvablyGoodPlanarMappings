@@ -195,6 +195,7 @@ fn receive_python_results(
     mut mapping_params: ResMut<MappingParameters>,
     mut next_state: ResMut<NextState<AppMode>>,
     state: Res<State<AppMode>>,
+    image_data: Option<Res<ImageData>>,
 ) {
     while let Ok(res) = channels.rx_result.try_recv() {
         match res {
@@ -207,31 +208,157 @@ fn receive_python_results(
                     next_state.set(AppMode::Deform);
                 }
             }
-            PyResult::MappingParameters {
+            PyResult::BasisFunctionParameters {
                 coefficients,
                 centers,
                 s_param,
                 n_rbf,
-                image_width,
-                image_height,
-                inverse_grid,
-                grid_width,
-                grid_height,
             } => {
-                println!("Received mapping parameters: {} RBFs, inverse grid {}x{}", n_rbf, grid_width, grid_height);
-                mapping_params.coefficients = coefficients;
-                mapping_params.centers = centers;
-                mapping_params.s_param = s_param;
-                mapping_params.n_rbf = n_rbf;
-                mapping_params.image_width = image_width;
-                mapping_params.image_height = image_height;
-                mapping_params.inverse_grid = inverse_grid;
-                mapping_params.grid_width = grid_width;
-                mapping_params.grid_height = grid_height;
-                mapping_params.is_valid = true;
+                println!("Received basis function parameters: {} RBFs", n_rbf);
+                
+                // Compute inverse mapping in Rust
+                if let Some(image_data) = &image_data {
+                    let inverse_grid = compute_inverse_grid_rust(
+                        &coefficients,
+                        &centers,
+                        s_param,
+                        image_data.width as usize,
+                        image_data.height as usize,
+                        (image_data.width as usize).min(image_data.height as usize),
+                    );
+                    
+                    mapping_params.coefficients = coefficients;
+                    mapping_params.centers = centers;
+                    mapping_params.s_param = s_param;
+                    mapping_params.n_rbf = n_rbf;
+                    mapping_params.image_width = image_data.width;
+                    mapping_params.image_height = image_data.height;
+                    mapping_params.inverse_grid = inverse_grid;
+                    mapping_params.grid_width = 64;
+                    mapping_params.grid_height = 64;
+                    mapping_params.is_valid = true;
+                }
             }
         }
     }
+}
+
+fn compute_inverse_grid_rust(
+    coefficients: &[Vec<f32>],
+    centers: &[Vec<f32>],
+    s_param: f32,
+    image_width: usize,
+    image_height: usize,
+    resolution: usize,
+) -> Vec<Vec<Vec<f32>>> {
+    // Create output grid
+    let mut inverse_grid = vec![vec![vec![0.0; 2]; resolution]; resolution];
+    
+    let h_x = image_width as f32 / (resolution - 1).max(1) as f32;
+    let h_y = image_height as f32 / (resolution - 1).max(1) as f32;
+    
+    for (grid_y, row) in inverse_grid.iter_mut().enumerate() {
+        for (grid_x, cell) in row.iter_mut().enumerate() {
+            let target_x = grid_x as f32 * h_x;
+            let target_y = grid_y as f32 * h_y;
+            
+            // Newton-Raphson to find source position
+            let mut src_x = target_x;
+            let mut src_y = target_y;
+            
+            for _ in 0..10 {
+                // Evaluate f(src_x, src_y)
+                let (mapped_x, mapped_y) = evaluate_rbf_mapping(
+                    src_x, src_y,
+                    coefficients,
+                    centers,
+                    s_param,
+                );
+                
+                let residual_x = mapped_x - target_x;
+                let residual_y = mapped_y - target_y;
+                
+                if residual_x.abs() < 1e-3 && residual_y.abs() < 1e-3 {
+                    break;
+                }
+                
+                // Compute Jacobian numerically
+                let eps = 1e-4;
+                let (fx_eps, fy_eps) = evaluate_rbf_mapping(
+                    src_x + eps, src_y,
+                    coefficients,
+                    centers,
+                    s_param,
+                );
+                let (fx_y_eps, fy_y_eps) = evaluate_rbf_mapping(
+                    src_x, src_y + eps,
+                    coefficients,
+                    centers,
+                    s_param,
+                );
+                
+                let j00 = (fx_eps - mapped_x) / eps;
+                let j01 = (fx_y_eps - mapped_x) / eps;
+                let j10 = (fy_eps - mapped_y) / eps;
+                let j11 = (fy_y_eps - mapped_y) / eps;
+                
+                // Invert 2x2 Jacobian
+                let det = j00 * j11 - j01 * j10;
+                if det.abs() < 1e-8 {
+                    break;
+                }
+                
+                let inv_j00 = j11 / det;
+                let inv_j01 = -j01 / det;
+                let inv_j10 = -j10 / det;
+                let inv_j11 = j00 / det;
+                
+                // Newton step
+                let delta_x = -(inv_j00 * residual_x + inv_j01 * residual_y);
+                let delta_y = -(inv_j10 * residual_x + inv_j11 * residual_y);
+                
+                src_x += 0.8 * delta_x;
+                src_y += 0.8 * delta_y;
+                
+                // Clamp to domain
+                src_x = src_x.clamp(0.0, image_width as f32);
+                src_y = src_y.clamp(0.0, image_height as f32);
+            }
+            
+            cell[0] = src_x;
+            cell[1] = src_y;
+        }
+    }
+    
+    inverse_grid
+}
+
+fn evaluate_rbf_mapping(
+    x: f32,
+    y: f32,
+    coefficients: &[Vec<f32>],
+    centers: &[Vec<f32>],
+    s_param: f32,
+) -> (f32, f32) {
+    let mut result = [0.0; 2];
+    
+    // RBF basis functions
+    for (i, center) in centers.iter().enumerate() {
+        let dx = x - center[0];
+        let dy = y - center[1];
+        let r2 = dx * dx + dy * dy;
+        let phi = (-r2 / (2.0 * s_param * s_param)).exp();
+        
+        result[0] += coefficients[0][i] * phi;
+        result[1] += coefficients[1][i] * phi;
+    }
+    
+    // Affine terms (last 3 coefficients)
+    let n = centers.len();
+    result[0] += coefficients[0][n] + coefficients[0][n + 1] * x + coefficients[0][n + 2] * y;
+    result[1] += coefficients[1][n] + coefficients[1][n + 1] * x + coefficients[1][n + 2] * y;
+    
+    (result[0], result[1])
 }
 
 fn setup_camera_scale(

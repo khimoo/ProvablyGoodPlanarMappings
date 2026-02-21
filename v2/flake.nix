@@ -37,7 +37,7 @@
           pkg-config
           rustToolchain
           clang
-          lld
+          mold
         ];
 
         buildInputs = with pkgs; [
@@ -45,10 +45,10 @@
           alsa-lib
           vulkan-loader
           # X11 dependencies
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
+          libx11
+          libxcursor
+          libxi
+          libxrandr
           # Wayland dependencies (optional but recommended)
           libxkbcommon
           wayland
@@ -63,6 +63,9 @@
           inherit nativeBuildInputs buildInputs;
 
           # 環境変数設定
+
+          # Rustにmoldをリンカとして使用させる
+          RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
 
           # PyO3がビルド時および実行時に正しいPythonを見つけられるようにする
           PYO3_PYTHON = "${myPython}/bin/python";
@@ -87,9 +90,9 @@
           type = "app";
           program = "${pkgs.writeShellScriptBin "run-app" ''
             # nix developと同じ環境で cargo run を実行する
-            
+
             # v2ディレクトリ直下での実行を前提とするため、パスを固定
-            CMD="cd ./bevy_image_deform && cargo run"
+            CMD="cd ./bevy_image_deform && cargo run --features bevy/dynamic_linking"
 
             # nix develop の環境内でコマンドを実行
             # 現在のディレクトリの flake.nix を参照します
