@@ -22,25 +22,18 @@ pub fn render_deformed_image(
         return;
     };
 
-    let grid_w = mapping_params.grid_width;
-    let grid_h = mapping_params.grid_height;
+    let (grid_w, grid_h, flattened_data) = &mapping_params.inverse_grid;
 
-    let mut grid_data = Vec::with_capacity(grid_w * grid_h * 8);
-
-    for y in 0..grid_h {
-        for x in 0..grid_w {
-            let src_x = mapping_params.inverse_grid[y][x][0];
-            let src_y = mapping_params.inverse_grid[y][x][1];
-
-            grid_data.extend_from_slice(&src_x.to_le_bytes());
-            grid_data.extend_from_slice(&src_y.to_le_bytes());
-        }
+    // Convert flattened data to bytes
+    let mut grid_data = Vec::with_capacity(flattened_data.len() * 4);
+    for &value in flattened_data.iter() {
+        grid_data.extend_from_slice(&value.to_le_bytes());
     }
 
     let inverse_grid_image = Image::new(
         Extent3d {
-            width: grid_w as u32,
-            height: grid_h as u32,
+            width: *grid_w as u32,
+            height: *grid_h as u32,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -51,5 +44,5 @@ pub fn render_deformed_image(
 
     let inverse_grid_handle = images.add(inverse_grid_image);
     material.inverse_grid_texture = inverse_grid_handle;
-    material.grid_size = Vec2::new(grid_w as f32, grid_h as f32);
+    material.grid_size = Vec2::new(*grid_w as f32, *grid_h as f32);
 }

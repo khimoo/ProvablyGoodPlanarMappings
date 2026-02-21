@@ -215,15 +215,13 @@ class BevyBridge:
         idx, _, _ = self.control_points[control_index]
         self.control_points[control_index] = (idx, x, y)
 
-    def solve_frame(self, inverse_grid_resolution: int = 64) -> Dict:
+    def solve_frame(self, inverse_grid_resolution: int = 64) -> None:
         """
-        Solve for new deformation.
+        Solve for new deformation during drag operation.
+        This method is called on every mouse move to update the mapping coefficients.
 
         Args:
             inverse_grid_resolution: Unused (kept for compatibility)
-
-        Returns:
-            Dictionary with basis function parameters only
         """
         if not self.is_setup_finalized:
             raise RuntimeError("Setup not finalized")
@@ -239,9 +237,6 @@ class BevyBridge:
 
         # Run optimization (fast during drag, uses cached matrices)
         self.solver.update_drag(target_handles, num_iterations=2)
-
-        # Return only basis function parameters
-        return self.get_basis_parameters()
 
     def get_basis_parameters(self) -> Dict:
         """

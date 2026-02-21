@@ -86,21 +86,26 @@ pub async fn python_thread_loop(
                     if let Err(e) = bridge_bound.call_method1("update_control_point", (control_index, x, y)) {
                         eprintln!("Py Error (UpdatePoint): {}", e);
                     } else {
-                        if let Ok(res) = bridge_bound.call_method0("get_basis_parameters") {
-                            if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
-                                let coeffs = extract_from_dict(params, "coefficients");
-                                let centers = extract_from_dict(params, "centers");
-                                let s = extract_from_dict(params, "s_param");
-                                let n = extract_from_dict(params, "n_rbf");
+                        // Call solve_frame() to compute new coefficients
+                        if let Err(e) = bridge_bound.call_method0("solve_frame") {
+                            eprintln!("Py Error (solve_frame): {}", e);
+                        } else {
+                            if let Ok(res) = bridge_bound.call_method0("get_basis_parameters") {
+                                if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
+                                    let coeffs = extract_from_dict(params, "coefficients");
+                                    let centers = extract_from_dict(params, "centers");
+                                    let s = extract_from_dict(params, "s_param");
+                                    let n = extract_from_dict(params, "n_rbf");
 
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n)) =
-                                    (coeffs, centers, s, n) {
-                                    let _ = tx_res.send(PyResult::BasisFunctionParameters {
-                                        coefficients: coeffs,
-                                        centers,
-                                        s_param: s,
-                                        n_rbf: n,
-                                    });
+                                    if let (Some(coeffs), Some(centers), Some(s), Some(n)) =
+                                        (coeffs, centers, s, n) {
+                                        let _ = tx_res.send(PyResult::BasisFunctionParameters {
+                                            coefficients: coeffs,
+                                            centers,
+                                            s_param: s,
+                                            n_rbf: n,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -109,23 +114,23 @@ pub async fn python_thread_loop(
                 PyCommand::EndDrag => {
                     if let Err(e) = bridge_bound.call_method0("end_drag_operation") {
                         eprintln!("Py Error (EndDrag): {}", e);
-                    } else {
-                        if let Ok(res) = bridge_bound.call_method0("get_basis_parameters") {
-                            if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
-                                let coeffs = extract_from_dict(params, "coefficients");
-                                let centers = extract_from_dict(params, "centers");
-                                let s = extract_from_dict(params, "s_param");
-                                let n = extract_from_dict(params, "n_rbf");
+                    }
+                    // Always get the final basis parameters after end_drag
+                    if let Ok(res) = bridge_bound.call_method0("get_basis_parameters") {
+                        if let Ok(params) = res.downcast::<pyo3::types::PyDict>() {
+                            let coeffs = extract_from_dict(params, "coefficients");
+                            let centers = extract_from_dict(params, "centers");
+                            let s = extract_from_dict(params, "s_param");
+                            let n = extract_from_dict(params, "n_rbf");
 
-                                if let (Some(coeffs), Some(centers), Some(s), Some(n)) =
-                                    (coeffs, centers, s, n) {
-                                    let _ = tx_res.send(PyResult::BasisFunctionParameters {
-                                        coefficients: coeffs,
-                                        centers,
-                                        s_param: s,
-                                        n_rbf: n,
-                                    });
-                                }
+                            if let (Some(coeffs), Some(centers), Some(s), Some(n)) =
+                                (coeffs, centers, s, n) {
+                                let _ = tx_res.send(PyResult::BasisFunctionParameters {
+                                    coefficients: coeffs,
+                                    centers,
+                                    s_param: s,
+                                    n_rbf: n,
+                                });
                             }
                         }
                     }

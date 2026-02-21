@@ -218,13 +218,14 @@ fn receive_python_results(
                 
                 // Compute inverse mapping in Rust
                 if let Some(image_data) = &image_data {
+                    let resolution = ((image_data.width as usize).min(image_data.height as usize))/32;
                     let inverse_grid = compute_inverse_grid_rust(
                         &coefficients,
                         &centers,
                         s_param,
                         image_data.width as usize,
                         image_data.height as usize,
-                        (image_data.width as usize).min(image_data.height as usize),
+                        resolution,
                     );
                     
                     mapping_params.coefficients = coefficients;
@@ -234,8 +235,6 @@ fn receive_python_results(
                     mapping_params.image_width = image_data.width;
                     mapping_params.image_height = image_data.height;
                     mapping_params.inverse_grid = inverse_grid;
-                    mapping_params.grid_width = 64;
-                    mapping_params.grid_height = 64;
                     mapping_params.is_valid = true;
                 }
             }
@@ -250,15 +249,15 @@ fn compute_inverse_grid_rust(
     image_width: usize,
     image_height: usize,
     resolution: usize,
-) -> Vec<Vec<Vec<f32>>> {
+) -> (usize, usize, Vec<f32>) {
     // Create output grid
-    let mut inverse_grid = vec![vec![vec![0.0; 2]; resolution]; resolution];
+    let mut flattened_data = Vec::with_capacity(resolution * resolution * 2);
     
     let h_x = image_width as f32 / (resolution - 1).max(1) as f32;
     let h_y = image_height as f32 / (resolution - 1).max(1) as f32;
     
-    for (grid_y, row) in inverse_grid.iter_mut().enumerate() {
-        for (grid_x, cell) in row.iter_mut().enumerate() {
+    for grid_y in 0..resolution {
+        for grid_x in 0..resolution {
             let target_x = grid_x as f32 * h_x;
             let target_y = grid_y as f32 * h_y;
             
@@ -325,12 +324,12 @@ fn compute_inverse_grid_rust(
                 src_y = src_y.clamp(0.0, image_height as f32);
             }
             
-            cell[0] = src_x;
-            cell[1] = src_y;
+            flattened_data.push(src_x);
+            flattened_data.push(src_y);
         }
     }
     
-    inverse_grid
+    (resolution, resolution, flattened_data)
 }
 
 fn evaluate_rbf_mapping(
