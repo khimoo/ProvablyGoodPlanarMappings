@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyModule};
+use pyo3::types::{PyList, PyModule, PyDict};
 use std::env;
+use serde_json;
 
 use super::commands::{PyCommand, PyResult};
 
@@ -50,9 +51,56 @@ pub async fn python_thread_loop(
         Python::with_gil(|py| {
             let bridge_bound = bridge.bind(py);
             match cmd {
-                PyCommand::InitializeDomain { width, height, epsilon } => {
-                    println!("Rust->Py: InitializeDomain {}x{}, eps={}", width, height, epsilon);
-                    if let Err(e) = bridge_bound.call_method1("initialize_domain", (width, height, epsilon)) {
+                PyCommand::InitializeDomain {
+                    width,
+                    height,
+                    epsilon,
+                    strategy,
+                    strategy_params,
+                } => {
+                    println!(
+                        "Rust->Py: InitializeDomain {}x{}, eps={}, strategy={}",
+                        width, height, epsilon, strategy
+                    );
+
+                    // strategy_params を Python 辞書に変換
+                    Python::with_gil(|py| {
+                        if let Ok(params_json) = serde_json::from_str::<serde_json::Value>(
+                            &strategy_params,
+                        ) {
+                            let dict = pyo3::types::PyDict::new(py);
+                            if let Some(obj) = params_json.as_object() {
+                                for (key, value) in obj {
+                                    let py_value: PyObject = match value {
+                                        serde_json::Value::Number(n) => {
+                                            if let Some(i) = n.as_i64() {
+                                                i.into_py(py)
+                                            } else if let Some(f) = n.as_f64() {
+                                                f.into_py(py)
+                                            } else {
+                                                continue;
+                                            }
+                                        }
+                                        serde_json::Value::String(s) => s.into_py(py),
+                                        _ => continue,
+                                    };
+                                    let _ = dict.set_item(key, py_value);
+                                }
+                            }
+
+                            // BevyBridge を再初期化
+                            if let Err(e) = bridge_bound.call_method1(
+                                "__init__",
+                                (strategy.clone(), dict),
+                            ) {
+                                eprintln!("Py Error (BevyBridge init): {}", e);
+                            }
+                        }
+                    });
+
+                    if let Err(e) =
+                        bridge_bound.call_method1("initialize_domain", (width, height, epsilon))
+                    {
                         eprintln!("Py Error (InitializeDomain): {}", e);
                     } else {
                         let _ = tx_res.send(PyResult::DomainInitialized);

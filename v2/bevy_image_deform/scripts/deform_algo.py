@@ -168,43 +168,88 @@ class GuaranteeStrategy(ABC):
 
 class Strategy1(GuaranteeStrategy):
     """
-    Strategy 1: 悲観的・事前保証アプローチ
-
-    操作前に「係数ノルムが最大でこれくらいになるだろう（M）」というワーストケースを想定し、
-    最初から非常に細かい（厳密な）グリッド h を生成する。
-    ドラッグ中の計算は重いが、ドラッグ終了後の再計算（検証）は不要。
+    Strategy 1: Given Z and K → bound K_max
+    
+    コロケーションポイント密度 h と K を指定し、
+    結果として得られる K_max を計算する。
+    K_max は出力であり、入力ではない。
+    
+    論文の式(11)または(13)から K_max を計算する。
     """
-    def __init__(self, domain_bounds: Tuple[float, float, float, float], max_expected_c_norm: float = 100.0):
+    def __init__(self, domain_bounds: Tuple[float, float, float, float],
+                 collocation_resolution: int = 500,
+                 K_on_collocation: float = 3.5):
         """
         Args:
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
-            max_expected_c_norm: 係数ノルムの上限 M（ワーストケース想定値）
+            collocation_resolution: グリッド解像度
+            K_on_collocation: コロケーション点上の歪み上限 K
+        
+        K_max は計算結果として得られる（入力ではない）
         """
         super().__init__(domain_bounds)
-        self.max_expected_c_norm = max_expected_c_norm
+        self.collocation_resolution = collocation_resolution
+        self.K_on_collocation = K_on_collocation
 
     def get_initial_h(self, basis: 'BasisFunction', K_solver: float, K_max: float) -> float:
         """
-        ワーストケースの係数ノルムを使って、最初から最も厳しい h を算出する。
+        Strategy 1: h は事前に決定されている
+        
+        注: K_solver と K_max は渡されるが、Strategy 1 では使用しない
+        （Strategy 2 との互換性のため）
         """
-        margin = self._compute_margin(K_solver, K_max)
-        C = basis.compute_basis_gradient_modulus(1.0)
-
-        if C <= 0:
-            return float('inf')
-
-        h_strict = margin / (2.0 * self.max_expected_c_norm * C)
-        return float(h_strict)
+        x_min, x_max, y_min, y_max = self.bounds
+        max_span = max(x_max - x_min, y_max - y_min)
+        return float(max_span / self.collocation_resolution)
 
     def get_strict_h_after_drag(self, basis: 'BasisFunction', K_solver: float, K_max: float,
                                 c: np.ndarray) -> float:
-        """
-        Strategy 1 は最初から安全なグリッドを用いているため、再検証は不要。
-        現在の h をそのまま返す（呼び出し側で current_h を渡す）。
-        """
-        # このメソッドは呼び出し側で current_h と比較されるため、
-        # 常に current_h 以上の値を返すことで再計算を回避する
+        """Strategy 1: グリッド細分化なし"""
         return float('inf')
+
+    def compute_guaranteed_K_max(self, basis: 'BasisFunction', h: float) -> float:
+        """
+        Strategy 1 の出力: 実際の K_max を計算
+        
+        式(11): D_iso(x) ≤ max{ K + ω(h), 1/(1/K - ω(h)) }
+        
+        ω(h) = 2 * |||c||| * ω_∇F(h)
+        初期状態では |||c||| = 1（恒等写像）
+        
+        Args:
+            basis: 基底関数のインスタンス
+            h: コロケーションポイント密度
+        
+        Returns:
+            K_max: 領域全体で保証される最大歪み
+        """
+        K = self.K_on_collocation
+        
+        # ω_∇F(h) を計算
+        # compute_basis_gradient_modulus(t) は ω_∇F(t) を返す
+        # Gaussians の場合: ω_∇F(t) = t / s²
+        omega_grad_F = basis.compute_basis_gradient_modulus(h)
+        
+        # ω(h) = 2 * |||c||| * ω_∇F(h)
+        # 初期状態では |||c||| = 1（恒等写像）
+        omega_h = 2.0 * 1.0 * omega_grad_F
+        
+        print(f"DEBUG compute_guaranteed_K_max:")
+        print(f"  K (K_on_collocation): {K:.4f}")
+        print(f"  h: {h:.4f}")
+        print(f"  ω_∇F(h): {omega_grad_F:.6f}")
+        print(f"  ω(h) = 2 * ω_∇F(h): {omega_h:.6f}")
+        
+        # 式(11): D_iso(x) ≤ max{ K + ω(h), 1/(1/K - ω(h)) }
+        term1 = K + omega_h
+        term2 = 1.0 / (1.0 / K - omega_h)
+        K_max_bound = max(term1, term2)
+        
+        print(f"  K + ω(h): {term1:.4f}")
+        print(f"  1/(1/K - ω(h)): {term2:.4f}")
+        print(f"  K_max_bound: {K_max_bound:.4f}")
+        
+        return float(K_max_bound)
 
 
 class Strategy2(GuaranteeStrategy):

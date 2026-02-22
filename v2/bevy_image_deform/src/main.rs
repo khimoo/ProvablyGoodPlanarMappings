@@ -14,7 +14,7 @@
  * 3. Deform Mode: User drags control points
  *    - onMouseDown: Python precomputes matrices (start_drag)
  *    - onMouseMove: Python solves and returns mapping parameters (update_drag)
- *    - onMouseUp: Python verifies distortion bounds (end_drag + Strategy 2)
+ *    - onMouseUp: Python verifies distortion bounds (end_drag + Strategy 1)
  * 4. Rendering: Rust evaluates f(x) for each pixel using the mapping parameters
  */
 
@@ -24,6 +24,7 @@ use bevy::{
     sprite::{Material2dPlugin, MeshMaterial2d},
 };
 use image::GenericImageView;
+use serde_json;
 use bevy_image_deform::{
     state::{AppMode, ControlPoints, MappingParameters, DeformedImage, ModeText, MainCamera},
     python::{PythonChannels, PyCommand, PyResult, python_thread_loop},
@@ -175,10 +176,20 @@ fn setup(
         "Initializing domain: {}x{}, epsilon={}",
         image_width, image_height, epsilon
     );
+
+    // Strategy 1 を使用
+    let strategy = "strategy1".to_string();
+    let strategy_params = serde_json::json!({
+        "collocation_resolution": 30,
+        "K_on_collocation": 3
+    }).to_string();
+
     let _ = tx_cmd.try_send(PyCommand::InitializeDomain {
         width: image_width,
         height: image_height,
         epsilon,
+        strategy,
+        strategy_params,
     });
 
     if !contour.is_empty() {

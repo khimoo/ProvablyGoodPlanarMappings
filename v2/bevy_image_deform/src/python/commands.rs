@@ -1,5 +1,11 @@
 pub enum PyCommand {
-    InitializeDomain { width: f32, height: f32, epsilon: f32 },
+    InitializeDomain {
+        width: f32,
+        height: f32,
+        epsilon: f32,
+        strategy: String,           // "strategy1" or "strategy2"
+        strategy_params: String,    // JSON format
+    },
     SetContour { contour: Vec<(f32, f32)> },
     AddControlPoint { index: usize, x: f32, y: f32 },
     FinalizeSetup,

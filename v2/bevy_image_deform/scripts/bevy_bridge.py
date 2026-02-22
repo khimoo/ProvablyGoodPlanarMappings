@@ -72,27 +72,43 @@ class BevyBridge:
     Bridge between Bevy (Rust) and the deformation algorithm (Python).
 
     Workflow:
-    1. initialize_domain: Set image dimensions
+    1. initialize_domain: Set image dimensions with strategy selection
     2. set_contour: Set domain boundary from image contour
     3. add_control_point: Add control points during setup phase
     4. finalize_setup: Build solver with all control points
     5. start_drag_operation: Called on mouse down (precomputation)
     6. update_control_point: Called on mouse move (update position)
     7. solve_frame: Solve and return mapping parameters
-    8. end_drag_operation: Called on mouse up (Strategy 2 verification)
+    8. end_drag_operation: Called on mouse up (verification)
     """
 
-    def __init__(self):
+    def __init__(self, strategy_type: str = "strategy2",
+                 strategy_params: Optional[Dict] = None):
+        """
+        Args:
+            strategy_type: "strategy1" or "strategy2"
+            strategy_params: Strategy 固有のパラメータ
+                - strategy1:
+                    - collocation_resolution: int
+                    - K_on_collocation: float (コロケーション点上の K)
+                - strategy2:
+                    - interactive_resolution: int
+                    - K_solver: float (コロケーション点上の K)
+                    - K_max: float (目標 K_max)
+        """
+        self.strategy_type = strategy_type
+        self.strategy_params = strategy_params or {}
         self.solver: Optional[BetterFitwithGaussian] = None
         self.image_width: float = 0.0
         self.image_height: float = 0.0
         self.contour: Optional[np.ndarray] = None  # (N, 2) contour vertices
         self.control_points: List[Tuple[int, float, float]] = []  # (control_idx, x, y)
         self.is_setup_finalized: bool = False
+        self.guaranteed_K_max: Optional[float] = None  # Strategy 1 の出力
 
     def initialize_domain(self, image_width: float, image_height: float, epsilon: float) -> None:
         """
-        Initialize the deformation domain.
+        Initialize the deformation domain with specified strategy.
 
         Args:
             image_width: Width of the image
@@ -101,17 +117,120 @@ class BevyBridge:
         """
         self.image_width = image_width
         self.image_height = image_height
+        
+        # epsilon を strategy_params に保存（_create_strategy1 で使用）
+        self.strategy_params['epsilon'] = epsilon
 
-        # Initialize solver with bounding box
         domain_bounds = (0.0, image_width, 0.0, image_height)
+
+        if self.strategy_type == "strategy1":
+            strategy, K_solver, K_max = self._create_strategy1(domain_bounds)
+        else:  # strategy2
+            strategy, K_solver, K_max = self._create_strategy2(domain_bounds)
+
         self.solver = BetterFitwithGaussian(
             domain_bounds=domain_bounds,
+            guarantee_strategy=strategy,
             s_param=epsilon,
-            K_solver=3.5,
-            K_max=5.0
+            K_solver=K_solver,
+            K_max=K_max
         )
 
         print(f"Initialized domain: {image_width}x{image_height}, epsilon={epsilon}")
+        print(f"Strategy: {self.strategy_type}")
+        if self.strategy_type == "strategy1":
+            print(f"  K_on_collocation: {K_solver}")
+            print(f"  (K_max will be computed after finalize_setup)")
+        else:
+            print(f"  K_solver: {K_solver}, K_max: {K_max}")
+
+    def _create_strategy1(self, domain_bounds: Tuple[float, float, float, float]):
+        """
+        Create Strategy 1: Given Z and K → bound K_max
+        
+        K を自動計算する場合:
+        - 'K_on_collocation' が指定されていない場合、論文の式(11)から自動計算
+        - 'collocation_resolution' から h を計算
+        - ω(h) = 2 * h / s² (Gaussians の場合)
+        - K_auto = α / ω(h) (α < 1, 安全マージン)
+        
+        Returns:
+            (strategy, K_solver, K_max)
+            K_max は Strategy 2 との互換性のため渡すが、Strategy 1 では使用しない
+        """
+        from deform_algo import Strategy1
+        
+        collocation_resolution = self.strategy_params.get(
+            'collocation_resolution', 500
+        )
+        epsilon = self.strategy_params.get('epsilon', 40.0)
+        
+        print(f"DEBUG: strategy_params = {self.strategy_params}")
+        print(f"DEBUG: 'K_on_collocation' in strategy_params = {'K_on_collocation' in self.strategy_params}")
+        
+        # K_on_collocation が明示的に指定されているか確認
+        if 'K_on_collocation' in self.strategy_params:
+            K_on_collocation = self.strategy_params['K_on_collocation']
+            print(f"Using explicit K_on_collocation: {K_on_collocation}")
+        else:
+            # K を自動計算
+            x_min, x_max, y_min, y_max = domain_bounds
+            max_span = max(x_max - x_min, y_max - y_min)
+            
+            # h = max_span / collocation_resolution
+            h = max_span / collocation_resolution
+            
+            # ω(h) = 2 * h / s² (Gaussians の場合、初期状態で |||c||| = 1)
+            omega_h = 2.0 * h / (epsilon ** 2)
+            
+            # 条件: 1/K > ω(h) ⟹ K < 1/ω(h)
+            # 安全マージン β = 0.5 を適用: K_auto = β / ω(h)
+            # （β を小さくすることで、式(11)の第2項 1/(1/K - ω(h)) が爆発するのを防ぐ）
+            safety_margin = 0.5
+            K_on_collocation = safety_margin / omega_h
+            
+            print(f"Strategy 1: Auto-calculated K_on_collocation")
+            print(f"  max_span: {max_span:.2f}")
+            print(f"  collocation_resolution: {collocation_resolution}")
+            print(f"  h: {h:.4f}")
+            print(f"  epsilon (s): {epsilon:.2f}")
+            print(f"  ω(h): {omega_h:.6f}")
+            print(f"  K_on_collocation: {K_on_collocation:.4f}")
+        
+        strategy = Strategy1(
+            domain_bounds=domain_bounds,
+            collocation_resolution=collocation_resolution,
+            K_on_collocation=K_on_collocation
+        )
+        
+        # Strategy 1 では K_max は計算結果なので、ダミー値を渡す
+        # （Strategy 2 との互換性のため）
+        K_max_dummy = 10.0  # 実際の値は finalize_setup() で計算
+        
+        return strategy, K_on_collocation, K_max_dummy
+
+    def _create_strategy2(self, domain_bounds: Tuple[float, float, float, float]):
+        """
+        Create Strategy 2: Given K and K_max → calculate h
+        
+        Returns:
+            (strategy, K_solver, K_max)
+            K_max は必須（h を計算するため）
+        """
+        from deform_algo import Strategy2
+        
+        interactive_resolution = self.strategy_params.get(
+            'interactive_resolution', 200
+        )
+        K_solver = self.strategy_params.get('K_solver', 3.5)
+        K_max = self.strategy_params.get('K_max', 5.0)
+        
+        strategy = Strategy2(
+            domain_bounds=domain_bounds,
+            interactive_resolution=interactive_resolution
+        )
+        
+        return strategy, K_solver, K_max
 
     def set_contour(self, contour_points: List[Tuple[float, float]]) -> None:
         """
@@ -142,6 +261,8 @@ class BevyBridge:
         Finalize setup phase and initialize the solver.
         This builds the basis functions centered at control points.
         If contour is set, collocation points are filtered to be inside the contour.
+        
+        Strategy 1 の場合、ここで K_max を計算して記録する。
         """
         if self.is_setup_finalized:
             return
@@ -160,6 +281,18 @@ class BevyBridge:
 
         # Initialize mapping with identity (no deformation)
         self.solver.initialize_mapping(src_handles)
+
+        # Strategy 1 の場合、K_max を計算
+        if self.strategy_type == "strategy1":
+            h = self.solver.current_h
+            strategy = self.solver.strategy
+            self.guaranteed_K_max = strategy.compute_guaranteed_K_max(
+                self.solver.basis, h
+            )
+            print(f"Strategy 1: Guaranteed K_max = {self.guaranteed_K_max:.4f}")
+
+        collocation_count = len(self.solver.collocation_points)
+        print(f"Generated {collocation_count} collocation points")
 
         # If contour is set, filter collocation points to be inside contour
         if self.contour is not None:
@@ -298,5 +431,6 @@ class BevyBridge:
         self.is_setup_finalized = False
         self.solver = None
         self.contour = None
+        self.guaranteed_K_max = None
         print("Reset mesh")
 
