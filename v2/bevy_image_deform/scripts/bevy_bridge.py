@@ -392,6 +392,38 @@ class BevyBridge:
             'n_rbf': len(self.control_points),
         }
 
+    def get_debug_visualization(self) -> Dict:
+        """
+        Get visualization data for debugging.
+
+        Returns:
+            Dictionary with:
+            - collocation_points: List[List[float]] - All grid points
+            - active_set: List[List[float]] - Points with high distortion
+            - contour: List[List[float]] - Domain boundary
+        """
+        if self.solver is None:
+            return {
+                'collocation_points': [],
+                'active_set': [],
+                'contour': self.contour.tolist() if self.contour is not None else [],
+            }
+
+        # コロケーション点
+        collocation_points = self.solver.collocation_points.tolist()
+
+        # Active Set（歪みが大きい点）
+        active_indices = self.solver._active_indices
+        active_set = []
+        if len(active_indices) > 0:
+            active_set = self.solver.collocation_points[active_indices].tolist()
+
+        return {
+            'collocation_points': collocation_points,
+            'active_set': active_set,
+            'contour': self.contour.tolist() if self.contour is not None else [],
+        }
+
     def end_drag_operation(self) -> None:
         """
         Called when user releases mouse button (onMouseUp).

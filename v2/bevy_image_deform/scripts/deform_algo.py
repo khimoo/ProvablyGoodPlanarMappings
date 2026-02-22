@@ -2,6 +2,32 @@ import numpy as np
 import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, List
+import cvxpy as cp
+from dataclasses import dataclass
+
+
+@dataclass
+class ProvablyGoodConfig:
+    """論文「Provably Good Planar Mappings」に明記されているパラメータ群"""
+
+    # [Section 6: Results] エネルギーの重み λ
+    # 【重要】論文は単位正方形（1×1）を前提としているが、ピクセル座標（数百px）では
+    # E_pos（単位: px）と E_bh（無次元）の次元が不一致になり、正則化が消失する。
+    # ドメインサイズ L に合わせて lambda_bh を L 倍にスケーリングする必要がある。
+    # 例: 500px ドメインなら lambda_bh = 0.1 * 500 = 50.0 〜 500.0 程度
+    lambda_bh: float = 1      # E_pos + λ_bh * E_bh (ピクセルスケール対応)
+    lambda_arap: float = 0.0     # E_pos + λ_arap * E_arap (ピクセルスケール対応)
+
+    # [Section 6: Results] インタラクティブ時のグリッド解像度
+    interactive_resolution: int = 200  # 200^2 grid
+
+    # [Section 5] ARAP計算用のサンプル点数 (論文では n_s として定義)
+    n_arap_samples: int = 100
+
+    # --- 実装上の追加パラメータ（数値計算の安定化用） ---
+    # 行列の特異性（Ill-conditioned）による係数爆発を防ぐためのTikhonov正則化の重み
+    # 不要な場合はクラス初期化時に 0.0 を渡すことで無効化可能
+    lambda_coeff_reg: float = 1e-4
 
 
 class BasisFunction(ABC):
@@ -169,11 +195,11 @@ class GuaranteeStrategy(ABC):
 class Strategy1(GuaranteeStrategy):
     """
     Strategy 1: Given Z and K → bound K_max
-    
+
     コロケーションポイント密度 h と K を指定し、
     結果として得られる K_max を計算する。
     K_max は出力であり、入力ではない。
-    
+
     論文の式(11)または(13)から K_max を計算する。
     """
     def __init__(self, domain_bounds: Tuple[float, float, float, float],
@@ -184,7 +210,7 @@ class Strategy1(GuaranteeStrategy):
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
             collocation_resolution: グリッド解像度
             K_on_collocation: コロケーション点上の歪み上限 K
-        
+
         K_max は計算結果として得られる（入力ではない）
         """
         super().__init__(domain_bounds)
@@ -194,7 +220,7 @@ class Strategy1(GuaranteeStrategy):
     def get_initial_h(self, basis: 'BasisFunction', K_solver: float, K_max: float) -> float:
         """
         Strategy 1: h は事前に決定されている
-        
+
         注: K_solver と K_max は渡されるが、Strategy 1 では使用しない
         （Strategy 2 との互換性のため）
         """
@@ -210,45 +236,45 @@ class Strategy1(GuaranteeStrategy):
     def compute_guaranteed_K_max(self, basis: 'BasisFunction', h: float) -> float:
         """
         Strategy 1 の出力: 実際の K_max を計算
-        
+
         式(11): D_iso(x) ≤ max{ K + ω(h), 1/(1/K - ω(h)) }
-        
+
         ω(h) = 2 * |||c||| * ω_∇F(h)
         初期状態では |||c||| = 1（恒等写像）
-        
+
         Args:
             basis: 基底関数のインスタンス
             h: コロケーションポイント密度
-        
+
         Returns:
             K_max: 領域全体で保証される最大歪み
         """
         K = self.K_on_collocation
-        
+
         # ω_∇F(h) を計算
         # compute_basis_gradient_modulus(t) は ω_∇F(t) を返す
         # Gaussians の場合: ω_∇F(t) = t / s²
         omega_grad_F = basis.compute_basis_gradient_modulus(h)
-        
+
         # ω(h) = 2 * |||c||| * ω_∇F(h)
         # 初期状態では |||c||| = 1（恒等写像）
         omega_h = 2.0 * 1.0 * omega_grad_F
-        
+
         print(f"DEBUG compute_guaranteed_K_max:")
         print(f"  K (K_on_collocation): {K:.4f}")
         print(f"  h: {h:.4f}")
         print(f"  ω_∇F(h): {omega_grad_F:.6f}")
         print(f"  ω(h) = 2 * ω_∇F(h): {omega_h:.6f}")
-        
+
         # 式(11): D_iso(x) ≤ max{ K + ω(h), 1/(1/K - ω(h)) }
         term1 = K + omega_h
         term2 = 1.0 / (1.0 / K - omega_h)
         K_max_bound = max(term1, term2)
-        
+
         print(f"  K + ω(h): {term1:.4f}")
         print(f"  1/(1/K - ω(h)): {term2:.4f}")
         print(f"  K_max_bound: {K_max_bound:.4f}")
-        
+
         return float(K_max_bound)
 
 
@@ -305,17 +331,22 @@ class Strategy2(GuaranteeStrategy):
 
 class ProvablyGoodPlanarMapping(ABC):
     """
-    論文「Provably Good Planar Mappings」のコアアルゴリズム（Algorithm 1, Local-Global Solver）
+    論文「Provably Good Planar Mappings」のコアアルゴリズム（Algorithm 1）
     を提供する抽象基底クラス。
 
     GuaranteeStrategy を通じて Strategy 1（事前保証）と Strategy 2（事後検証）を
     実行時に切り替え可能にする。
     """
-    def __init__(self, basis: 'BasisFunction', guarantee_strategy: 'GuaranteeStrategy', K_solver: float = 2.0, K_max: float = 5.0):
+    def __init__(self, basis: 'BasisFunction', guarantee_strategy: 'GuaranteeStrategy',
+                 K_solver: float = 2.0, K_max: float = 5.0, use_arap: bool = True,
+                 config: Optional[ProvablyGoodConfig] = None):
         self.basis = basis
         self.strategy = guarantee_strategy
         self.K_solver = K_solver
         self.K_max = K_max
+        self.use_arap = use_arap
+        self.config = config if config is not None else ProvablyGoodConfig()
+
         self.coefficients: Optional[np.ndarray] = None
         self.collocation_points: Optional[np.ndarray] = None
         self.current_h: float = 0.0
@@ -323,15 +354,15 @@ class ProvablyGoodPlanarMapping(ABC):
         # --- 事前計算のキャッシュ用 ---
         self._B_mat: Optional[np.ndarray] = None
         self._H_term: Optional[np.ndarray] = None
-        self._W_P: float = 1000
-        self._W_R: float = 1.0
 
-        # [修正点1] 論文 Section 5.3 に基づく Active Set のヒステリシス閾値
-        self.K_high = 0.1 + (K_solver * 0.9)
-        self.K_low = 0.5 + (K_solver * 0.5)
+        # [Section 5] Active Set Thresholds
+        self.K_high = 0.1 + (0.9 * K_solver)
+        self.K_low = 0.5 + (0.5 * K_solver)
 
-        # [修正点1] フレーム間で Active Set を維持するためのキャッシュ
         self._active_indices: np.ndarray = np.array([], dtype=int)
+
+        # [Section 5.3] Frame vectors for convexification (Eq. 27)
+        self._frames: Optional[np.ndarray] = None  # (M, 2) unit vectors d_i
 
     def evaluate_map(self, coords: np.ndarray) -> np.ndarray:
         """ f(x) = c * Phi(x) を評価して変換後の座標を返す """
@@ -341,7 +372,7 @@ class ProvablyGoodPlanarMapping(ABC):
         return phi @ self.coefficients.T
 
     def evaluate_jacobian(self, coords: np.ndarray) -> np.ndarray:
-        """ ヤコビアン J_f(x) を計算する (Eq. 4) """
+        """ ヤコビアン J_f(x) を計算する """
         if self.coefficients is None:
             raise RuntimeError("マッピング係数が初期化されていません。")
         grad_phi = self.basis.jacobian(coords)
@@ -349,29 +380,51 @@ class ProvablyGoodPlanarMapping(ABC):
         J = np.einsum('dj, mjk -> mdk', self.coefficients, grad_phi)
         return J
 
-    def project_jacobians(self, J: np.ndarray, K: float) -> np.ndarray:
+    def compute_J_S_and_J_A(self, J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        [論文 Algorithm 1: Projection on T_K]
-        ヤコビアン行列の集合を指定されたアイソメトリック歪み K の範囲に射影する。
-        折り畳み（fold-over）を防ぐため、行列式が負のものは反転して正の領域へ押し上げる。
+        [論文 Eq. 19] J_S と J_A を計算する
+
+        J_S f(x) = (∇u(x) + I∇v(x)) / 2  (similarity part)
+        J_A f(x) = (∇u(x) - I∇v(x)) / 2  (anti-similarity part)
+
+        ここで I は π/2 反時計回り回転行列: [[0, -1], [1, 0]]
+
+        Args:
+            J: (M, 2, 2) Jacobian matrices
+
+        Returns:
+            J_S: (M, 2) similarity vectors
+            J_A: (M, 2) anti-similarity vectors
         """
-        # SVD: J = U * S * Vh  (numpyでは Vh は V^T)
-        U, S, Vh = np.linalg.svd(J)
+        # J[:, 0, :] = ∇u = [∂u/∂x, ∂u/∂y]
+        # J[:, 1, :] = ∇v = [∂v/∂x, ∂v/∂y]
+        grad_u = J[:, 0, :]  # (M, 2)
+        grad_v = J[:, 1, :]  # (M, 2)
 
-        # det(U * V^T) をチェックし、回転を保証する (Section 5.1 "positive determinant" constraint)
-        dets = np.linalg.det(U @ Vh)
-        neg_dets = dets < 0
+        # I * ∇v = [[0, -1], [1, 0]] * [∂v/∂x, ∂v/∂y] = [-∂v/∂y, ∂v/∂x]
+        I_grad_v = np.stack([-grad_v[:, 1], grad_v[:, 0]], axis=1)  # (M, 2)
 
-        # 行列式が負（折り畳み発生）の場合、最小特異値の符号を反転させる
-        S[neg_dets, 1] *= -1
-        U[neg_dets, :, 1] *= -1
+        J_S = (grad_u + I_grad_v) / 2.0
+        J_A = (grad_u - I_grad_v) / 2.0
 
-        # Eq. 21 に基づき、特異値を安全な領域 [1/K, K] にクランプする (フロベニウスノルム上での最適射影)
-        S_proj = np.clip(S, 1.0 / K, K)
+        return J_S, J_A
 
-        # 射影されたヤコビアン X を再構築: X = U * diag(S_proj) * Vh
-        X = (U * S_proj[:, np.newaxis, :]) @ Vh
-        return X
+    def update_frames(self, coords: np.ndarray) -> None:
+        """
+        [論文 Eq. 27] Frame vectors を更新する
+
+        d_i = J_S f(x_i) / ||J_S f(x_i)||
+
+        これは Eq. 26 の半平面制約を最適化するために使用される。
+        """
+        J = self.evaluate_jacobian(coords)
+        J_S, _ = self.compute_J_S_and_J_A(J)
+
+        norms = np.linalg.norm(J_S, axis=1, keepdims=True)
+        # ゼロ除算を避ける
+        norms = np.where(norms > 1e-8, norms, 1.0)
+
+        self._frames = J_S / norms
     @abstractmethod
     def initialize_mapping(self, src_handles: np.ndarray) -> None:
         pass
@@ -392,7 +445,10 @@ class ProvablyGoodPlanarMapping(ABC):
         pass
 
 class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
-    def __init__(self, domain_bounds: Tuple[float, float, float, float], guarantee_strategy: Optional['GuaranteeStrategy'] = None, s_param: float = 1.0, K_solver: float = 2.0, K_max: float = 5.0):
+    def __init__(self, domain_bounds: Tuple[float, float, float, float],
+                 guarantee_strategy: Optional['GuaranteeStrategy'] = None,
+                 s_param: float = 1.0, K_solver: float = 2.0, K_max: float = 5.0,
+                 use_arap: bool = False, config: Optional[ProvablyGoodConfig] = None):
         """
         Args:
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
@@ -400,11 +456,14 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             s_param: ガウス基底関数のスケールパラメータ
             K_solver: 選点上での歪み上限
             K_max: 領域全体での歪み上限
+            use_arap: ARAP エネルギーを使用するか（デフォルト: False）
+            config: 論文準拠のパラメータ設定
         """
         basis = GaussianRBF(s=s_param)
         if guarantee_strategy is None:
             guarantee_strategy = Strategy2(domain_bounds)
-        super().__init__(basis=basis, guarantee_strategy=guarantee_strategy, K_solver=K_solver, K_max=K_max)
+        super().__init__(basis=basis, guarantee_strategy=guarantee_strategy,
+                        K_solver=K_solver, K_max=K_max, use_arap=use_arap, config=config)
         self.basis: GaussianRBF = basis
 
     def initialize_mapping(self, src_handles: np.ndarray) -> None:
@@ -429,6 +488,11 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         # [修正] ここが論文の "if first step then" に該当する
         self._active_indices = np.array([], dtype=int)
 
+        # [論文 Section 5.3] Frame を恒等写像の状態で初期化: d_i = (1, 0)
+        M = len(self.collocation_points)
+        self._frames = np.zeros((M, 2))
+        self._frames[:, 0] = 1.0  # d_i = (1, 0) for all i
+
     def _update_hessian_term(self) -> None:
         """ グリッドが更新されたときのみ呼ばれる内部メソッド """
         if self.collocation_points is None:
@@ -443,6 +507,11 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         area_element = self.current_h ** 2
         self._H_term = (H_mat.T @ H_mat) * area_element
 
+        # Frame も再初期化
+        M = len(collocation_points)
+        self._frames = np.zeros((M, 2))
+        self._frames[:, 0] = 1.0
+
     def start_drag(self, src_handles: np.ndarray) -> None:
         """
         [UI連携: onMouseDown]
@@ -454,7 +523,8 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
     def update_drag(self, target_handles: np.ndarray, num_iterations: int = 2) -> None:
         """
         [UI連携: onMouseMove]
-        マウスが動くたびに呼ばれる。キャッシュされた行列を使って高速に解く。
+        マウスが動くたびに呼ばれる。SOCP 制約付き最適化で論文通りに解く。
+        論文に存在しない独自のフェールセーフ（L2正則化、係数制限、Active Set制限）は完全に削除。
         """
         if self.collocation_points is None:
             raise RuntimeError("Collocation points not initialized.")
@@ -462,75 +532,179 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             raise RuntimeError("B_mat not initialized.")
         if self._H_term is None:
             raise RuntimeError("H_term not initialized.")
+        if self._frames is None:
+            raise RuntimeError("Frames not initialized.")
 
         grid = self.collocation_points
         B_mat = self._B_mat
         H_term = self._H_term
         N_basis = self.basis.get_basis_count()
-        area_element = self.current_h ** 2
 
-        # ループ回数はドラッグ中なので少なめ（1〜2回）で十分
-        for _ in range(num_iterations):
+        for iteration in range(num_iterations):
             # === [Active Set 抽出] ===
             J_all = self.evaluate_jacobian(grid)
+
+            # 特異値と行列式（ヤコビアン）を計算
             U, S, Vh = np.linalg.svd(J_all)
-            dets = np.linalg.det(U @ Vh)
-            neg_dets = dets < 0
-            S[neg_dets, 1] *= -1
 
-            sig2_safe = np.where(S[:, 1] > 1e-8, S[:, 1], 1e-8)
-            sig2_safe[S[:, 1] <= 0] = 1e-8
-            distortions = np.maximum(S[:, 0], 1.0 / sig2_safe)
+            # 【追加】行列式 det(J) = (∂u/∂x * ∂v/∂y) - (∂u/∂y * ∂v/∂x) を手動で高速計算
+            dets = J_all[:, 0, 0] * J_all[:, 1, 1] - J_all[:, 0, 1] * J_all[:, 1, 0]
 
-            # === [修正点1: 論文通りのヒステリシス Active Set 更新] ===
-            is_foldover = S[:, 1] <= 0
+            # 論文定義の歪み D_iso(x) = max{Σ(x), 1/σ(x)}
+            # 【重要】SVDの特異値は常に正になるため、裏返り(det <= 0)を検知できない。
+            # 行列式が負の場合は、物理的に破綻（裏返り）しているため歪みを無限大とする。
+            with np.errstate(divide='ignore'):
+                distortions = np.where(
+                    (dets <= 1e-8) | (S[:, 1] <= 1e-8),
+                    np.inf,
+                    np.maximum(S[:, 0], 1.0 / S[:, 1])
+                )
+
+            # [Section 5] Active Set の更新
             is_above_high = distortions > self.K_high
             is_below_low = distortions < self.K_low
 
-            # 現在のインデックスを boolean マスクに変換
             active_mask = np.zeros(len(grid), dtype=bool)
             active_mask[self._active_indices] = True
 
-            # K_high を超えたもの、または折りたたまれたものを追加
-            active_mask |= is_above_high | is_foldover
-
-            # K_low を下回った「かつ」折りたたまれていないものを削除
-            active_mask &= ~(is_below_low & ~is_foldover)
+            # 論文通り、K_highを超えた点を追加し、K_lowを下回った点を削除
+            active_mask |= is_above_high
+            active_mask &= ~is_below_low
 
             self._active_indices = np.where(active_mask)[0]
             active_indices = self._active_indices
 
-            # === [Local Step] ===
-            if len(active_indices) > 0:
-                J_active = J_all[active_indices]
-                X_active = self.project_jacobians(J_active, self.K_solver)
+            # === [SOCP による Global Step] ===
+            c_var = cp.Variable((2, N_basis))
+            if self.coefficients is not None and iteration > 0:
+                c_var.value = self.coefficients
 
-                grad_phi_active = self.basis.jacobian(grid[active_indices])
-                A_mat = np.transpose(grad_phi_active, (0, 2, 1)).reshape(-1, N_basis)
-                # [修正点2] Distortion Energy (Eq. 5) も積分ベースであるため h^2 を掛ける
-                A_term = (A_mat.T @ A_mat) * area_element
-            else:
-                A_mat = np.zeros((0, N_basis))
-                X_active = np.zeros((0, 2, 2))
-                A_term = np.zeros((N_basis, N_basis))
+            # [Eq. 30: Positional Constraints Energy] [cite: 361, 364]
+            n_handles = len(target_handles)
+            r_vars = cp.Variable(n_handles)
+            pos_constraints = []
+            for l in range(n_handles):
+                residual_u = B_mat[l, :] @ c_var[0, :] - target_handles[l, 0]
+                residual_v = B_mat[l, :] @ c_var[1, :] - target_handles[l, 1]
+                residual_vec = cp.vstack([residual_u, residual_v])
+                pos_constraints.append(cp.norm(residual_vec) <= r_vars[l])
 
-            # === [Global Step] ===
-            # M行列は事前計算済みの H_term と B_mat を使用して高速に構築
-            M = A_term + self._W_P * (B_mat.T @ B_mat) + self._W_R * H_term
-            new_c = np.zeros_like(self.coefficients)
+            E_pos = cp.sum(r_vars)
 
+            # [Eq. 31: Biharmonic Energy] [cite: 368]
+            E_bh = 0
             for d in range(2):
-                if len(active_indices) > 0:
-                    X_d = X_active[:, d, :].reshape(-1)
-                    # 右辺も A_mat の転置がかかるため面積要素を掛ける
-                    rhs_D = (A_mat.T @ X_d) * area_element
-                else:
-                    rhs_D = np.zeros(N_basis)
+                E_bh += cp.quad_form(c_var[d, :], H_term)
 
-                rhs_P = self._W_P * (B_mat.T @ target_handles[:, d])
-                new_c[d, :] = np.linalg.solve(M, rhs_D + rhs_P)
+            # 係数 c_var に対する L2 正則化（Tikhonov regularization）
+            E_coeff_reg = cp.sum_squares(c_var)
 
-            self.coefficients = new_c
+            # 論文に基づく正則化エネルギーに、微小な係数正則化を足し合わせる
+            E_reg = self.config.lambda_bh * E_bh + self.config.lambda_coeff_reg * E_coeff_reg
+
+            # [Eq. 33: ARAP Energy] [cite: 379]
+            if self.use_arap:
+                n_samples = min(self.config.n_arap_samples, len(grid))
+                arap_sample_indices = np.linspace(0, len(grid) - 1, n_samples, dtype=int)
+                grad_phi_arap = self.basis.jacobian(grid[arap_sample_indices])
+                frames_arap = self._frames[arap_sample_indices]
+
+                E_arap = 0
+                for i, idx in enumerate(arap_sample_indices):
+                    grad_u_x = grad_phi_arap[i, :, 0] @ c_var[0, :]
+                    grad_u_y = grad_phi_arap[i, :, 1] @ c_var[0, :]
+                    grad_v_x = grad_phi_arap[i, :, 0] @ c_var[1, :]
+                    grad_v_y = grad_phi_arap[i, :, 1] @ c_var[1, :]
+
+                    grad_u = cp.vstack([grad_u_x, grad_u_y])
+                    grad_v = cp.vstack([grad_v_x, grad_v_y])
+                    I_grad_v = cp.vstack([-grad_v[1], grad_v[0]])
+
+                    J_S_i = (grad_u + I_grad_v) / 2.0
+                    J_A_i = (grad_u - I_grad_v) / 2.0
+
+                    d_s = frames_arap[i]
+                    E_arap += cp.sum_squares(J_A_i) + cp.sum_squares(J_S_i - d_s)
+
+                E_reg += self.config.lambda_arap * E_arap
+
+            # [Eq. 23 & 26: Distortion Constraints on Active Set] [cite: 312, 330]
+            distortion_constraints = []
+            if len(active_indices) > 0:
+                grad_phi_active = self.basis.jacobian(grid[active_indices])
+                frames_active = self._frames[active_indices]
+
+                for i, idx in enumerate(active_indices):
+                    grad_u_x = grad_phi_active[i, :, 0] @ c_var[0, :]
+                    grad_u_y = grad_phi_active[i, :, 1] @ c_var[0, :]
+                    grad_v_x = grad_phi_active[i, :, 0] @ c_var[1, :]
+                    grad_v_y = grad_phi_active[i, :, 1] @ c_var[1, :]
+
+                    grad_u = cp.vstack([grad_u_x, grad_u_y])
+                    grad_v = cp.vstack([grad_v_x, grad_v_y])
+                    I_grad_v = cp.vstack([-grad_v[1], grad_v[0]])
+
+                    J_S_i = (grad_u + I_grad_v) / 2.0
+                    J_A_i = (grad_u - I_grad_v) / 2.0
+
+                    t_i = cp.Variable()
+                    s_i = cp.Variable()
+
+                    distortion_constraints.append(cp.norm(J_S_i) <= t_i)
+                    distortion_constraints.append(cp.norm(J_A_i) <= s_i)
+                    distortion_constraints.append(t_i + s_i <= self.K_solver)
+
+                    d_i = frames_active[i]
+                    distortion_constraints.append(
+                        J_S_i[0] * d_i[0] + J_S_i[1] * d_i[1] - s_i >= 1.0 / self.K_solver
+                    )
+
+            # [論文 Eq. 251] Objective
+            objective = cp.Minimize(E_pos + E_reg)
+            problem = cp.Problem(objective, pos_constraints + distortion_constraints)
+
+            try:
+                problem.solve(solver=cp.CLARABEL, verbose=False, max_iter=1000)
+
+                if problem.status == "infeasible":
+                    print(f"[SOCP] Problem infeasible! Attempting frame re-extraction...")
+
+                    # 論文 Section 7 Discussion: 制約なし問題を解いてフレームを再抽出
+                    problem_relaxed = cp.Problem(objective, pos_constraints)
+                    problem_relaxed.solve(solver=cp.CLARABEL, verbose=False)
+
+                    if problem_relaxed.status in ["optimal", "optimal_inaccurate"] and c_var.value is not None:
+                        # 【修正】フレーム(d_i)だけを更新し、係数(self.coefficients)は更新しない！
+                        # これにより、ジャンプせずに「安全な変形限界」で止まる
+                        temp_coeffs = c_var.value
+                        old_coeffs = self.coefficients
+
+                        # 一時的に係数を適用して Jacobian を評価し、フレームを更新
+                        self.coefficients = temp_coeffs
+                        self.update_frames(grid)
+                        self.coefficients = old_coeffs  # 元の安全な値に戻す（ジャンプを防ぐ）
+
+                        print(f"[SOCP] Extracted new frames. Retrying in next iteration.")
+                        continue  # 次のイテレーションへ
+                    else:
+                        print(f"[SOCP] Even relaxed problem failed. Freezing mesh.")
+                        break  # リカバリ不可能なため、ループを抜けて現在の安全な形状を維持
+
+                # 最適化が最適解以外（エラーなど）で終了した場合も維持
+                if problem.status not in ["optimal", "optimal_inaccurate"]:
+                    print(f"[SOCP] WARNING: status={problem.status}, active_set={len(active_indices)}")
+                    break  # 安全な形状を維持
+
+                # 【重要】正常に解け、歪み制約をクリアした保証のある係数のみを適用する
+                if c_var.value is not None:
+                    self.coefficients = c_var.value
+
+            except Exception as e:
+                print(f"[SOCP] ERROR: {e}")
+                break  # エラー発生時も安全な形状を維持
+
+            # 正常終了時、次ステップのためにフレームを更新
+            self.update_frames(grid)
 
     def end_drag(self, target_handles: np.ndarray) -> bool:
         """

@@ -26,12 +26,12 @@ use bevy::{
 use image::GenericImageView;
 use serde_json;
 use bevy_image_deform::{
-    state::{AppMode, ControlPoints, MappingParameters, DeformedImage, ModeText, MainCamera},
+    state::{AppMode, ControlPoints, MappingParameters, DeformedImage, ModeText, MainCamera, DebugVisualization},
     python::{PythonChannels, PyCommand, PyResult, python_thread_loop},
     image::{ImageData, extract_contour_from_image},
-    rendering::{DeformMaterial, render_deformed_image, create_contour_mesh}, // ← ここを変更
+    rendering::{DeformMaterial, render_deformed_image, create_contour_mesh},
     input::handle_input,
-    ui::{update_ui_text, draw_control_points},
+    ui::{update_ui_text, draw_control_points, toggle_debug_viz, draw_debug_viz},
 };
 
 fn main() {
@@ -48,12 +48,15 @@ fn main() {
         .init_state::<AppMode>()
         .init_resource::<ControlPoints>()
         .init_resource::<MappingParameters>()
+        .init_resource::<DebugVisualization>()
         .add_systems(Startup, setup)
         .add_systems(Update, (
             setup_camera_scale,
             handle_input,
             receive_python_results,
             render_deformed_image,
+            toggle_debug_viz,
+            draw_debug_viz,
         ))
         .add_systems(Update, (
             draw_control_points,
@@ -140,12 +143,6 @@ fn setup(
     initial_params.image_width = image_width;
     initial_params.image_height = image_height;
     initial_params.n_rbf = 0;
-    // s_param が 0 だと計算時にゼロ除算やNaNが発生する可能性があるため適当な値を入れておく
-    // initial_params.s_param = 50.0;
-
-    // 初期状態を恒等写像(Identity Mapping)に設定
-    // f_x(x,y) = 0*1 + 1*x + 0*y  => x
-    // f_y(x,y) = 0*1 + 0*x + 1*y  => y
 
     // [0]: 定数項 (shift)
     initial_params.coeffs[0].x = 0.0;
@@ -171,7 +168,7 @@ fn setup(
         DeformedImage,
     ));
 
-    let epsilon = 40.0;
+    let epsilon = 30.0;
     println!(
         "Initializing domain: {}x{}, epsilon={}",
         image_width, image_height, epsilon
@@ -180,8 +177,8 @@ fn setup(
     // Strategy 1 を使用
     let strategy = "strategy1".to_string();
     let strategy_params = serde_json::json!({
-        "collocation_resolution": 30,
-        "K_on_collocation": 3
+        "collocation_resolution": 200,
+        "K_on_collocation": 6
     }).to_string();
 
     let _ = tx_cmd.try_send(PyCommand::InitializeDomain {
@@ -200,6 +197,7 @@ fn setup(
 fn receive_python_results(
     channels: Res<PythonChannels>,
     mut mapping_params: ResMut<MappingParameters>,
+    mut debug_viz: ResMut<DebugVisualization>,
     mut next_state: ResMut<NextState<AppMode>>,
     state: Res<State<AppMode>>,
 ) {
@@ -213,6 +211,8 @@ fn receive_python_results(
                 if *state.get() == AppMode::Finalizing {
                     next_state.set(AppMode::Deform);
                 }
+                // 視覚化データをリクエスト
+                let _ = channels.tx_command.try_send(PyCommand::GetDebugVisualization);
             }
             PyResult::BasisFunctionParameters {
                 coefficients,
@@ -230,6 +230,22 @@ fn receive_python_results(
                 mapping_params.s_param = s_param;
                 mapping_params.n_rbf = n_rbf;
                 mapping_params.is_valid = true;
+
+                // 視覚化データをリクエスト
+                let _ = channels.tx_command.try_send(PyCommand::GetDebugVisualization);
+            }
+            PyResult::DebugVisualization {
+                collocation_points,
+                active_set,
+                contour,
+            } => {
+                debug_viz.collocation_points = collocation_points.iter().map(|(x, y)| Vec2::new(*x, *y)).collect();
+                debug_viz.active_set = active_set.iter().map(|(x, y)| Vec2::new(*x, *y)).collect();
+                debug_viz.contour = contour.iter().map(|(x, y)| Vec2::new(*x, *y)).collect();
+                println!("Received debug viz: {} collocation, {} active, {} contour",
+                    debug_viz.collocation_points.len(),
+                    debug_viz.active_set.len(),
+                    debug_viz.contour.len());
             }
         }
     }

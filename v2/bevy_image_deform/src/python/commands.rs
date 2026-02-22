@@ -13,6 +13,7 @@ pub enum PyCommand {
     UpdatePoint { control_index: usize, x: f32, y: f32 },
     EndDrag,
     Reset,
+    GetDebugVisualization,  // 視覚化データをリクエスト
 }
 
 pub enum PyResult {
@@ -23,5 +24,10 @@ pub enum PyResult {
         centers: Vec<Vec<f32>>,           // (N, 2)
         s_param: f32,                     // Gaussian width
         n_rbf: usize,                     // Number of RBF basis functions
+    },
+    DebugVisualization {
+        collocation_points: Vec<(f32, f32)>,  // グリッド点
+        active_set: Vec<(f32, f32)>,          // 歪みが大きい点
+        contour: Vec<(f32, f32)>,             // 輪郭線
     },
 }

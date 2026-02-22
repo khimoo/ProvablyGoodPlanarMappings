@@ -9,7 +9,7 @@ pub fn update_ui_text(
     if let Ok((mut text, mut color)) = query.get_single_mut() {
         match state.get() {
             AppMode::Setup => {
-                **text = "Mode: SETUP\n[Click] Add Point\n[Enter] Start Deform\n[R] Reset".to_string();
+                **text = "Mode: SETUP\n[Click] Add Point\n[Enter] Start Deform\n[R] Reset\n[D] Toggle Debug".to_string();
                 color.0 = Color::srgb(0.0, 1.0, 0.0);
             },
             AppMode::Finalizing => {
@@ -17,7 +17,7 @@ pub fn update_ui_text(
                 color.0 = Color::srgb(1.0, 1.0, 0.0);
             },
             AppMode::Deform => {
-                **text = "Mode: DEFORM\n[Drag] Move Points\n[R] Reset".to_string();
+                **text = "Mode: DEFORM\n[Drag] Move Points\n[R] Reset\n[D] Toggle Debug".to_string();
                 color.0 = Color::srgb(1.0, 0.5, 0.5);
             },
         }

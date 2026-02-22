@@ -5,7 +5,7 @@ use crate::image::ImageData;
 
 pub fn render_deformed_image(
     mapping_params: Res<MappingParameters>,
-    image_data: Res<ImageData>, // ← 【追加】ImageDataリソースを受け取る
+    image_data: Res<ImageData>,
     mut materials: ResMut<Assets<DeformMaterial>>,
     query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
 ) {
@@ -13,17 +13,20 @@ pub fn render_deformed_image(
         return;
     }
 
-    let Ok(material_2d) = query.get_single() else { return; };
-    let Some(material) = materials.get_mut(&material_2d.0) else { return; };
+    let Ok(material_2d) = query.get_single() else {
+        return;
+    };
+
+    let Some(material) = materials.get_mut(&material_2d.0) else {
+        return;
+    };
 
     let n_rbf = mapping_params.n_rbf.min(MAX_RBF_COUNT - 3);
 
     let mut params = DeformUniform::default();
 
-    // 【修正】mapping_params ではなく、image_data から幅と高さを取得する！
     params.image_width = image_data.width;
     params.image_height = image_data.height;
-
     params.s_param = mapping_params.s_param;
     params.n_rbf = n_rbf as u32;
 
@@ -36,8 +39,16 @@ pub fn render_deformed_image(
     }
 
     // Fill coefficients
-    let coeffs_x = mapping_params.coefficients.get(0).cloned().unwrap_or_default();
-    let coeffs_y = mapping_params.coefficients.get(1).cloned().unwrap_or_default();
+    let coeffs_x = mapping_params
+        .coefficients
+        .get(0)
+        .cloned()
+        .unwrap_or_default();
+    let coeffs_y = mapping_params
+        .coefficients
+        .get(1)
+        .cloned()
+        .unwrap_or_default();
 
     for i in 0..(n_rbf + 3).min(MAX_RBF_COUNT) {
         params.coeffs[i] = RBFCoeff {
@@ -46,5 +57,6 @@ pub fn render_deformed_image(
             _padding: Vec2::ZERO,
         };
     }
+
     material.params = params;
 }

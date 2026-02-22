@@ -188,6 +188,23 @@ pub async fn python_thread_loop(
                         eprintln!("Py Error (Reset): {}", e);
                     }
                 }
+                PyCommand::GetDebugVisualization => {
+                    if let Ok(res) = bridge_bound.call_method0("get_debug_visualization") {
+                        if let Ok(data) = res.downcast::<pyo3::types::PyDict>() {
+                            let collocation: Option<Vec<(f32, f32)>> = extract_from_dict(data, "collocation_points");
+                            let active: Option<Vec<(f32, f32)>> = extract_from_dict(data, "active_set");
+                            let contour: Option<Vec<(f32, f32)>> = extract_from_dict(data, "contour");
+
+                            if let (Some(collocation), Some(active), Some(contour)) = (collocation, active, contour) {
+                                let _ = tx_res.send(PyResult::DebugVisualization {
+                                    collocation_points: collocation,
+                                    active_set: active,
+                                    contour,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         });
     }

@@ -38,6 +38,11 @@ fn evaluate_forward_mapping(pos: vec2<f32>) -> vec2<f32> {
 
     let n_rbf = uniforms.n_rbf;
 
+    // デバッグ: n_rbf が 0 の場合は恒等写像を返す
+    if (n_rbf == 0u) {
+        return pos;
+    }
+
     // RBF basis function contributions
     for (var i: u32 = 0u; i < n_rbf; i = i + 1u) {
         let center = uniforms.centers[i].pos;

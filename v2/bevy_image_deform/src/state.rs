@@ -25,6 +25,14 @@ pub struct MappingParameters {
     pub is_valid: bool,
 }
 
+#[derive(Resource, Default)]
+pub struct DebugVisualization {
+    pub collocation_points: Vec<Vec2>,
+    pub active_set: Vec<Vec2>,
+    pub contour: Vec<Vec2>,
+    pub show: bool,
+}
+
 #[derive(Component)]
 pub struct DeformedImage;
 

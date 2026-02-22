@@ -23,6 +23,7 @@
           matplotlib
           cvxpy
           ecos # cvxpyで指定されていたソルバー
+          clarabel # 新しい Rust ベースのソルバー
           pillow
           # その他必要ならここに追加 (例: jupyter, ipythonなど)
         ]);
