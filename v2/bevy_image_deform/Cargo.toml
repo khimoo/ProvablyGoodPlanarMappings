@@ -39,6 +39,7 @@ tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread", "sy
 image = "0.25"
 imageproc = "0.25"
 geo = "0.28"
+delaunator = "1.0.2"
 
 # 最適化設定
 [profile.dev]

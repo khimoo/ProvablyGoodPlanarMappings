@@ -24,12 +24,11 @@ use bevy::{
     sprite::{Material2dPlugin, MeshMaterial2d},
 };
 use image::GenericImageView;
-
 use bevy_image_deform::{
     state::{AppMode, ControlPoints, MappingParameters, DeformedImage, ModeText, MainCamera},
     python::{PythonChannels, PyCommand, PyResult, python_thread_loop},
     image::{ImageData, extract_contour_from_image},
-    rendering::{DeformMaterial, render_deformed_image, create_grid_mesh},
+    rendering::{DeformMaterial, render_deformed_image, create_contour_mesh}, // ← ここを変更
     input::handle_input,
     ui::{update_ui_text, draw_control_points},
 };
@@ -128,10 +127,11 @@ fn setup(
         contour: contour.clone(),
     });
 
-    // Create a fine grid mesh (100x100 subdivisions)
-    let grid_mesh = create_grid_mesh(
+    // Create a contour-clipped mesh using Delaunay triangulation
+    let grid_mesh = create_contour_mesh(
         Vec2::new(image_width, image_height),
-        UVec2::new(300, 300),
+        UVec2::new(500, 500),
+        &contour,             // ← 抽出した輪郭データを渡す
     );
     let mesh_handle = meshes.add(grid_mesh);
 
@@ -170,7 +170,7 @@ fn setup(
         DeformedImage,
     ));
 
-    let epsilon = 110.0;
+    let epsilon = 40.0;
     println!(
         "Initializing domain: {}x{}, epsilon={}",
         image_width, image_height, epsilon
