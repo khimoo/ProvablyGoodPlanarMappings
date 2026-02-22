@@ -107,7 +107,7 @@ class BevyBridge:
         self.solver = BetterFitwithGaussian(
             domain_bounds=domain_bounds,
             s_param=epsilon,
-            K_solver=3.0,
+            K_solver=3.5,
             K_max=5.0
         )
 

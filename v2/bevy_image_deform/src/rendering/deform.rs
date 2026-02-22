@@ -1,10 +1,11 @@
 use bevy::prelude::*;
-
 use crate::state::{DeformedImage, MappingParameters};
 use super::material::{DeformMaterial, DeformUniform, RBFCenter, RBFCoeff, MAX_RBF_COUNT};
+use crate::image::ImageData;
 
 pub fn render_deformed_image(
     mapping_params: Res<MappingParameters>,
+    image_data: Res<ImageData>, // ← 【追加】ImageDataリソースを受け取る
     mut materials: ResMut<Assets<DeformMaterial>>,
     query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
 ) {
@@ -12,20 +13,17 @@ pub fn render_deformed_image(
         return;
     }
 
-    let Ok(material_2d) = query.get_single() else {
-        return;
-    };
+    let Ok(material_2d) = query.get_single() else { return; };
+    let Some(material) = materials.get_mut(&material_2d.0) else { return; };
 
-    let Some(material) = materials.get_mut(&material_2d.0) else {
-        return;
-    };
+    let n_rbf = mapping_params.n_rbf.min(MAX_RBF_COUNT - 3);
 
-    let n_rbf = mapping_params.n_rbf.min(MAX_RBF_COUNT);
-
-    // Build uniform data
     let mut params = DeformUniform::default();
-    params.image_width = mapping_params.image_width;
-    params.image_height = mapping_params.image_height;
+
+    // 【修正】mapping_params ではなく、image_data から幅と高さを取得する！
+    params.image_width = image_data.width;
+    params.image_height = image_data.height;
+
     params.s_param = mapping_params.s_param;
     params.n_rbf = n_rbf as u32;
 

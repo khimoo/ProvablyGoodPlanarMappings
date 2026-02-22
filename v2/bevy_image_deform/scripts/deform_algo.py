@@ -219,12 +219,12 @@ class ProvablyGoodPlanarMapping(ABC):
         # --- 事前計算のキャッシュ用 ---
         self._B_mat: Optional[np.ndarray] = None
         self._H_term: Optional[np.ndarray] = None
-        self._W_P: float = 1e8
+        self._W_P: float = 1000
         self._W_R: float = 1.0
 
         # [修正点1] 論文 Section 5.3 に基づく Active Set のヒステリシス閾値
-        self.K_high = K_solver * 0.95
-        self.K_low = K_solver * 0.85
+        self.K_high = 0.1 + (K_solver * 0.9)
+        self.K_low = 0.5 + (K_solver * 0.5)
 
         # [修正点1] フレーム間で Active Set を維持するためのキャッシュ
         self._active_indices: np.ndarray = np.array([], dtype=int)
