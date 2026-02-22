@@ -99,13 +99,11 @@ class GaussianRBF(BasisFunction):
             return 3
         return self.centers.shape[0] + 3
 
-class Strategy2:
+class GuaranteeStrategy(ABC):
     """
-    論文「Provably Good Planar Mappings」における Strategy 2 の完全な実装。
-
-    インタラクティブ操作中は経験的に細かい固定グリッドを使用し、
-    操作完了後（係数確定後）に、実際の係数ノルムから理論的に安全な h を逆算し、
-    歪みの上界(Bounded Distortion)を数学的に保証する。
+    論文における歪み保証のグリッド解像度(h)を決定する戦略の基底クラス。
+    Strategy 1（悲観的・事前保証）と Strategy 2（楽観的・事後検証）の
+    共通インターフェースを定義する。
     """
     def __init__(self, domain_bounds: Tuple[float, float, float, float]):
         """
@@ -114,29 +112,15 @@ class Strategy2:
         """
         self.bounds = domain_bounds
 
-    def get_interactive_h(self, resolution: int = 200) -> float:
-        """
-        インタラクティブなマウス操作中に使用する、固定の h を返す。
-        論文の「6 Results」に記載されている 200x200 グリッド等の初期設定用。
-        """
-        x_min, x_max, y_min, y_max = self.bounds
-        width = x_max - x_min
-        height = y_max - y_min
-
-        # 長い方の辺を指定解像度で分割する間隔を返す
-        max_span = max(width, height)
-        return float(max_span / resolution)
-
     def generate_grid(self, h: float) -> np.ndarray:
         """
-        指定された間隔 h に基づいて、選点（Collocation points）のグリッドを生成する。
+        [共通処理] 指定された h に基づいてグリッドを生成する。
         """
         x_min, x_max, y_min, y_max = self.bounds
 
         if h <= 0:
             raise ValueError("h must be strictly positive.")
 
-        # arange の終端に +1e-8 を足すことで、バウンディングボックスの右端/上端もカバーする
         x_coords = np.arange(x_min, x_max + 1e-8, h)
         y_coords = np.arange(y_min, y_max + 1e-8, h)
 
@@ -145,60 +129,132 @@ class Strategy2:
 
         return grid_points
 
-    def compute_strict_h(self,
-                         basis: 'BasisFunction',
-                         K_solver: float,
-                         K_max: float,
-                         c: np.ndarray) -> float:
+    @staticmethod
+    def _compute_margin(K_solver: float, K_max: float) -> float:
         """
-        マウス操作完了後（変形係数 c 確定後）に呼ばれ、
-        論文の Strategy 2 (Eq. 14) に基づく厳密な h を計算する。
-
-        Args:
-            basis: 基底関数のインスタンス
-            K_solver: 選点上でソルバーが実際に抑え込んだ歪みの最大値 (例: 2.0)
-            K_max: 領域全体で数学的に保証したい最大の歪み許容値 (例: 5.0)
-            c: 確定したマッピング係数行列。shape=(2, N_basis)
-
-        Returns:
-            float: 領域全体で歪みが K_max を超えないことを保証できる最大のグリッド間隔 h_strict
+        Eq. 14: アイソメトリック歪みのマージン計算
+        min( K_max - K,  1/K - 1/K_max )
         """
         if K_max <= K_solver:
             raise ValueError(f"K_max ({K_max}) must be strictly greater than K_solver ({K_solver}).")
+        return min(K_max - K_solver, (1.0 / K_solver) - (1.0 / K_max))
 
-        # Eq. 14: アイソメトリック歪みのマージン計算
-        # min( K_max - K,  1/K - 1/K_max )
-        margin = min(K_max - K_solver, (1.0 / K_solver) - (1.0 / K_max))
-
-        if margin <= 0:
-            warnings.warn("Margin is zero or negative. Returning fallback h.")
-            return 1e-5
-
-        # 実際の係数ノルム |||c||| を計算 (Eq. 8 のマトリックス最大行和ノルム)
-        # アフィン項（配列の最後の3列: [1, x, y]）の勾配は定数であり、
-        # 変動（ヘッシアン）がゼロのため連続性係数に寄与しない。したがってノルム計算から除外する。
+    @staticmethod
+    def _extract_rbf_coefficients(c: np.ndarray) -> np.ndarray:
+        """
+        係数行列 c からアフィン項を除いた RBF 係数部分を抽出する。
+        アフィン項（最後の3列: [1, x, y]）の勾配は定数であり、
+        ヘッシアンがゼロのため連続性係数に寄与しない。
+        """
         if c.shape[1] >= 3:
-            c_rbf = c[:, :-3]
-        else:
-            c_rbf = c
+            return c[:, :-3]
+        return c
 
-        max_coeff_norm = np.max(np.sum(np.abs(c_rbf), axis=1))
+    @abstractmethod
+    def get_initial_h(self, basis: 'BasisFunction', K_solver: float, K_max: float) -> float:
+        """
+        初期化時（またはドラッグ開始時）に使用するグリッド間隔 h を返す。
+        """
+        pass
 
-        # 恒等写像（RBF係数がすべてゼロ）の場合、歪みは一切発生しないため、理論上 h は無限大でよい
-        if max_coeff_norm < 1e-12:
-            return float('inf')
+    @abstractmethod
+    def get_strict_h_after_drag(self, basis: 'BasisFunction', K_solver: float, K_max: float,
+                                c: np.ndarray) -> float:
+        """
+        ドラッグ終了後に、数学的保証を満たすための厳密な h を返す。
+        """
+        pass
 
-        # 基底関数の勾配の連続性係数 (h=1のときの係数C)
-        # ガウス基底の場合、C = 1 / s^2 になる
+
+class Strategy1(GuaranteeStrategy):
+    """
+    Strategy 1: 悲観的・事前保証アプローチ
+
+    操作前に「係数ノルムが最大でこれくらいになるだろう（M）」というワーストケースを想定し、
+    最初から非常に細かい（厳密な）グリッド h を生成する。
+    ドラッグ中の計算は重いが、ドラッグ終了後の再計算（検証）は不要。
+    """
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], max_expected_c_norm: float = 100.0):
+        """
+        Args:
+            domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
+            max_expected_c_norm: 係数ノルムの上限 M（ワーストケース想定値）
+        """
+        super().__init__(domain_bounds)
+        self.max_expected_c_norm = max_expected_c_norm
+
+    def get_initial_h(self, basis: 'BasisFunction', K_solver: float, K_max: float) -> float:
+        """
+        ワーストケースの係数ノルムを使って、最初から最も厳しい h を算出する。
+        """
+        margin = self._compute_margin(K_solver, K_max)
         C = basis.compute_basis_gradient_modulus(1.0)
 
         if C <= 0:
             return float('inf')
 
-        # Eq. 9 (ω = 2 * |||c||| * ω_∇F) と Eq. 14 を組み合わせた不等式:
-        # h_strict * 2 * |||c||| * C <= margin を h_strict について解く
-        h_strict = margin / (2.0 * max_coeff_norm * C)
+        h_strict = margin / (2.0 * self.max_expected_c_norm * C)
+        return float(h_strict)
 
+    def get_strict_h_after_drag(self, basis: 'BasisFunction', K_solver: float, K_max: float,
+                                c: np.ndarray) -> float:
+        """
+        Strategy 1 は最初から安全なグリッドを用いているため、再検証は不要。
+        現在の h をそのまま返す（呼び出し側で current_h を渡す）。
+        """
+        # このメソッドは呼び出し側で current_h と比較されるため、
+        # 常に current_h 以上の値を返すことで再計算を回避する
+        return float('inf')
+
+
+class Strategy2(GuaranteeStrategy):
+    """
+    Strategy 2: 楽観的・事後検証アプローチ
+
+    インタラクティブ操作中は粗い固定グリッドを使って高速に解き、
+    ドラッグ終了後に「実際の係数ノルム」に基づいて厳密な h を計算し、
+    必要に応じてグリッドを細かくして再計算する。
+    """
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], interactive_resolution: int = 200):
+        """
+        Args:
+            domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
+            interactive_resolution: ドラッグ中に使用するグリッド解像度（デフォルト 200x200）
+        """
+        super().__init__(domain_bounds)
+        self.interactive_resolution = interactive_resolution
+
+    def get_initial_h(self, basis: 'BasisFunction', K_solver: float, K_max: float) -> float:
+        """
+        ドラッグ中は高速化のため、指定解像度で適当に区切った粗い h を返す。
+        """
+        x_min, x_max, y_min, y_max = self.bounds
+        width = x_max - x_min
+        height = y_max - y_min
+
+        max_span = max(width, height)
+        return float(max_span / self.interactive_resolution)
+
+    def get_strict_h_after_drag(self, basis: 'BasisFunction', K_solver: float, K_max: float,
+                                c: np.ndarray) -> float:
+        """
+        実際の変形結果 (c) に基づいて、ギリギリ安全な h を逆算する。
+        """
+        margin = self._compute_margin(K_solver, K_max)
+
+        c_rbf = self._extract_rbf_coefficients(c)
+        max_coeff_norm = np.max(np.sum(np.abs(c_rbf), axis=1))
+
+        # 恒等写像（RBF係数がすべてゼロ）の場合、歪みは一切発生しないため h は無限大
+        if max_coeff_norm < 1e-12:
+            return float('inf')
+
+        C = basis.compute_basis_gradient_modulus(1.0)
+
+        if C <= 0:
+            return float('inf')
+
+        h_strict = margin / (2.0 * max_coeff_norm * C)
         return float(h_strict)
 
 
@@ -206,10 +262,13 @@ class ProvablyGoodPlanarMapping(ABC):
     """
     論文「Provably Good Planar Mappings」のコアアルゴリズム（Algorithm 1, Local-Global Solver）
     を提供する抽象基底クラス。
+
+    GuaranteeStrategy を通じて Strategy 1（事前保証）と Strategy 2（事後検証）を
+    実行時に切り替え可能にする。
     """
-    def __init__(self, basis: 'BasisFunction', strategy: 'Strategy2', K_solver: float = 2.0, K_max: float = 5.0):
+    def __init__(self, basis: 'BasisFunction', guarantee_strategy: 'GuaranteeStrategy', K_solver: float = 2.0, K_max: float = 5.0):
         self.basis = basis
-        self.strategy = strategy
+        self.strategy = guarantee_strategy
         self.K_solver = K_solver
         self.K_max = K_max
         self.coefficients: Optional[np.ndarray] = None
@@ -288,10 +347,19 @@ class ProvablyGoodPlanarMapping(ABC):
         pass
 
 class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
-    def __init__(self, domain_bounds: Tuple[float, float, float, float], s_param: float = 1.0, K_solver: float = 2.0, K_max: float = 5.0):
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], guarantee_strategy: Optional['GuaranteeStrategy'] = None, s_param: float = 1.0, K_solver: float = 2.0, K_max: float = 5.0):
+        """
+        Args:
+            domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
+            guarantee_strategy: GuaranteeStrategy のインスタンス（デフォルトは Strategy2）
+            s_param: ガウス基底関数のスケールパラメータ
+            K_solver: 選点上での歪み上限
+            K_max: 領域全体での歪み上限
+        """
         basis = GaussianRBF(s=s_param)
-        strategy = Strategy2(domain_bounds)
-        super().__init__(basis=basis, strategy=strategy, K_solver=K_solver, K_max=K_max)
+        if guarantee_strategy is None:
+            guarantee_strategy = Strategy2(domain_bounds)
+        super().__init__(basis=basis, guarantee_strategy=guarantee_strategy, K_solver=K_solver, K_max=K_max)
         self.basis: GaussianRBF = basis
 
     def initialize_mapping(self, src_handles: np.ndarray) -> None:
@@ -302,8 +370,8 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         self.basis.set_centers(src_handles)
         self.coefficients = self.basis.get_identity_coefficients(src_handles)
 
-        # インタラクティブ用の初期グリッド
-        self.current_h = self.strategy.get_interactive_h(resolution=200)
+        # Strategy に初期 h を要求する
+        self.current_h = self.strategy.get_initial_h(self.basis, self.K_solver, self.K_max)
         self.collocation_points = self.strategy.generate_grid(self.current_h)
 
         # === 完全に不変な行列の事前計算 ===
@@ -422,12 +490,14 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
     def end_drag(self, target_handles: np.ndarray) -> bool:
         """
         [UI連携: onMouseUp]
-        マウス操作が完了した段階で Strategy 2 を用いた検証を行う。
+        マウス操作が完了した段階で Strategy に基づいた検証を行う。
+        Strategy 1 は再検証不要、Strategy 2 は必要に応じてグリッドを細かくする。
         """
         if self.coefficients is None:
             raise RuntimeError("Coefficients not initialized.")
 
-        strict_h = self.strategy.compute_strict_h(
+        # Strategy に厳密な h の計算を依頼する
+        strict_h = self.strategy.get_strict_h_after_drag(
             basis=self.basis,
             K_solver=self.K_solver,
             K_max=self.K_max,
@@ -436,7 +506,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
 
         # 現在のグリッドが理論値よりも粗い（安全ではない）場合のみ、再計算が発生する
         if strict_h < self.current_h:
-            print(f"[Strategy 2] Refining grid... (Old h: {self.current_h:.4f} -> New h: {strict_h:.4f})")
+            print(f"[{self.strategy.__class__.__name__}] Refining grid... (Old h: {self.current_h:.4f} -> New h: {strict_h:.4f})")
 
             # グリッドの再生成
             self.current_h = strict_h
