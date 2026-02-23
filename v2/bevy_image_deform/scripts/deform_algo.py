@@ -2,6 +2,7 @@ import numpy as np
 import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, List
+import cvxpy as cp
 
 
 class BasisFunction(ABC):
@@ -204,14 +205,16 @@ class Strategy2:
 
 class ProvablyGoodPlanarMapping(ABC):
     """
-    論文「Provably Good Planar Mappings」のコアアルゴリズム（Algorithm 1, Local-Global Solver）
+    論文「Provably Good Planar Mappings」のコアアルゴリズム（Algorithm 1）
     を提供する抽象基底クラス。
     """
-    def __init__(self, basis: 'BasisFunction', strategy: 'Strategy2', K_solver: float = 2.0, K_max: float = 5.0):
+    def __init__(self, basis: 'BasisFunction', strategy: 'Strategy2', K_solver: float = 2.0, K_max: float = 5.0, 
+                 distortion_type: str = 'isometric'):
         self.basis = basis
         self.strategy = strategy
         self.K_solver = K_solver
         self.K_max = K_max
+        self.distortion_type = distortion_type  # 'isometric' or 'conformal'
         self.coefficients: Optional[np.ndarray] = None
         self.collocation_points: Optional[np.ndarray] = None
         self.current_h: float = 0.0
@@ -219,15 +222,20 @@ class ProvablyGoodPlanarMapping(ABC):
         # --- 事前計算のキャッシュ用 ---
         self._B_mat: Optional[np.ndarray] = None
         self._H_term: Optional[np.ndarray] = None
-        self._W_P: float = 1000
+        self._W_P: float = 1000.0
         self._W_R: float = 1.0
+        self._lambda_reg: float = 0.01  # Regularization weight
 
-        # [修正点1] 論文 Section 5.3 に基づく Active Set のヒステリシス閾値
+        # 論文 Section 5.3 に基づく Active Set のヒステリシス閾値
         self.K_high = 0.1 + (K_solver * 0.9)
         self.K_low = 0.5 + (K_solver * 0.5)
 
-        # [修正点1] フレーム間で Active Set を維持するためのキャッシュ
+        # Active Set とフレームのキャッシュ
         self._active_indices: np.ndarray = np.array([], dtype=int)
+        self._frames: Optional[np.ndarray] = None  # 論文 Eq. 27 のフレームベクトル d_i
+        
+        # Conformal distortion用のδパラメータ (Eq. 12)
+        self._delta_conf: float = 0.1
 
     def evaluate_map(self, coords: np.ndarray) -> np.ndarray:
         """ f(x) = c * Phi(x) を評価して変換後の座標を返す """
@@ -237,49 +245,84 @@ class ProvablyGoodPlanarMapping(ABC):
         return phi @ self.coefficients.T
 
     def evaluate_jacobian(self, coords: np.ndarray) -> np.ndarray:
-        """ ヤコビアン J_f(x) を計算する (Eq. 4) """
+        """ ヤコビアン J_f(x) を計算する """
         if self.coefficients is None:
             raise RuntimeError("マッピング係数が初期化されていません。")
         grad_phi = self.basis.jacobian(coords)
         # cは(2, N)、grad_phiは(M, N, 2)。J[m, d, k] = sum_j c[d, j] * grad_phi[m, j, k]
         J = np.einsum('dj, mjk -> mdk', self.coefficients, grad_phi)
         return J
-
-    def project_jacobians(self, J: np.ndarray, K: float) -> np.ndarray:
+    
+    def compute_J_S_and_J_A(self, coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        [論文 Algorithm 1: Projection on T_K]
-        ヤコビアン行列の集合を指定されたアイソメトリック歪み K の範囲に射影する。
-        折り畳み（fold-over）を防ぐため、行列式が負のものは反転して正の領域へ押し上げる。
+        論文 Eq. 19-20: Jacobianを similarity と anti-similarity 成分に分解
+        J_S f(x) = (∇u(x) + I∇v(x)) / 2
+        J_A f(x) = (∇u(x) - I∇v(x)) / 2
+        
+        Returns:
+            J_S: shape (M, 2) - similarity part
+            J_A: shape (M, 2) - anti-similarity part
         """
-        # SVD: J = U * S * Vh  (numpyでは Vh は V^T)
-        U, S, Vh = np.linalg.svd(J)
-
-        # det(U * V^T) をチェックし、回転を保証する (Section 5.1 "positive determinant" constraint)
-        dets = np.linalg.det(U @ Vh)
-        neg_dets = dets < 0
-
-        # 行列式が負（折り畳み発生）の場合、最小特異値の符号を反転させる
-        S[neg_dets, 1] *= -1
-        U[neg_dets, :, 1] *= -1
-
-        # Eq. 21 に基づき、特異値を安全な領域 [1/K, K] にクランプする (フロベニウスノルム上での最適射影)
-        S_proj = np.clip(S, 1.0 / K, K)
-
-        # 射影されたヤコビアン X を再構築: X = U * diag(S_proj) * Vh
-        X = (U * S_proj[:, np.newaxis, :]) @ Vh
-        return X
+        if self.coefficients is None:
+            raise RuntimeError("マッピング係数が初期化されていません。")
+        
+        grad_phi = self.basis.jacobian(coords)  # (M, N, 2)
+        
+        # ∇u と ∇v を計算
+        grad_u = np.einsum('j, mjk -> mk', self.coefficients[0, :], grad_phi)  # (M, 2)
+        grad_v = np.einsum('j, mjk -> mk', self.coefficients[1, :], grad_phi)  # (M, 2)
+        
+        # I は π/2 反時計回りの回転行列: [[0, -1], [1, 0]]
+        I_grad_v = np.stack([-grad_v[:, 1], grad_v[:, 0]], axis=1)  # (M, 2)
+        
+        J_S = (grad_u + I_grad_v) / 2.0
+        J_A = (grad_u - I_grad_v) / 2.0
+        
+        return J_S, J_A
+    
+    def compute_singular_values_from_J_S_J_A(self, J_S: np.ndarray, J_A: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        論文 Eq. 20: J_S と J_A から特異値を計算
+        Σ(x) = ||J_S f(x)|| + ||J_A f(x)||
+        σ(x) = | ||J_S f(x)|| - ||J_A f(x)|| |
+        """
+        norm_J_S = np.linalg.norm(J_S, axis=1)
+        norm_J_A = np.linalg.norm(J_A, axis=1)
+        
+        Sigma = norm_J_S + norm_J_A
+        sigma = np.abs(norm_J_S - norm_J_A)
+        
+        return Sigma, sigma
+    
+    def compute_distortion(self, coords: np.ndarray) -> np.ndarray:
+        """
+        指定された座標での歪みを計算
+        """
+        J_S, J_A = self.compute_J_S_and_J_A(coords)
+        Sigma, sigma = self.compute_singular_values_from_J_S_J_A(J_S, J_A)
+        
+        if self.distortion_type == 'isometric':
+            # D_iso(x) = max{Σ(x), 1/σ(x)}
+            sigma_safe = np.where(sigma > 1e-8, sigma, 1e-8)
+            distortion = np.maximum(Sigma, 1.0 / sigma_safe)
+        elif self.distortion_type == 'conformal':
+            # D_conf(x) = Σ(x) / σ(x)
+            sigma_safe = np.where(sigma > 1e-8, sigma, 1e-8)
+            distortion = Sigma / sigma_safe
+        else:
+            raise ValueError(f"Unknown distortion type: {self.distortion_type}")
+        
+        return distortion
     @abstractmethod
     def initialize_mapping(self, src_handles: np.ndarray) -> None:
         pass
 
     @abstractmethod
-    def start_drag(self, src_handles: np.ndarray) -> None:
-        """ onMouseDown: ドラッグ開始時に1回だけ呼ばれる（事前計算） """
-        pass
-
-    @abstractmethod
-    def update_drag(self, target_handles: np.ndarray, num_iterations: int = 2) -> None:
-        """ onMouseMove: ドラッグ中に毎フレーム呼ばれる（高速な最適化） """
+    def update_mapping(self, target_handles: np.ndarray) -> None:
+        """ 
+        論文 Algorithm 1: 単一の最適化ステップを実行
+        SOCP を使って係数 c を更新する
+        """
         pass
 
     @abstractmethod
@@ -288,33 +331,56 @@ class ProvablyGoodPlanarMapping(ABC):
         pass
 
 class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
-    def __init__(self, domain_bounds: Tuple[float, float, float, float], s_param: float = 1.0, K_solver: float = 2.0, K_max: float = 5.0):
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], s_param: float = 1.0, 
+                 K_solver: float = 2.0, K_max: float = 5.0, distortion_type: str = 'isometric',
+                 use_arap: bool = False):
         basis = GaussianRBF(s=s_param)
         strategy = Strategy2(domain_bounds)
-        super().__init__(basis=basis, strategy=strategy, K_solver=K_solver, K_max=K_max)
+        super().__init__(basis=basis, strategy=strategy, K_solver=K_solver, K_max=K_max, 
+                        distortion_type=distortion_type)
         self.basis: GaussianRBF = basis
+        self.use_arap = use_arap
+        self._arap_points: Optional[np.ndarray] = None  # 論文 Eq. 32 の r_s
+        self._arap_frames: Optional[np.ndarray] = None  # ARAP用のフレーム
 
     def initialize_mapping(self, src_handles: np.ndarray) -> None:
         """
         アプリケーション起動時・またはハンドル構成が変わった時に1回呼ばれる。
-        ここで最も重い不変行列の計算をすべて終わらせる。
+        論文 Algorithm 1 の "if first step then" に対応
         """
         self.basis.set_centers(src_handles)
         self.coefficients = self.basis.get_identity_coefficients(src_handles)
 
         # インタラクティブ用の初期グリッド
-        self.current_h = self.strategy.get_interactive_h(resolution=200)
+        # 輪郭フィルタリングを考慮して、より細かいグリッドを使用
+        # 論文では 200x200 だが、フィルタリング後も十分な密度を保つため 300x300 に
+        self.current_h = self.strategy.get_interactive_h(resolution=300)
         self.collocation_points = self.strategy.generate_grid(self.current_h)
 
-        # === 完全に不変な行列の事前計算 ===
-        # 1. 位置拘束行列 (B_mat) は src_handles (不変) にのみ依存する
+        # 事前計算: 位置拘束行列 (B_mat) は src_handles (不変) にのみ依存する
         self._B_mat = self.basis.evaluate(src_handles)
 
-        # 2. 初期グリッドに基づくヘッシアン行列 (H_term)
+        # ヘッシアン項の事前計算
         self._update_hessian_term()
 
-        # [修正] ここが論文の "if first step then" に該当する
+        # 論文 Algorithm 1: "if first step then" - フレームを (1,0) で初期化
+        M = len(self.collocation_points)
+        self._frames = np.zeros((M, 2))
+        self._frames[:, 0] = 1.0  # d_i = (1, 0)
+        
+        # Active set を空で初期化
         self._active_indices = np.array([], dtype=int)
+        
+        # ARAP エネルギー用のサンプル点 (論文 Eq. 32)
+        if self.use_arap:
+            # 等間隔にサンプル点を配置
+            n_samples = min(100, len(self.collocation_points))
+            indices = np.linspace(0, len(self.collocation_points) - 1, n_samples, dtype=int)
+            self._arap_points = self.collocation_points[indices]
+            self._arap_frames = np.zeros((n_samples, 2))
+            self._arap_frames[:, 0] = 1.0
+        
+        print(f"Initialized with {len(self.collocation_points)} collocation points (h={self.current_h:.4f})")
 
     def _update_hessian_term(self) -> None:
         """ グリッドが更新されたときのみ呼ばれる内部メソッド """
@@ -325,104 +391,303 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         hess = self.basis.hessian(collocation_points)
         H_mat = np.transpose(hess, (0, 2, 3, 1)).reshape(-1, N_basis)
 
-        # [修正点2] 積分(Eq.31)の近似のため、面積要素 (h^2) を掛けてスケーリングする
-        # これにより、hを細かくしてもエネルギーのスケールが不変になる
+        # 論文 Eq. 31: 数値積分のための離散化
+        # 面積要素を考慮（グリッド間隔の2乗）
         area_element = self.current_h ** 2
         self._H_term = (H_mat.T @ H_mat) * area_element
 
-    def start_drag(self, src_handles: np.ndarray) -> None:
+    def _find_local_maxima(self, distortions: np.ndarray) -> np.ndarray:
         """
-        [UI連携: onMouseDown]
-        前回からのアクティブセット（_active_indices）をそのまま維持し、
-        変形の連続性と滑らかさを保つ。リセットは行わない。
-        """
-        pass
-
-    def update_drag(self, target_handles: np.ndarray, num_iterations: int = 2) -> None:
-        """
-        [UI連携: onMouseMove]
-        マウスが動くたびに呼ばれる。キャッシュされた行列を使って高速に解く。
+        論文 Section 5.3: グリッド上の歪みの局所最大値を見つける
         """
         if self.collocation_points is None:
-            raise RuntimeError("Collocation points not initialized.")
-        if self._B_mat is None:
-            raise RuntimeError("B_mat not initialized.")
-        if self._H_term is None:
-            raise RuntimeError("H_term not initialized.")
-
+            return np.array([], dtype=int)
+        
+        # グリッドの形状を推定（正方形グリッドを仮定）
+        n_points = len(distortions)
+        grid_size = int(np.sqrt(n_points))
+        
+        if grid_size * grid_size != n_points:
+            # 正方形でない場合は全ての点を候補とする
+            return np.arange(n_points)
+        
+        # 2Dグリッドに reshape
+        dist_grid = distortions.reshape(grid_size, grid_size)
+        
+        # 局所最大値を見つける（8近傍）
+        local_max_mask = np.zeros_like(dist_grid, dtype=bool)
+        
+        for i in range(grid_size):
+            for j in range(grid_size):
+                val = dist_grid[i, j]
+                is_max = True
+                
+                # 8近傍をチェック
+                for di in [-1, 0, 1]:
+                    for dj in [-1, 0, 1]:
+                        if di == 0 and dj == 0:
+                            continue
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < grid_size and 0 <= nj < grid_size:
+                            if dist_grid[ni, nj] > val:
+                                is_max = False
+                                break
+                    if not is_max:
+                        break
+                
+                local_max_mask[i, j] = is_max
+        
+        return np.where(local_max_mask.ravel())[0]
+    
+    def _update_active_set(self) -> None:
+        """
+        論文 Section 5.3: Active set の更新（改良版）
+        - 歪みの局所最大値で K_high を超えるものを追加
+        - K_low を下回るものを削除
+        - 折り畳み（fold-over）が発生している点は常に active
+        - 折り畳みに近い点（σ が小さい）も予防的に追加
+        """
+        if self.collocation_points is None:
+            return
+        
         grid = self.collocation_points
-        B_mat = self._B_mat
-        H_term = self._H_term
+        distortions = self.compute_distortion(grid)
+        
+        # 折り畳みチェック（σ ≤ 0）と予防的チェック（σ が小さい）
+        J_S, J_A = self.compute_J_S_and_J_A(grid)
+        _, sigma = self.compute_singular_values_from_J_S_J_A(J_S, J_A)
+        is_foldover = sigma <= 1e-8
+        is_near_foldover = (sigma > 1e-8) & (sigma < 0.1)  # 予防的に追加
+        
+        # 局所最大値を見つける
+        local_max_indices = self._find_local_maxima(distortions)
+        
+        # 現在の active set を boolean mask に変換
+        active_mask = np.zeros(len(grid), dtype=bool)
+        active_mask[self._active_indices] = True
+        
+        # 追加: 局所最大値で K_high を超えるもの、折り畳み、または折り畳みに近いもの
+        is_above_high = distortions > self.K_high
+        should_add = np.zeros(len(grid), dtype=bool)
+        should_add[local_max_indices] = is_above_high[local_max_indices]
+        should_add |= is_foldover
+        should_add |= is_near_foldover  # 予防的に追加
+        
+        active_mask |= should_add
+        
+        # 削除: K_low を下回り、かつ折り畳みでなく、σ が十分大きいもの
+        is_below_low = distortions < self.K_low
+        is_safe = sigma > 0.5  # σ が十分大きい
+        should_remove = is_below_low & ~is_foldover & is_safe
+        active_mask &= ~should_remove
+        
+        self._active_indices = np.where(active_mask)[0]
+        
+        # 論文 Section 5.3: 安定性のため、等間隔に配置された点を常に active に保つ
+        # ここでは簡単のため、グリッドの角と中心を常に active にする
+        if len(grid) > 0:
+            grid_size = int(np.sqrt(len(grid)))
+            if grid_size * grid_size == len(grid):
+                # 4隅と中心
+                corners = [0, grid_size - 1, grid_size * (grid_size - 1), grid_size * grid_size - 1]
+                center = grid_size * (grid_size // 2) + (grid_size // 2)
+                stable_points = corners + [center]
+                self._active_indices = np.unique(np.concatenate([self._active_indices, stable_points]))
+        
+        # Active set が大きすぎる場合は制限（パフォーマンスのため）
+        max_active = 5000  # 最大500点
+        if len(self._active_indices) > max_active:
+            # 歪みが最も大きい点を優先
+            distortions_active = distortions[self._active_indices]
+            top_indices = np.argsort(distortions_active)[-max_active:]
+            self._active_indices = self._active_indices[top_indices]
+            warnings.warn(f"Active set limited to {max_active} points (was {len(self._active_indices)})")
+
+    def update_mapping(self, target_handles: np.ndarray) -> None:
+        """
+        論文 Algorithm 1: SOCP を使った単一の最適化ステップ
+        
+        Optimization (論文 Section 5):
+        - Active set の更新
+        - SOCP 問題の構築と解決
+        - フレームの更新
+        """
+        if self.collocation_points is None or self._B_mat is None or self._H_term is None:
+            raise RuntimeError("Mapping not initialized.")
+        
+        # === Active Set の更新 ===
+        self._update_active_set()
+        
+        grid = self.collocation_points
         N_basis = self.basis.get_basis_count()
-        area_element = self.current_h ** 2
-
-        # ループ回数はドラッグ中なので少なめ（1〜2回）で十分
-        for _ in range(num_iterations):
-            # === [Active Set 抽出] ===
-            J_all = self.evaluate_jacobian(grid)
-            U, S, Vh = np.linalg.svd(J_all)
-            dets = np.linalg.det(U @ Vh)
-            neg_dets = dets < 0
-            S[neg_dets, 1] *= -1
-
-            sig2_safe = np.where(S[:, 1] > 1e-8, S[:, 1], 1e-8)
-            sig2_safe[S[:, 1] <= 0] = 1e-8
-            distortions = np.maximum(S[:, 0], 1.0 / sig2_safe)
-
-            # === [修正点1: 論文通りのヒステリシス Active Set 更新] ===
-            is_foldover = S[:, 1] <= 0
-            is_above_high = distortions > self.K_high
-            is_below_low = distortions < self.K_low
-
-            # 現在のインデックスを boolean マスクに変換
-            active_mask = np.zeros(len(grid), dtype=bool)
-            active_mask[self._active_indices] = True
-
-            # K_high を超えたもの、または折りたたまれたものを追加
-            active_mask |= is_above_high | is_foldover
-
-            # K_low を下回った「かつ」折りたたまれていないものを削除
-            active_mask &= ~(is_below_low & ~is_foldover)
-
-            self._active_indices = np.where(active_mask)[0]
-            active_indices = self._active_indices
-
-            # === [Local Step] ===
-            if len(active_indices) > 0:
-                J_active = J_all[active_indices]
-                X_active = self.project_jacobians(J_active, self.K_solver)
-
-                grad_phi_active = self.basis.jacobian(grid[active_indices])
-                A_mat = np.transpose(grad_phi_active, (0, 2, 1)).reshape(-1, N_basis)
-                # [修正点2] Distortion Energy (Eq. 5) も積分ベースであるため h^2 を掛ける
-                A_term = (A_mat.T @ A_mat) * area_element
-            else:
-                A_mat = np.zeros((0, N_basis))
-                X_active = np.zeros((0, 2, 2))
-                A_term = np.zeros((N_basis, N_basis))
-
-            # === [Global Step] ===
-            # M行列は事前計算済みの H_term と B_mat を使用して高速に構築
-            M = A_term + self._W_P * (B_mat.T @ B_mat) + self._W_R * H_term
-            new_c = np.zeros_like(self.coefficients)
-
-            for d in range(2):
-                if len(active_indices) > 0:
-                    X_d = X_active[:, d, :].reshape(-1)
-                    # 右辺も A_mat の転置がかかるため面積要素を掛ける
-                    rhs_D = (A_mat.T @ X_d) * area_element
-                else:
-                    rhs_D = np.zeros(N_basis)
-
-                rhs_P = self._W_P * (B_mat.T @ target_handles[:, d])
-                new_c[d, :] = np.linalg.solve(M, rhs_D + rhs_P)
-
-            self.coefficients = new_c
+        n_handles = target_handles.shape[0]
+        active_indices = self._active_indices
+        n_active = len(active_indices)
+        
+        # === SOCP 問題の構築 ===
+        # 変数: c (2 x N_basis の係数行列を flatten)
+        c_var = cp.Variable((2, N_basis))
+        
+        constraints = []
+        objective_terms = []
+        
+        # --- 位置拘束エネルギー (Eq. 29-30) ---
+        # E_pos = Σ_l ||f(p_l) - q_l|| = Σ_l ||Σ_i c_i f_i(p_l) - q_l||
+        B_mat = self._B_mat  # shape: (n_handles, N_basis)
+        
+        # 各ハンドルに対して補助変数 r_l を導入（非負）
+        r_vars = []
+        for l in range(n_handles):
+            r_l = cp.Variable(nonneg=True)
+            r_vars.append(r_l)
+            
+            # ||c @ B_mat[l, :] - q_l|| <= r_l (Eq. 30)
+            # c @ B_mat[l, :] は (2,) ベクトル
+            residual = c_var @ B_mat[l, :] - target_handles[l, :]
+            constraints.append(cp.norm(residual, 2) <= r_l)
+            
+            objective_terms.append(self._W_P * r_l)
+        
+        # --- 正則化エネルギー: Biharmonic (Eq. 31) ---
+        # E_bh = ||H_mat @ c.T||_F^2 (Frobenius norm)
+        # H_term = H_mat.T @ H_mat が事前計算済み
+        # E_bh = trace(c @ H_term @ c.T) = sum_{d} c[d,:] @ H_term @ c[d,:].T
+        for d in range(2):
+            bh_term = cp.quad_form(c_var[d, :], self._H_term)
+            objective_terms.append(self._lambda_reg * self._W_R * bh_term)
+        
+        # --- 正則化エネルギー: ARAP (Eq. 33) ---
+        # E_arap = Σ_s (||J_A f(r_s)||^2 + ||J_S f(r_s) - d_s||^2)
+        if self.use_arap and self._arap_points is not None:
+            grad_phi_arap = self.basis.jacobian(self._arap_points)  # (n_arap, N_basis, 2)
+            
+            for s in range(len(self._arap_points)):
+                grad_phi_s = grad_phi_arap[s, :, :]  # (N_basis, 2)
+                
+                # ∇u と ∇v
+                grad_u = c_var[0, :] @ grad_phi_s
+                grad_v = c_var[1, :] @ grad_phi_s
+                
+                # I∇v: I = [[0, -1], [1, 0]]
+                I_grad_v = cp.hstack([-grad_v[1], grad_v[0]])
+                
+                # J_S と J_A
+                J_S = (grad_u + I_grad_v) / 2.0
+                J_A = (grad_u - I_grad_v) / 2.0
+                
+                # フレーム d_s
+                d_s = self._arap_frames[s, :]
+                
+                # ||J_A||^2 + ||J_S - d_s||^2
+                arap_term = cp.sum_squares(J_A) + cp.sum_squares(J_S - d_s)
+                objective_terms.append(self._lambda_reg * arap_term)
+        
+        # --- 歪み制約 (Active set のみ) ---
+        if n_active > 0:
+            # Active な collocation points での基底関数の勾配を計算
+            grad_phi_active = self.basis.jacobian(grid[active_indices])  # (n_active, N_basis, 2)
+            
+            for idx, active_idx in enumerate(active_indices):
+                grad_phi_i = grad_phi_active[idx, :, :]  # (N_basis, 2)
+                
+                # ∇u と ∇v を計算
+                grad_u = c_var[0, :] @ grad_phi_i  # (2,) ベクトル
+                grad_v = c_var[1, :] @ grad_phi_i  # (2,) ベクトル
+                
+                # I∇v を計算: I = [[0, -1], [1, 0]]
+                I_grad_v = cp.hstack([-grad_v[1], grad_v[0]])
+                
+                # J_S と J_A (Eq. 19)
+                J_S = (grad_u + I_grad_v) / 2.0
+                J_A = (grad_u - I_grad_v) / 2.0
+                
+                # フレームベクトル d_i (前ステップから)
+                d_i = self._frames[active_idx, :]
+                
+                if self.distortion_type == 'isometric':
+                    # 論文 Eq. 21-26: Isometric distortion constraints
+                    # 補助変数 t_i, s_i (非負)
+                    t_i = cp.Variable(nonneg=True)
+                    s_i = cp.Variable(nonneg=True)
+                    
+                    # Eq. 23a-c
+                    constraints.append(cp.norm(J_S, 2) <= t_i)
+                    constraints.append(cp.norm(J_A, 2) <= s_i)
+                    constraints.append(t_i + s_i <= self.K_solver)
+                    
+                    # Eq. 26 (convexified version of Eq. 22)
+                    # J_S @ d_i は内積なのでスカラー
+                    constraints.append(J_S @ d_i - s_i >= 1.0 / self.K_solver)
+                    
+                elif self.distortion_type == 'conformal':
+                    # 論文 Eq. 28: Conformal distortion constraints
+                    K = self.K_solver
+                    delta = self._delta_conf
+                    
+                    # J_S @ d_i は内積（スカラー）
+                    J_S_dot_d = J_S @ d_i
+                    
+                    # Eq. 28a
+                    constraints.append(
+                        cp.norm(J_A, 2) <= ((K - 1) / (K + 1)) * J_S_dot_d
+                    )
+                    
+                    # Eq. 28b
+                    constraints.append(
+                        cp.norm(J_A, 2) <= J_S_dot_d - delta
+                    )
+        
+        # === 目的関数 ===
+        objective = cp.Minimize(cp.sum(objective_terms))
+        
+        # === SOCP を解く ===
+        problem = cp.Problem(objective, constraints)
+        
+        try:
+            problem.solve(solver=cp.ECOS, verbose=False)
+            
+            if problem.status not in ["optimal", "optimal_inaccurate"]:
+                warnings.warn(f"SOCP solver status: {problem.status}. Objective: {problem.value}")
+                # 解が見つからない場合は係数を更新しない
+                return
+            
+            # 係数を更新
+            self.coefficients = c_var.value
+            
+            # デバッグ: 制約の充足状況を確認
+            if n_active > 0:
+                violations = []
+                for c in constraints:
+                    if hasattr(c, 'violation'):
+                        viol = c.violation()
+                        if viol is not None and viol > 1e-6:
+                            violations.append(viol)
+                if violations:
+                    warnings.warn(f"Constraint violations detected: max={max(violations):.6f}")
+            
+        except Exception as e:
+            warnings.warn(f"SOCP solver failed: {e}")
+            return
+        
+        # === Postprocessing: フレームの更新 (Eq. 27) ===
+        if n_active > 0:
+            J_S_active, _ = self.compute_J_S_and_J_A(grid[active_indices])
+            norm_J_S = np.linalg.norm(J_S_active, axis=1, keepdims=True)
+            norm_J_S = np.where(norm_J_S > 1e-8, norm_J_S, 1.0)  # ゼロ除算回避
+            self._frames[active_indices] = J_S_active / norm_J_S
+        
+        # ARAP フレームの更新
+        if self.use_arap and self._arap_points is not None:
+            J_S_arap, _ = self.compute_J_S_and_J_A(self._arap_points)
+            norm_J_S_arap = np.linalg.norm(J_S_arap, axis=1, keepdims=True)
+            norm_J_S_arap = np.where(norm_J_S_arap > 1e-8, norm_J_S_arap, 1.0)
+            self._arap_frames = J_S_arap / norm_J_S_arap
 
     def end_drag(self, target_handles: np.ndarray) -> bool:
         """
-        [UI連携: onMouseUp]
-        マウス操作が完了した段階で Strategy 2 を用いた検証を行う。
+        論文 Section 4: Strategy 2 を用いた検証
+        マウス操作が完了した段階で、理論的に保証された h を計算し、
+        必要に応じてグリッドを細分化する。
         """
         if self.coefficients is None:
             raise RuntimeError("Coefficients not initialized.")
@@ -442,15 +707,29 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             self.current_h = strict_h
             self.collocation_points = self.strategy.generate_grid(strict_h)
 
-            # グリッドが変わったため、ここで初めて H_term を「再」計算する
+            # グリッドが変わったため、H_term を再計算
             self._update_hessian_term()
 
-            # [重要] グリッド点が新しくなりインデックスが変わったため、古い履歴を破棄する
+            # フレームを再初期化
+            M = len(self.collocation_points)
+            self._frames = np.zeros((M, 2))
+            self._frames[:, 0] = 1.0
+            
+            # Active set をリセット
             self._active_indices = np.array([], dtype=int)
+            
+            # ARAP サンプル点も更新
+            if self.use_arap:
+                n_samples = min(100, len(self.collocation_points))
+                indices = np.linspace(0, len(self.collocation_points) - 1, n_samples, dtype=int)
+                self._arap_points = self.collocation_points[indices]
+                self._arap_frames = np.zeros((n_samples, 2))
+                self._arap_frames[:, 0] = 1.0
 
-            # 新しい細かいグリッド上で最適化を数ステップ回し、
-            # この中で新しいグリッドに対する _active_indices を自然に再構築させる
-            self.update_drag(target_handles, num_iterations=5)
+            # 新しいグリッド上で最適化を実行
+            # 論文では単一ステップだが、実用上は収束まで繰り返す
+            for _ in range(5):
+                self.update_mapping(target_handles)
 
             return True
 

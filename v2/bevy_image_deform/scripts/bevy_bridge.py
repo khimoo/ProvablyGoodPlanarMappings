@@ -107,8 +107,8 @@ class BevyBridge:
         self.solver = BetterFitwithGaussian(
             domain_bounds=domain_bounds,
             s_param=epsilon,
-            K_solver=3.5,
-            K_max=5.0
+            K_solver=5.0,  # 3.5 → 5.0 に緩める（裏返りを防ぐため）
+            K_max=10.0     # 5.0 → 10.0 に緩める
         )
 
         print(f"Initialized domain: {image_width}x{image_height}, epsilon={epsilon}")
@@ -173,6 +173,22 @@ class BevyBridge:
 
             # Recompute hessian term with filtered points
             self.solver._update_hessian_term()
+            
+            # フレームを再初期化（重要！）
+            M = len(self.solver.collocation_points)
+            self.solver._frames = np.zeros((M, 2))
+            self.solver._frames[:, 0] = 1.0
+            
+            # Active set もリセット
+            self.solver._active_indices = np.array([], dtype=int)
+            
+            # ARAP サンプル点も更新
+            if self.solver.use_arap:
+                n_samples = min(100, len(self.solver.collocation_points))
+                indices = np.linspace(0, len(self.solver.collocation_points) - 1, n_samples, dtype=int)
+                self.solver._arap_points = self.solver.collocation_points[indices]
+                self.solver._arap_frames = np.zeros((n_samples, 2))
+                self.solver._arap_frames[:, 0] = 1.0
 
         self.is_setup_finalized = True
         print(f"Finalized setup with {len(self.control_points)} control points")
@@ -180,7 +196,10 @@ class BevyBridge:
     def start_drag_operation(self) -> None:
         """
         Called when user presses mouse button (onMouseDown).
-        Performs heavy precomputation for fast dragging.
+        
+        Note: In the paper-compliant implementation, there is no separate
+        precomputation step. The SOCP solver handles everything in update_mapping().
+        This method is kept for API compatibility but does nothing.
         """
         if not self.is_setup_finalized:
             raise RuntimeError("Setup not finalized")
@@ -188,14 +207,7 @@ class BevyBridge:
         if self.solver is None:
             return
 
-        # Extract current source positions
-        src_handles = np.array(
-            [[x, y] for (_, x, y) in self.control_points],
-            dtype=np.float64
-        )
-
-        self.solver.start_drag(src_handles)
-        print("Started drag operation")
+        print("Started drag operation (no precomputation in SOCP implementation)")
 
     def update_control_point(self, control_index: int, x: float, y: float) -> None:
         """
@@ -219,6 +231,10 @@ class BevyBridge:
         """
         Solve for new deformation during drag operation.
         This method is called on every mouse move to update the mapping coefficients.
+        
+        Uses the paper-compliant SOCP solver (Algorithm 1) which performs a single
+        optimization step per call. For better convergence during interactive dragging,
+        we call it multiple times.
 
         Args:
             inverse_grid_resolution: Unused (kept for compatibility)
@@ -235,8 +251,20 @@ class BevyBridge:
             dtype=np.float64
         )
 
-        # Run optimization (fast during drag, uses cached matrices)
-        self.solver.update_drag(target_handles, num_iterations=2)
+        # Run optimization using paper-compliant SOCP solver
+        # Call multiple times for better convergence during interactive dragging
+        # (論文では単一ステップだが、実用上は複数回呼び出す)
+        # 裏返りを防ぐため、反復回数を増やす
+        for i in range(3):  # 2 → 3 に増やす
+            self.solver.update_mapping(target_handles)
+            
+            # 裏返りチェック（早期終了）
+            if i > 0:  # 最初の反復後にチェック
+                J_S, J_A = self.solver.compute_J_S_and_J_A(self.solver.collocation_points)
+                _, sigma = self.solver.compute_singular_values_from_J_S_J_A(J_S, J_A)
+                if np.any(sigma <= 1e-8):
+                    print(f"Warning: Fold-over detected at iteration {i}, stopping")
+                    break
 
     def get_basis_parameters(self) -> Dict:
         """
