@@ -8,9 +8,22 @@ from dataclasses import dataclass
 
 @dataclass
 class ProvablyGoodConfig:
-    """論文「Provably Good Planar Mappings」に明記されているパラメータ群"""
+    """
+    論文「Provably Good Planar Mappings」に明記されているパラメータ群
 
-    # [Section 6: Results] エネルギーの重み λ
+    使用例:
+        # マスク付きで初期化
+        mask = image_alpha > 0  # (H, W) のブール配列
+        mapper = BetterFitwithGaussian(
+            domain_bounds=(-1, 1, -1, 1),
+            s_param=0.5,
+            K_solver=2.0,
+            K_max=5.0,
+            mask=mask  # 透明部分を除外
+        )
+    """
+
+    # [Section 6  Results] エネルギーの重み λ
     # 【重要】論文は単位正方形（1×1）を前提としているが、ピクセル座標（数百px）では
     # E_pos（単位: px）と E_bh（無次元）の次元が不一致になり、正則化が消失する。
     # ドメインサイズ L に合わせて lambda_bh を L 倍にスケーリングする必要がある。
@@ -131,16 +144,19 @@ class GuaranteeStrategy(ABC):
     Strategy 1（悲観的・事前保証）と Strategy 2（楽観的・事後検証）の
     共通インターフェースを定義する。
     """
-    def __init__(self, domain_bounds: Tuple[float, float, float, float]):
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], mask: Optional[np.ndarray] = None):
         """
         Args:
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
+            mask: (H, W) の2値マスク配列。Trueの領域にのみグリッド点を配置する（オプション）
         """
         self.bounds = domain_bounds
+        self.mask = mask
 
     def generate_grid(self, h: float) -> np.ndarray:
         """
         [共通処理] 指定された h に基づいてグリッドを生成する。
+        マスクが指定されている場合、有効領域内の点のみを返す。
         """
         x_min, x_max, y_min, y_max = self.bounds
 
@@ -152,6 +168,28 @@ class GuaranteeStrategy(ABC):
 
         X, Y = np.meshgrid(x_coords, y_coords)
         grid_points = np.vstack([X.ravel(), Y.ravel()]).T
+
+        # マスクが指定されている場合、有効領域内の点のみをフィルタリング
+        if self.mask is not None:
+            mask_h, mask_w = self.mask.shape
+            # グリッド座標をマスク座標系に変換
+            # domain_bounds が [-1, 1] x [-1, 1] の場合、マスクは [0, H-1] x [0, W-1]
+            grid_x_normalized = (grid_points[:, 0] - x_min) / (x_max - x_min)
+            grid_y_normalized = (grid_points[:, 1] - y_min) / (y_max - y_min)
+
+            mask_x = (grid_x_normalized * (mask_w - 1)).astype(int)
+            mask_y = (grid_y_normalized * (mask_h - 1)).astype(int)
+
+            # 範囲外の点を除外
+            valid_range = (mask_x >= 0) & (mask_x < mask_w) & (mask_y >= 0) & (mask_y < mask_h)
+            mask_x = np.clip(mask_x, 0, mask_w - 1)
+            mask_y = np.clip(mask_y, 0, mask_h - 1)
+
+            # マスク値を取得（Trueの点のみを保持）
+            mask_values = self.mask[mask_y, mask_x]
+            valid_mask = valid_range & mask_values
+
+            grid_points = grid_points[valid_mask]
 
         return grid_points
 
@@ -204,16 +242,18 @@ class Strategy1(GuaranteeStrategy):
     """
     def __init__(self, domain_bounds: Tuple[float, float, float, float],
                  collocation_resolution: int = 500,
-                 K_on_collocation: float = 3.5):
+                 K_on_collocation: float = 3.5,
+                 mask: Optional[np.ndarray] = None):
         """
         Args:
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
             collocation_resolution: グリッド解像度
             K_on_collocation: コロケーション点上の歪み上限 K
+            mask: (H, W) の2値マスク配列（オプション）
 
         K_max は計算結果として得られる（入力ではない）
         """
-        super().__init__(domain_bounds)
+        super().__init__(domain_bounds, mask)
         self.collocation_resolution = collocation_resolution
         self.K_on_collocation = K_on_collocation
 
@@ -233,18 +273,18 @@ class Strategy1(GuaranteeStrategy):
         """Strategy 1: グリッド細分化なし"""
         return float('inf')
 
-    def compute_guaranteed_K_max(self, basis: 'BasisFunction', h: float) -> float:
+    def compute_guaranteed_K_max(self, basis: 'BasisFunction', h: float, c: Optional[np.ndarray] = None) -> float:
         """
         Strategy 1 の出力: 実際の K_max を計算
 
         式(11): D_iso(x) ≤ max{ K + ω(h), 1/(1/K - ω(h)) }
 
         ω(h) = 2 * |||c||| * ω_∇F(h)
-        初期状態では |||c||| = 1（恒等写像）
 
         Args:
             basis: 基底関数のインスタンス
             h: コロケーションポイント密度
+            c: 現在の係数行列 (2, N)。Noneの場合は恒等写像 (|||c||| = 1) を仮定
 
         Returns:
             K_max: 領域全体で保証される最大歪み
@@ -256,15 +296,33 @@ class Strategy1(GuaranteeStrategy):
         # Gaussians の場合: ω_∇F(t) = t / s²
         omega_grad_F = basis.compute_basis_gradient_modulus(h)
 
+        # 係数ノルム |||c||| を計算
+        if c is None:
+            # 初期状態（恒等写像）
+            c_norm = 1.0
+        else:
+            # RBF係数のみを抽出（アフィン項を除く）
+            c_rbf = self._extract_rbf_coefficients(c)
+            # 最大行和ノルム: max_ℓ Σ_i |c^ℓ_i|
+            c_norm = np.max(np.sum(np.abs(c_rbf), axis=1))
+            if c_norm < 1e-12:
+                c_norm = 1.0  # ゼロ除算回避
+
         # ω(h) = 2 * |||c||| * ω_∇F(h)
-        # 初期状態では |||c||| = 1（恒等写像）
-        omega_h = 2.0 * 1.0 * omega_grad_F
+        omega_h = 2.0 * c_norm * omega_grad_F
 
         print(f"DEBUG compute_guaranteed_K_max:")
         print(f"  K (K_on_collocation): {K:.4f}")
         print(f"  h: {h:.4f}")
+        print(f"  |||c|||: {c_norm:.4f}")
         print(f"  ω_∇F(h): {omega_grad_F:.6f}")
-        print(f"  ω(h) = 2 * ω_∇F(h): {omega_h:.6f}")
+        print(f"  ω(h) = 2 * |||c||| * ω_∇F(h): {omega_h:.6f}")
+
+        # 式(11)の条件チェック: 1/K > ω(h) が必要
+        if omega_h >= 1.0 / K:
+            print(f"  WARNING: ω(h) >= 1/K ({omega_h:.6f} >= {1.0/K:.6f})")
+            print(f"  Injectivity cannot be guaranteed! Need denser grid or smaller deformation.")
+            return float('inf')  # 保証不可能
 
         # 式(11): D_iso(x) ≤ max{ K + ω(h), 1/(1/K - ω(h)) }
         term1 = K + omega_h
@@ -285,14 +343,38 @@ class Strategy2(GuaranteeStrategy):
     インタラクティブ操作中は粗い固定グリッドを使って高速に解き、
     ドラッグ終了後に「実際の係数ノルム」に基づいて厳密な h を計算し、
     必要に応じてグリッドを細かくして再計算する。
+    
+    【重要】論文では interactive_resolution=200 を推奨しているが、
+    大きな変形では裏返りが発生する可能性がある。実用上は 300-500 程度が安全。
     """
-    def __init__(self, domain_bounds: Tuple[float, float, float, float], interactive_resolution: int = 200):
+    def __init__(
+        self,
+        domain_bounds: Tuple[float, float, float, float],
+        interactive_resolution: int = 300,  # 200 -> 300 に変更
+        mask: Optional[np.ndarray] = None,
+    ):
+        """
+        Args:
+            domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
+            interactive_resolution: ドラッグ中に使用するグリッド解像度（デフォルト 300x300）
+            mask: (H, W) の2値マスク配列（オプション）
+        """
+        super().__init__(domain_bounds, mask)
+        self.interactive_resolution = interactive_resolution
+    インタラクティブ操作中は粗い固定グリッドを使って高速に解き、
+    ドラッグ終了後に「実際の係数ノルム」に基づいて厳密な h を計算し、
+    必要に応じてグリッドを細かくして再計算する。
+    """
+    def __init__(self, domain_bounds: Tuple[float, float, float, float],
+                 interactive_resolution: int = 200,
+                 mask: Optional[np.ndarray] = None):
         """
         Args:
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
             interactive_resolution: ドラッグ中に使用するグリッド解像度（デフォルト 200x200）
+            mask: (H, W) の2値マスク配列（オプション）
         """
-        super().__init__(domain_bounds)
+        super().__init__(domain_bounds, mask)
         self.interactive_resolution = interactive_resolution
 
     def get_initial_h(self, basis: 'BasisFunction', K_solver: float, K_max: float) -> float:
@@ -448,7 +530,8 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
     def __init__(self, domain_bounds: Tuple[float, float, float, float],
                  guarantee_strategy: Optional['GuaranteeStrategy'] = None,
                  s_param: float = 1.0, K_solver: float = 2.0, K_max: float = 5.0,
-                 use_arap: bool = False, config: Optional[ProvablyGoodConfig] = None):
+                 use_arap: bool = False, config: Optional[ProvablyGoodConfig] = None,
+                 mask: Optional[np.ndarray] = None):
         """
         Args:
             domain_bounds: (x_min, x_max, y_min, y_max) 領域のバウンディングボックス
@@ -458,10 +541,11 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             K_max: 領域全体での歪み上限
             use_arap: ARAP エネルギーを使用するか（デフォルト: False）
             config: 論文準拠のパラメータ設定
+            mask: (H, W) の2値マスク配列。画像の有効領域を示す（オプション）
         """
         basis = GaussianRBF(s=s_param)
         if guarantee_strategy is None:
-            guarantee_strategy = Strategy2(domain_bounds)
+            guarantee_strategy = Strategy2(domain_bounds, mask=mask)
         super().__init__(basis=basis, guarantee_strategy=guarantee_strategy,
                         K_solver=K_solver, K_max=K_max, use_arap=use_arap, config=config)
         self.basis: GaussianRBF = basis
@@ -494,21 +578,72 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         self._frames[:, 0] = 1.0  # d_i = (1, 0) for all i
 
     def _update_hessian_term(self) -> None:
-        """ グリッドが更新されたときのみ呼ばれる内部メソッド """
+        """
+        グリッドが更新されたときのみ呼ばれる内部メソッド
+
+        MATLABの実装に従い、変形写像 f(x) = c * Phi(x) のヘッシアン（二階微分）を
+        数値微分で計算する。
+
+        MATLAB参照:
+        basishxx(:,i)=reshape(DGradient(reshape(basisg(1:2:end,i),res,res),2/res,2),[],1);
+        basishxy(:,i)=reshape(DGradient(reshape(basisg(1:2:end,i),res,res),2/res,1),[],1);
+        basishyy(:,i)=reshape(DGradient(reshape(basisg(2:2:end,i),res,res),2/res,1),[],1);
+        basishyx(:,i)=reshape(DGradient(reshape(basisg(2:2:end,i),res,res),2/res,2),[],1);
+
+        つまり、基底関数の勾配（一階微分）をさらに微分して二階微分を得る。
+        """
         if self.collocation_points is None:
             raise RuntimeError("Collocation points not initialized.")
+
         collocation_points = self.collocation_points
         N_basis = self.basis.get_basis_count()
-        hess = self.basis.hessian(collocation_points)
-        H_mat = np.transpose(hess, (0, 2, 3, 1)).reshape(-1, N_basis)
+        M = len(collocation_points)
 
-        # [修正点2] 積分(Eq.31)の近似のため、面積要素 (h^2) を掛けてスケーリングする
-        # これにより、hを細かくしてもエネルギーのスケールが不変になる
+        # 基底関数の勾配を計算（一階微分）
+        # grad_phi[m, j, k]: m番目の点での j番目の基底関数の k方向（x=0, y=1）への偏微分
+        grad_phi = self.basis.jacobian(collocation_points)  # (M, N_basis, 2)
+
+        # 数値微分でヘッシアンを計算
+        # ∂²φ_j/∂x² と ∂²φ_j/∂x∂y を計算するため、x方向に微小変位させた点での勾配を計算
+        eps = self.current_h * 0.01  # 微小変位（グリッド間隔の1%）
+
+        # x方向の数値微分用の点
+        coords_dx = collocation_points.copy()
+        coords_dx[:, 0] += eps
+        grad_phi_dx = self.basis.jacobian(coords_dx)
+
+        # y方向の数値微分用の点
+        coords_dy = collocation_points.copy()
+        coords_dy[:, 1] += eps
+        grad_phi_dy = self.basis.jacobian(coords_dy)
+
+        # 二階微分を数値計算
+        # ∂²φ/∂x² = (∂φ/∂x|_{x+ε} - ∂φ/∂x|_x) / ε
+        hess_xx = (grad_phi_dx[:, :, 0] - grad_phi[:, :, 0]) / eps  # (M, N_basis)
+        hess_xy = (grad_phi_dx[:, :, 1] - grad_phi[:, :, 1]) / eps  # (M, N_basis)
+        hess_yx = (grad_phi_dy[:, :, 0] - grad_phi[:, :, 0]) / eps  # (M, N_basis)
+        hess_yy = (grad_phi_dy[:, :, 1] - grad_phi[:, :, 1]) / eps  # (M, N_basis)
+
+        # ヘッシアンのフロベニウスノルムの二乗を計算
+        # ||H||²_F = (∂²u/∂x²)² + (∂²u/∂x∂y)² + (∂²u/∂y∂x)² + (∂²u/∂y²)²
+        # 変形 f = c * Phi なので、∂²f/∂x² = c * ∂²Phi/∂x²
+        # エネルギー E_bh = ∫ ||H_f||²_F dx = ∫ Σ_ij (∂²f/∂x_i∂x_j)² dx
+        #                 = Σ_d c_d^T (∫ Σ_ij (∂²Phi/∂x_i∂x_j)(∂²Phi/∂x_i∂x_j)^T dx) c_d
+
+        # 各グリッド点でのヘッシアン成分を結合
+        # H_mat[m*4 + k, j] = k番目のヘッシアン成分（xx=0, xy=1, yx=2, yy=3）
+        H_mat = np.zeros((M * 4, N_basis))
+        H_mat[0::4, :] = hess_xx
+        H_mat[1::4, :] = hess_xy
+        H_mat[2::4, :] = hess_yx
+        H_mat[3::4, :] = hess_yy
+
+        # 積分の離散近似: Σ_m (面積要素) * ||H||²
+        # H_term = Φ^T Φ * (面積要素)
         area_element = self.current_h ** 2
         self._H_term = (H_mat.T @ H_mat) * area_element
 
         # Frame も再初期化
-        M = len(collocation_points)
         self._frames = np.zeros((M, 2))
         self._frames[:, 0] = 1.0
 
@@ -524,7 +659,9 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         """
         [UI連携: onMouseMove]
         マウスが動くたびに呼ばれる。SOCP 制約付き最適化で論文通りに解く。
-        論文に存在しない独自のフェールセーフ（L2正則化、係数制限、Active Set制限）は完全に削除。
+        
+        【重要な追加】Strategy 2 の場合、ドラッグ中も係数が大きくなりすぎたら
+        グリッドを細分化して裏返りを防ぐ。
         """
         if self.collocation_points is None:
             raise RuntimeError("Collocation points not initialized.")
@@ -667,44 +804,68 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
                 problem.solve(solver=cp.CLARABEL, verbose=False, max_iter=1000)
 
                 if problem.status == "infeasible":
-                    print(f"[SOCP] Problem infeasible! Attempting frame re-extraction...")
+                    print(f"[SOCP] Problem infeasible at iteration {iteration}! Attempting frame re-extraction...")
 
                     # 論文 Section 7 Discussion: 制約なし問題を解いてフレームを再抽出
                     problem_relaxed = cp.Problem(objective, pos_constraints)
                     problem_relaxed.solve(solver=cp.CLARABEL, verbose=False)
 
                     if problem_relaxed.status in ["optimal", "optimal_inaccurate"] and c_var.value is not None:
-                        # 【修正】フレーム(d_i)だけを更新し、係数(self.coefficients)は更新しない！
-                        # これにより、ジャンプせずに「安全な変形限界」で止まる
-                        temp_coeffs = c_var.value
-                        old_coeffs = self.coefficients
-
-                        # 一時的に係数を適用して Jacobian を評価し、フレームを更新
-                        self.coefficients = temp_coeffs
+                        # 【重要な修正】制約なし解を係数として採用し、そこからフレームを抽出
+                        # これにより、次のイテレーションで実行可能な領域に入る
+                        self.coefficients = c_var.value
                         self.update_frames(grid)
-                        self.coefficients = old_coeffs  # 元の安全な値に戻す（ジャンプを防ぐ）
 
-                        print(f"[SOCP] Extracted new frames. Retrying in next iteration.")
-                        continue  # 次のイテレーションへ
+                        print(f"[SOCP] Extracted new frames from relaxed solution. Continuing...")
+                        # 次のイテレーションで制約付き問題を再試行
+                        continue
                     else:
-                        print(f"[SOCP] Even relaxed problem failed. Freezing mesh.")
-                        break  # リカバリ不可能なため、ループを抜けて現在の安全な形状を維持
+                        print(f"[SOCP] Even relaxed problem failed (status={problem_relaxed.status}). Keeping current state.")
+                        break  # 現在の係数を維持
 
-                # 最適化が最適解以外（エラーなど）で終了した場合も維持
+                # 最適化が最適解以外（エラーなど）で終了した場合
                 if problem.status not in ["optimal", "optimal_inaccurate"]:
                     print(f"[SOCP] WARNING: status={problem.status}, active_set={len(active_indices)}")
-                    break  # 安全な形状を維持
+                    # 実行可能でない場合は係数を更新しない
+                    if problem.status != "infeasible":
+                        break
 
-                # 【重要】正常に解け、歪み制約をクリアした保証のある係数のみを適用する
-                if c_var.value is not None:
+                # 【重要】正常に解けた場合のみ係数を更新
+                if problem.status in ["optimal", "optimal_inaccurate"] and c_var.value is not None:
                     self.coefficients = c_var.value
+                    # 正常終了時、次ステップのためにフレームを更新
+                    self.update_frames(grid)
 
             except Exception as e:
                 print(f"[SOCP] ERROR: {e}")
-                break  # エラー発生時も安全な形状を維持
+                import traceback
+                traceback.print_exc()
+                break  # エラー発生時は現在の係数を維持
 
-            # 正常終了時、次ステップのためにフレームを更新
-            self.update_frames(grid)
+        # 【重要】Strategy 2 の場合、ドラッグ中も係数をチェック
+        if isinstance(self.strategy, Strategy2) and self.coefficients is not None:
+            # 現在の係数で必要な h を計算
+            strict_h = self.strategy.get_strict_h_after_drag(
+                basis=self.basis,
+                K_solver=self.K_solver,
+                K_max=self.K_max,
+                c=self.coefficients
+            )
+            
+            # 現在のグリッドが粗すぎる場合、即座に細分化
+            if strict_h < self.current_h:
+                print(f"[Strategy2] Grid too coarse during drag! Refining... (h: {self.current_h:.4f} -> {strict_h:.4f})")
+                
+                # グリッドの再生成
+                self.current_h = strict_h
+                self.collocation_points = self.strategy.generate_grid(strict_h)
+                
+                # グリッド依存の行列を再計算
+                self._update_hessian_term()
+                self._active_indices = np.array([], dtype=int)
+                
+                # 次のフレームで新しいグリッドを使用
+                return  # この update_drag は中断し、次回から新グリッドで継続
 
     def end_drag(self, target_handles: np.ndarray) -> bool:
         """

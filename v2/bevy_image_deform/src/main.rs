@@ -177,8 +177,8 @@ fn setup(
     // Strategy 1 を使用
     let strategy = "strategy1".to_string();
     let strategy_params = serde_json::json!({
-        "collocation_resolution": 200,
-        "K_on_collocation": 6
+        "collocation_resolution": 500,
+        "K_on_collocation": 3
     }).to_string();
 
     let _ = tx_cmd.try_send(PyCommand::InitializeDomain {
