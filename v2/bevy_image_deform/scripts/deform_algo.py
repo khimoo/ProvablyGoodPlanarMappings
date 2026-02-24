@@ -208,7 +208,7 @@ class ProvablyGoodPlanarMapping(ABC):
     論文「Provably Good Planar Mappings」のコアアルゴリズム（Algorithm 1）
     を提供する抽象基底クラス。
     """
-    def __init__(self, basis: 'BasisFunction', strategy: 'Strategy2', K_solver: float = 2.0, K_max: float = 5.0, 
+    def __init__(self, basis: 'BasisFunction', strategy: 'Strategy2', K_solver: float = 2.0, K_max: float = 5.0,
                  distortion_type: str = 'isometric'):
         self.basis = basis
         self.strategy = strategy
@@ -233,7 +233,7 @@ class ProvablyGoodPlanarMapping(ABC):
         # Active Set とフレームのキャッシュ
         self._active_indices: np.ndarray = np.array([], dtype=int)
         self._frames: Optional[np.ndarray] = None  # 論文 Eq. 27 のフレームベクトル d_i
-        
+
         # Conformal distortion用のδパラメータ (Eq. 12)
         self._delta_conf: float = 0.1
 
@@ -252,34 +252,34 @@ class ProvablyGoodPlanarMapping(ABC):
         # cは(2, N)、grad_phiは(M, N, 2)。J[m, d, k] = sum_j c[d, j] * grad_phi[m, j, k]
         J = np.einsum('dj, mjk -> mdk', self.coefficients, grad_phi)
         return J
-    
+
     def compute_J_S_and_J_A(self, coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         論文 Eq. 19-20: Jacobianを similarity と anti-similarity 成分に分解
         J_S f(x) = (∇u(x) + I∇v(x)) / 2
         J_A f(x) = (∇u(x) - I∇v(x)) / 2
-        
+
         Returns:
             J_S: shape (M, 2) - similarity part
             J_A: shape (M, 2) - anti-similarity part
         """
         if self.coefficients is None:
             raise RuntimeError("マッピング係数が初期化されていません。")
-        
+
         grad_phi = self.basis.jacobian(coords)  # (M, N, 2)
-        
+
         # ∇u と ∇v を計算
         grad_u = np.einsum('j, mjk -> mk', self.coefficients[0, :], grad_phi)  # (M, 2)
         grad_v = np.einsum('j, mjk -> mk', self.coefficients[1, :], grad_phi)  # (M, 2)
-        
+
         # I は π/2 反時計回りの回転行列: [[0, -1], [1, 0]]
         I_grad_v = np.stack([-grad_v[:, 1], grad_v[:, 0]], axis=1)  # (M, 2)
-        
+
         J_S = (grad_u + I_grad_v) / 2.0
         J_A = (grad_u - I_grad_v) / 2.0
-        
+
         return J_S, J_A
-    
+
     def compute_singular_values_from_J_S_J_A(self, J_S: np.ndarray, J_A: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         論文 Eq. 20: J_S と J_A から特異値を計算
@@ -288,19 +288,19 @@ class ProvablyGoodPlanarMapping(ABC):
         """
         norm_J_S = np.linalg.norm(J_S, axis=1)
         norm_J_A = np.linalg.norm(J_A, axis=1)
-        
+
         Sigma = norm_J_S + norm_J_A
         sigma = np.abs(norm_J_S - norm_J_A)
-        
+
         return Sigma, sigma
-    
+
     def compute_distortion(self, coords: np.ndarray) -> np.ndarray:
         """
         指定された座標での歪みを計算
         """
         J_S, J_A = self.compute_J_S_and_J_A(coords)
         Sigma, sigma = self.compute_singular_values_from_J_S_J_A(J_S, J_A)
-        
+
         if self.distortion_type == 'isometric':
             # D_iso(x) = max{Σ(x), 1/σ(x)}
             sigma_safe = np.where(sigma > 1e-8, sigma, 1e-8)
@@ -311,7 +311,7 @@ class ProvablyGoodPlanarMapping(ABC):
             distortion = Sigma / sigma_safe
         else:
             raise ValueError(f"Unknown distortion type: {self.distortion_type}")
-        
+
         return distortion
     @abstractmethod
     def initialize_mapping(self, src_handles: np.ndarray) -> None:
@@ -319,7 +319,7 @@ class ProvablyGoodPlanarMapping(ABC):
 
     @abstractmethod
     def update_mapping(self, target_handles: np.ndarray) -> None:
-        """ 
+        """
         論文 Algorithm 1: 単一の最適化ステップを実行
         SOCP を使って係数 c を更新する
         """
@@ -331,12 +331,12 @@ class ProvablyGoodPlanarMapping(ABC):
         pass
 
 class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
-    def __init__(self, domain_bounds: Tuple[float, float, float, float], s_param: float = 1.0, 
+    def __init__(self, domain_bounds: Tuple[float, float, float, float], s_param: float = 1.0,
                  K_solver: float = 2.0, K_max: float = 5.0, distortion_type: str = 'isometric',
                  use_arap: bool = False):
         basis = GaussianRBF(s=s_param)
         strategy = Strategy2(domain_bounds)
-        super().__init__(basis=basis, strategy=strategy, K_solver=K_solver, K_max=K_max, 
+        super().__init__(basis=basis, strategy=strategy, K_solver=K_solver, K_max=K_max,
                         distortion_type=distortion_type)
         self.basis: GaussianRBF = basis
         self.use_arap = use_arap
@@ -367,10 +367,10 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         M = len(self.collocation_points)
         self._frames = np.zeros((M, 2))
         self._frames[:, 0] = 1.0  # d_i = (1, 0)
-        
+
         # Active set を空で初期化
         self._active_indices = np.array([], dtype=int)
-        
+
         # ARAP エネルギー用のサンプル点 (論文 Eq. 32)
         if self.use_arap:
             # 等間隔にサンプル点を配置
@@ -379,7 +379,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             self._arap_points = self.collocation_points[indices]
             self._arap_frames = np.zeros((n_samples, 2))
             self._arap_frames[:, 0] = 1.0
-        
+
         print(f"Initialized with {len(self.collocation_points)} collocation points (h={self.current_h:.4f})")
 
     def _update_hessian_term(self) -> None:
@@ -402,26 +402,26 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         """
         if self.collocation_points is None:
             return np.array([], dtype=int)
-        
+
         # グリッドの形状を推定（正方形グリッドを仮定）
         n_points = len(distortions)
         grid_size = int(np.sqrt(n_points))
-        
+
         if grid_size * grid_size != n_points:
             # 正方形でない場合は全ての点を候補とする
             return np.arange(n_points)
-        
+
         # 2Dグリッドに reshape
         dist_grid = distortions.reshape(grid_size, grid_size)
-        
+
         # 局所最大値を見つける（8近傍）
         local_max_mask = np.zeros_like(dist_grid, dtype=bool)
-        
+
         for i in range(grid_size):
             for j in range(grid_size):
                 val = dist_grid[i, j]
                 is_max = True
-                
+
                 # 8近傍をチェック
                 for di in [-1, 0, 1]:
                     for dj in [-1, 0, 1]:
@@ -434,11 +434,11 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
                                 break
                     if not is_max:
                         break
-                
+
                 local_max_mask[i, j] = is_max
-        
+
         return np.where(local_max_mask.ravel())[0]
-    
+
     def _update_active_set(self) -> None:
         """
         論文 Section 5.3: Active set の更新（改良版）
@@ -449,40 +449,40 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         """
         if self.collocation_points is None:
             return
-        
+
         grid = self.collocation_points
         distortions = self.compute_distortion(grid)
-        
+
         # 折り畳みチェック（σ ≤ 0）と予防的チェック（σ が小さい）
         J_S, J_A = self.compute_J_S_and_J_A(grid)
         _, sigma = self.compute_singular_values_from_J_S_J_A(J_S, J_A)
         is_foldover = sigma <= 1e-8
         is_near_foldover = (sigma > 1e-8) & (sigma < 0.1)  # 予防的に追加
-        
+
         # 局所最大値を見つける
         local_max_indices = self._find_local_maxima(distortions)
-        
+
         # 現在の active set を boolean mask に変換
         active_mask = np.zeros(len(grid), dtype=bool)
         active_mask[self._active_indices] = True
-        
+
         # 追加: 局所最大値で K_high を超えるもの、折り畳み、または折り畳みに近いもの
         is_above_high = distortions > self.K_high
         should_add = np.zeros(len(grid), dtype=bool)
         should_add[local_max_indices] = is_above_high[local_max_indices]
         should_add |= is_foldover
         should_add |= is_near_foldover  # 予防的に追加
-        
+
         active_mask |= should_add
-        
+
         # 削除: K_low を下回り、かつ折り畳みでなく、σ が十分大きいもの
         is_below_low = distortions < self.K_low
         is_safe = sigma > 0.5  # σ が十分大きい
         should_remove = is_below_low & ~is_foldover & is_safe
         active_mask &= ~should_remove
-        
+
         self._active_indices = np.where(active_mask)[0]
-        
+
         # 論文 Section 5.3: 安定性のため、等間隔に配置された点を常に active に保つ
         # ここでは簡単のため、グリッドの角と中心を常に active にする
         if len(grid) > 0:
@@ -493,7 +493,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
                 center = grid_size * (grid_size // 2) + (grid_size // 2)
                 stable_points = corners + [center]
                 self._active_indices = np.unique(np.concatenate([self._active_indices, stable_points]))
-        
+
         # Active set が大きすぎる場合は制限（パフォーマンスのため）
         max_active = 5000  # 最大500点
         if len(self._active_indices) > max_active:
@@ -506,7 +506,7 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
     def update_mapping(self, target_handles: np.ndarray) -> None:
         """
         論文 Algorithm 1: SOCP を使った単一の最適化ステップ
-        
+
         Optimization (論文 Section 5):
         - Active set の更新
         - SOCP 問題の構築と解決
@@ -514,40 +514,40 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         """
         if self.collocation_points is None or self._B_mat is None or self._H_term is None:
             raise RuntimeError("Mapping not initialized.")
-        
+
         # === Active Set の更新 ===
         self._update_active_set()
-        
+
         grid = self.collocation_points
         N_basis = self.basis.get_basis_count()
         n_handles = target_handles.shape[0]
         active_indices = self._active_indices
         n_active = len(active_indices)
-        
+
         # === SOCP 問題の構築 ===
         # 変数: c (2 x N_basis の係数行列を flatten)
         c_var = cp.Variable((2, N_basis))
-        
+
         constraints = []
         objective_terms = []
-        
+
         # --- 位置拘束エネルギー (Eq. 29-30) ---
         # E_pos = Σ_l ||f(p_l) - q_l|| = Σ_l ||Σ_i c_i f_i(p_l) - q_l||
         B_mat = self._B_mat  # shape: (n_handles, N_basis)
-        
+
         # 各ハンドルに対して補助変数 r_l を導入（非負）
         r_vars = []
         for l in range(n_handles):
             r_l = cp.Variable(nonneg=True)
             r_vars.append(r_l)
-            
+
             # ||c @ B_mat[l, :] - q_l|| <= r_l (Eq. 30)
             # c @ B_mat[l, :] は (2,) ベクトル
             residual = c_var @ B_mat[l, :] - target_handles[l, :]
             constraints.append(cp.norm(residual, 2) <= r_l)
-            
+
             objective_terms.append(self._W_P * r_l)
-        
+
         # --- 正則化エネルギー: Biharmonic (Eq. 31) ---
         # E_bh = ||H_mat @ c.T||_F^2 (Frobenius norm)
         # H_term = H_mat.T @ H_mat が事前計算済み
@@ -555,105 +555,105 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
         for d in range(2):
             bh_term = cp.quad_form(c_var[d, :], self._H_term)
             objective_terms.append(self._lambda_reg * self._W_R * bh_term)
-        
+
         # --- 正則化エネルギー: ARAP (Eq. 33) ---
         # E_arap = Σ_s (||J_A f(r_s)||^2 + ||J_S f(r_s) - d_s||^2)
         if self.use_arap and self._arap_points is not None:
             grad_phi_arap = self.basis.jacobian(self._arap_points)  # (n_arap, N_basis, 2)
-            
+
             for s in range(len(self._arap_points)):
                 grad_phi_s = grad_phi_arap[s, :, :]  # (N_basis, 2)
-                
+
                 # ∇u と ∇v
                 grad_u = c_var[0, :] @ grad_phi_s
                 grad_v = c_var[1, :] @ grad_phi_s
-                
+
                 # I∇v: I = [[0, -1], [1, 0]]
                 I_grad_v = cp.hstack([-grad_v[1], grad_v[0]])
-                
+
                 # J_S と J_A
                 J_S = (grad_u + I_grad_v) / 2.0
                 J_A = (grad_u - I_grad_v) / 2.0
-                
+
                 # フレーム d_s
                 d_s = self._arap_frames[s, :]
-                
+
                 # ||J_A||^2 + ||J_S - d_s||^2
                 arap_term = cp.sum_squares(J_A) + cp.sum_squares(J_S - d_s)
                 objective_terms.append(self._lambda_reg * arap_term)
-        
+
         # --- 歪み制約 (Active set のみ) ---
         if n_active > 0:
             # Active な collocation points での基底関数の勾配を計算
             grad_phi_active = self.basis.jacobian(grid[active_indices])  # (n_active, N_basis, 2)
-            
+
             for idx, active_idx in enumerate(active_indices):
                 grad_phi_i = grad_phi_active[idx, :, :]  # (N_basis, 2)
-                
+
                 # ∇u と ∇v を計算
                 grad_u = c_var[0, :] @ grad_phi_i  # (2,) ベクトル
                 grad_v = c_var[1, :] @ grad_phi_i  # (2,) ベクトル
-                
+
                 # I∇v を計算: I = [[0, -1], [1, 0]]
                 I_grad_v = cp.hstack([-grad_v[1], grad_v[0]])
-                
+
                 # J_S と J_A (Eq. 19)
                 J_S = (grad_u + I_grad_v) / 2.0
                 J_A = (grad_u - I_grad_v) / 2.0
-                
+
                 # フレームベクトル d_i (前ステップから)
                 d_i = self._frames[active_idx, :]
-                
+
                 if self.distortion_type == 'isometric':
                     # 論文 Eq. 21-26: Isometric distortion constraints
                     # 補助変数 t_i, s_i (非負)
                     t_i = cp.Variable(nonneg=True)
                     s_i = cp.Variable(nonneg=True)
-                    
+
                     # Eq. 23a-c
                     constraints.append(cp.norm(J_S, 2) <= t_i)
                     constraints.append(cp.norm(J_A, 2) <= s_i)
                     constraints.append(t_i + s_i <= self.K_solver)
-                    
+
                     # Eq. 26 (convexified version of Eq. 22)
                     # J_S @ d_i は内積なのでスカラー
                     constraints.append(J_S @ d_i - s_i >= 1.0 / self.K_solver)
-                    
+
                 elif self.distortion_type == 'conformal':
                     # 論文 Eq. 28: Conformal distortion constraints
                     K = self.K_solver
                     delta = self._delta_conf
-                    
+
                     # J_S @ d_i は内積（スカラー）
                     J_S_dot_d = J_S @ d_i
-                    
+
                     # Eq. 28a
                     constraints.append(
                         cp.norm(J_A, 2) <= ((K - 1) / (K + 1)) * J_S_dot_d
                     )
-                    
+
                     # Eq. 28b
                     constraints.append(
                         cp.norm(J_A, 2) <= J_S_dot_d - delta
                     )
-        
+
         # === 目的関数 ===
         objective = cp.Minimize(cp.sum(objective_terms))
-        
+
         # === SOCP を解く ===
         problem = cp.Problem(objective, constraints)
-        
+
         try:
             problem.solve(solver=cp.ECOS, verbose=False)
-            
+
             if problem.status not in ["optimal", "optimal_inaccurate"]:
                 warnings.warn(f"SOCP solver status: {problem.status}. Objective: {problem.value}")
                 # 解が見つからない場合は係数を更新しない
                 return
-            
+
             # 係数を更新
             self.coefficients = c_var.value
-            
+
             # デバッグ: 制約の充足状況を確認
             if n_active > 0:
                 violations = []
@@ -664,18 +664,18 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
                             violations.append(viol)
                 if violations:
                     warnings.warn(f"Constraint violations detected: max={max(violations):.6f}")
-            
+
         except Exception as e:
             warnings.warn(f"SOCP solver failed: {e}")
             return
-        
+
         # === Postprocessing: フレームの更新 (Eq. 27) ===
         if n_active > 0:
             J_S_active, _ = self.compute_J_S_and_J_A(grid[active_indices])
             norm_J_S = np.linalg.norm(J_S_active, axis=1, keepdims=True)
             norm_J_S = np.where(norm_J_S > 1e-8, norm_J_S, 1.0)  # ゼロ除算回避
             self._frames[active_indices] = J_S_active / norm_J_S
-        
+
         # ARAP フレームの更新
         if self.use_arap and self._arap_points is not None:
             J_S_arap, _ = self.compute_J_S_and_J_A(self._arap_points)
@@ -714,10 +714,10 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             M = len(self.collocation_points)
             self._frames = np.zeros((M, 2))
             self._frames[:, 0] = 1.0
-            
+
             # Active set をリセット
             self._active_indices = np.array([], dtype=int)
-            
+
             # ARAP サンプル点も更新
             if self.use_arap:
                 n_samples = min(100, len(self.collocation_points))
@@ -734,3 +734,168 @@ class BetterFitwithGaussian(ProvablyGoodPlanarMapping):
             return True
 
         return False
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
+from scipy.spatial import Delaunay
+
+def test_cross_two_arms_folding():
+    print("--- 論文検証テスト: 長い十字 (上腕と左腕の2点制御) の重ね合わせテスト ---")
+
+    # 1. ドメイン（厚みのある長い十字）の定義
+    L = 10.0
+    W = 1.0
+    domain_bounds = (-L-1, L+1, -L-1, L+1)
+
+    def is_inside_cross(pts, l, w, margin=0.1):
+        x, y = pts[:, 0], pts[:, 1]
+        in_horiz = (np.abs(x) <= l + margin) & (np.abs(y) <= w/2 + margin)
+        in_vert  = (np.abs(x) <= w/2 + margin) & (np.abs(y) <= l + margin)
+        return in_horiz | in_vert
+
+    # 2. ハンドル（制御点）の設定
+    src_handles = []
+    # 0~2: 右腕 (固定)
+    src_handles.extend([[L, W/3], [L, 0], [L, -W/3]])
+    # 3~5: 下腕 (固定)
+    src_handles.extend([[W/3, -L], [0, -L], [-W/3, -L]])
+    # 6: 中央 (固定)
+    src_handles.append([0, 0])
+
+    # 7: 上腕先端 (★動かす: 反時計回りに45度倒す)
+    src_handles.append([0, L])
+    # 8: 左腕先端 (★動かす: 時計回りに45度持ち上げる)
+    src_handles.append([-L, 0])
+
+    src_handles = np.array(src_handles)
+
+    # 3. マッピングの初期化 (くにゃっと曲げるための設定)
+    K_solver = 15.0  # 緩めの制約でソルバーの計算限界を防ぐ
+    K_max = 30.0
+
+    mapping = BetterFitwithGaussian(
+        domain_bounds=domain_bounds,
+        s_param=6.0,         # ★影響範囲を広げて腕全体をしならせる
+        K_solver=K_solver,
+        K_max=K_max,
+        distortion_type='isometric',
+        use_arap=True        # ★ARAP正則化でゴムのような自然な曲がりを有効化
+    )
+
+    mapping.initialize_mapping(src_handles)
+
+    # 十字の内部のみにCollocation pointsを制限する
+    pts = mapping.collocation_points
+    mask = is_inside_cross(pts, L, W)
+    mapping.collocation_points = pts[mask]
+
+    mapping._update_hessian_term()
+    M = len(mapping.collocation_points)
+    mapping._frames = np.zeros((M, 2))
+    mapping._frames[:, 0] = 1.0
+    mapping._active_indices = np.array([], dtype=int)
+    print(f"ドメイン内の有効な選点数: {M}")
+
+    # メッシュの蜘蛛の巣化防止 (三角形マスク)
+    tri = Delaunay(mapping.collocation_points)
+    triang = mtri.Triangulation(mapping.collocation_points[:, 0], mapping.collocation_points[:, 1], tri.simplices)
+    x_cents = np.mean(mapping.collocation_points[triang.triangles, 0], axis=1)
+    y_cents = np.mean(mapping.collocation_points[triang.triangles, 1], axis=1)
+    centroids = np.column_stack([x_cents, y_cents])
+    is_inside = is_inside_cross(centroids, L, W, margin=0.0)
+    triang.set_mask(~is_inside)
+
+    # 4. 最適化ステップの実行
+    steps = 30  # ★時間をかけてゆっくり曲げることでソルバーの破綻を防ぐ
+    print(f"\n上腕と左腕を互いに寄せるように {steps} ステップで45度ずつ回転させます...")
+
+    top_arm_src = src_handles[7].copy()
+    left_arm_src = src_handles[8].copy()
+
+    for i in range(1, steps + 1):
+        # 上腕は反時計回り (+45度) へ
+        theta_top = (np.pi / 4) * (i / steps)
+        rot_top = np.array([
+            [np.cos(theta_top), -np.sin(theta_top)],
+            [np.sin(theta_top),  np.cos(theta_top)]
+        ])
+
+        # 左腕は時計回り (-45度) へ
+        theta_left = - (np.pi / 4) * (i / steps)
+        rot_left = np.array([
+            [np.cos(theta_left), -np.sin(theta_left)],
+            [np.sin(theta_left),  np.cos(theta_left)]
+        ])
+
+        current_target = np.copy(src_handles)
+        current_target[7] = np.dot(rot_top, top_arm_src)
+        current_target[8] = np.dot(rot_left, left_arm_src)
+
+        mapping.update_mapping(current_target)
+        if i % 5 == 0 or i == steps:
+            print(f"  Step {i}/{steps} 完了 | 上腕: +{np.degrees(theta_top):.1f}度, 左腕: {np.degrees(theta_left):.1f}度 | Active set size: {len(mapping._active_indices)}")
+
+    # 5. 数学的保証の検証
+    print("\n--- 数学的保証の検証 (Assertions) ---")
+    colloc_pts = mapping.collocation_points
+    J = mapping.evaluate_jacobian(colloc_pts)
+
+    det_J = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+    min_det = np.min(det_J)
+    print(f"最小ヤコビアン行列式: {min_det:.6f}")
+    if min_det <= 0:
+        print("  [警告] 一部の点で折り畳みが発生しています")
+    else:
+        print("  ✓ Fold-over free 検証クリア")
+
+    # 6. 可視化
+    distortions = mapping.compute_distortion(colloc_pts)
+    def_pts = mapping.evaluate_map(colloc_pts)
+    def_handles = mapping.evaluate_map(src_handles)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+    # オリジナル形状
+    ax = axes[0]
+    ax.set_title("Original Shape (10:1 Cross, 2 Moving Handles)")
+    ax.triplot(triang, color='lightgray', linewidth=0.5)
+
+    # ハンドルの描画
+    ax.scatter(src_handles[0:7, 0], src_handles[0:7, 1], c='gray', s=50, label='Fixed Handles')
+    ax.scatter(src_handles[7, 0], src_handles[7, 1], c='blue', s=80, edgecolors='k', zorder=5, label='Top Handle (Move Left)')
+    ax.scatter(src_handles[8, 0], src_handles[8, 1], c='green', s=80, edgecolors='k', zorder=5, label='Left Handle (Move Up)')
+
+    ax.set_aspect('equal')
+    ax.legend(loc='lower right')
+
+    # 変形後
+    ax = axes[1]
+    ax.set_title(f"Deformed Shape (45 deg rotations, K_solver={K_solver})")
+
+    triang_def = mtri.Triangulation(def_pts[:, 0], def_pts[:, 1], triang.triangles, mask=triang.mask)
+
+    tc = ax.tripcolor(triang_def, facecolors=np.mean(distortions[triang.triangles], axis=1),
+                      cmap='YlOrRd', vmin=1.0, vmax=K_solver, edgecolors='none')
+    fig.colorbar(tc, ax=ax, label='Isometric Distortion')
+
+    ax.triplot(triang_def, color='black', linewidth=0.2, alpha=0.5)
+
+    # 最終ターゲット座標の計算
+    final_target = np.copy(src_handles)
+    final_target[7] = np.dot(np.array([[np.cos(np.pi/4), -np.sin(np.pi/4)], [np.sin(np.pi/4), np.cos(np.pi/4)]]), top_arm_src)
+    final_target[8] = np.dot(np.array([[np.cos(-np.pi/4), -np.sin(-np.pi/4)], [np.sin(-np.pi/4), np.cos(-np.pi/4)]]), left_arm_src)
+
+    # 実際の到達位置とターゲット位置
+    ax.scatter(def_handles[0:7, 0], def_handles[0:7, 1], c='gray', s=50)
+    ax.scatter(def_handles[7, 0], def_handles[7, 1], c='blue', s=80, edgecolors='k', zorder=5, label='Actual Top Handle')
+    ax.scatter(def_handles[8, 0], def_handles[8, 1], c='green', s=80, edgecolors='k', zorder=5, label='Actual Left Handle')
+    ax.scatter(final_target[7:9, 0], final_target[7:9, 1], c='red', marker='x', s=100, linewidth=2, zorder=5, label='Target Goal (Overlapped)')
+
+    ax.set_aspect('equal')
+    ax.legend(loc='lower right')
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    test_cross_two_arms_folding()
