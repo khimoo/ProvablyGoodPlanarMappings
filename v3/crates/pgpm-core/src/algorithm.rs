@@ -208,9 +208,12 @@ impl Algorithm {
             let (gx, gy) = self.basis.gradient(*pt);
 
             for i in 0..n {
-                phi[(idx, i)] = val[i];
-                grad_phi_x[(idx, i)] = gx[i];
-                grad_phi_y[(idx, i)] = gy[i];
+                // Guard against NaN/Inf from basis functions (can happen
+                // with shape-aware bases near domain boundaries where
+                // geodesic distances are infinite).
+                phi[(idx, i)] = if val[i].is_finite() { val[i] } else { 0.0 };
+                grad_phi_x[(idx, i)] = if gx[i].is_finite() { gx[i] } else { 0.0 };
+                grad_phi_y[(idx, i)] = if gy[i].is_finite() { gy[i] } else { 0.0 };
             }
         }
 

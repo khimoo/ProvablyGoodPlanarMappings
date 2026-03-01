@@ -12,6 +12,7 @@ pub mod distortion;
 pub mod active_set;
 pub mod solver;
 pub mod algorithm;
+pub mod geodesic;
 
 pub use types::*;
 pub use basis::BasisFunction;

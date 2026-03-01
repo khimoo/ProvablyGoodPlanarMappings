@@ -88,6 +88,46 @@ pub fn solve_socp(
     }
 }
 
+/// Build Clarabel solver settings with relaxed tolerances.
+///
+/// The default Clarabel tolerances (1e-8) are too tight for SOCP problems
+/// constructed from pixel-coordinate-scale domains (e.g. 1000×1000 images).
+/// The constraint matrix mixes basis function gradients (small values, ~1/s²)
+/// with coordinate-scale position constraints, leading to poor conditioning.
+///
+/// Relaxing to 1e-6 / 1e-5 is standard practice for geometric optimization
+/// SOCPs where moderate precision suffices.
+fn make_solver_settings() -> DefaultSettings<f64> {
+    DefaultSettings {
+        verbose: false,
+        // Relax convergence tolerances for numerical stability
+        tol_gap_abs: 1e-5,
+        tol_gap_rel: 1e-5,
+        tol_feas: 1e-5,
+        // Relax infeasibility detection so near-feasible problems
+        // aren't prematurely declared infeasible
+        tol_infeas_abs: 1e-5,
+        tol_infeas_rel: 1e-5,
+        // Relax "AlmostSolved" reduced tolerances
+        reduced_tol_gap_abs: 1e-3,
+        reduced_tol_gap_rel: 1e-3,
+        reduced_tol_feas: 1e-2,
+        // Allow more equilibration iterations for better scaling
+        equilibrate_max_iter: 50,
+        // Widen the equilibration scaling range to handle
+        // the large scale differences in the constraint matrix
+        equilibrate_min_scaling: 1e-6,
+        equilibrate_max_scaling: 1e+6,
+        // Increase static regularization to stabilize the KKT system
+        static_regularization_enable: true,
+        static_regularization_constant: 1e-7,
+        // Increase iteration limit in case the relaxed tolerances
+        // need more iterations to converge
+        max_iter: 500,
+        ..DefaultSettings::default()
+    }
+}
+
 /// Collect unique active point indices from Z' ∪ Z''.
 fn collect_active_indices(state: &AlgorithmState) -> Vec<usize> {
     let mut indices: Vec<usize> = state.active_set.clone();
@@ -142,7 +182,7 @@ fn build_and_solve_isometric(
 
     // P: quadratic objective (regularization energy)
     // q_reg: linear objective from ARAP regularization
-    let (p_mat, q_reg) = build_regularization(
+    let (mut p_mat, q_reg) = build_regularization(
         basis, state, params, precomputed, n_basis, n_vars,
     );
 
@@ -372,13 +412,29 @@ fn build_and_solve_isometric(
     // Convert to clarabel format and solve
     let (a_csc, b_arr) = sparse_rows_to_csc(&constraint_rows, &b_vec, n_vars);
 
+    // Sanity check: detect NaN/Inf in problem data before solving.
+    // These corrupt the KKT factorization and produce NaN immediately.
+    check_problem_data(&q, &a_csc, &b_arr, &p_mat)?;
+
+    // Add diagonal regularization to P for numerical stability.
+    // This prevents the P matrix from being (near-)zero when lambda_reg
+    // is very small, which causes Clarabel to struggle with the KKT system.
+    // Use a larger value for coefficient variables (first 2*n_basis) to
+    // improve conditioning, and a smaller value for auxiliary variables.
+    let eps_coeff = 1e-6;
+    let eps_aux = 1e-8;
+    for i in 0..n_vars {
+        if i < 2 * n_basis {
+            p_mat[(i, i)] += eps_coeff;
+        } else {
+            p_mat[(i, i)] += eps_aux;
+        }
+    }
+
     // P matrix (upper triangular)
     let p_csc = dense_to_csc_upper_tri(&p_mat);
 
-    let settings = DefaultSettings {
-        verbose: false,
-        ..DefaultSettings::default()
-    };
+    let settings = make_solver_settings();
 
     let mut solver = DefaultSolver::new(&p_csc, &q, &a_csc, &b_arr, &cones, settings);
 
@@ -436,7 +492,7 @@ fn build_and_solve_conformal(
         q[2 * n_basis + l] = 1.0;
     }
 
-    let (p_mat, q_reg) = build_regularization(
+    let (mut p_mat, q_reg) = build_regularization(
         basis, state, params, precomputed, n_basis, n_vars,
     );
 
@@ -603,12 +659,21 @@ fn build_and_solve_conformal(
 
     // Convert and solve
     let (a_csc, b_arr) = sparse_rows_to_csc(&constraint_rows, &b_vec, n_vars);
+
+    // Add diagonal regularization to P for numerical stability.
+    let eps_coeff = 1e-6;
+    let eps_aux = 1e-8;
+    for i in 0..n_vars {
+        if i < 2 * n_basis {
+            p_mat[(i, i)] += eps_coeff;
+        } else {
+            p_mat[(i, i)] += eps_aux;
+        }
+    }
+
     let p_csc = dense_to_csc_upper_tri(&p_mat);
 
-    let settings = DefaultSettings {
-        verbose: false,
-        ..DefaultSettings::default()
-    };
+    let settings = make_solver_settings();
 
     let mut solver = DefaultSolver::new(&p_csc, &q, &a_csc, &b_arr, &cones, settings);
 
@@ -888,4 +953,44 @@ fn dense_to_csc_upper_tri(mat: &DMatrix<f64>) -> CscMatrix<f64> {
     }
 
     CscMatrix::new(n, n, colptr, rowval, nzval)
+}
+
+/// Check problem data for NaN/Inf values that would corrupt the solver.
+fn check_problem_data(
+    q: &[f64],
+    a_csc: &CscMatrix<f64>,
+    b: &[f64],
+    p: &DMatrix<f64>,
+) -> Result<(), SolverError> {
+    for (i, &val) in q.iter().enumerate() {
+        if !val.is_finite() {
+            return Err(SolverError::NumericalError(
+                format!("NaN/Inf in objective q[{}] = {}", i, val),
+            ));
+        }
+    }
+    for (i, &val) in b.iter().enumerate() {
+        if !val.is_finite() {
+            return Err(SolverError::NumericalError(
+                format!("NaN/Inf in constraint b[{}] = {}", i, val),
+            ));
+        }
+    }
+    for (i, &val) in a_csc.nzval.iter().enumerate() {
+        if !val.is_finite() {
+            return Err(SolverError::NumericalError(
+                format!("NaN/Inf in constraint matrix A nzval[{}] = {}", i, val),
+            ));
+        }
+    }
+    for i in 0..p.nrows() {
+        for j in 0..p.ncols() {
+            if !p[(i, j)].is_finite() {
+                return Err(SolverError::NumericalError(
+                    format!("NaN/Inf in P[{}, {}] = {}", i, j, p[(i, j)]),
+                ));
+            }
+        }
+    }
+    Ok(())
 }

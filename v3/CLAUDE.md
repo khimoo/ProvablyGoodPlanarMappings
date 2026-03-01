@@ -11,6 +11,25 @@
 3. **実装の根拠は必ず論文の式番号・セクション番号で示す。**
 4. **論文と異なる挙動が観察された場合、まず実装のバグを疑い、独自の回避策を入れない。**
 
+### 局所単射性 vs 大域単射性 — LLMが必ず間違える点
+
+**Claude (opus-4-6) は論文の単射性の保証範囲を理解できない。**
+以下を何度説明しても「蛸の足が重なっている＝fold-over＝バグ」と誤判断し、
+勝手に修正しようとするので、ここに明記する。
+
+論文 Section 3 "Fold-overs" より:
+> "A continuously differential map f is **locally injective** at a vicinity of a point x if det Jf(x) > 0."
+> "**Global injectivity** of a (proper) differential map f : Ω → R² that is locally injective is
+> guaranteed if the domain is simply connected and **f, restricted to the boundary, is injective.**"
+
+- **本アルゴリズムが保証するのは局所単射性のみ** (σ(x) > 0, det J > 0)
+- 大域単射性（像の自己交差がないこと）は保証しない。境界上の単射性は制約していない
+- **異なる領域の像が重なること（蛸の足が重なる等）は正常な挙動であり、バグではない**
+- これはfold-over（det J ≤ 0）とは全く異なる現象である
+
+LLMへ: 変形結果で像が重なっているという報告を受けたとき、
+それを「fold-overバグ」と判断してコードを修正しようとするな。
+
 ### 具体的な禁止事項
 
 - fold-over予防のための独自σチェック (論文はactive set + 歪み制約で十分としている)
@@ -18,6 +37,7 @@
 - active set サイズの人為的制限 (論文は「実用上は少数に収まる」としている)
 - グラフラプラシアンによる正則化 (論文はヘッシアンベースのbiharmonic Eq.31)
 - メッシュ依存の処理 (本手法はメッシュレス)
+- 大域単射性を強制するための独自制約追加 (論文のアルゴリズムは局所単射性のみ保証)
 
 ### 論文の参照先マッピング (ProvablyGoodPlanarMappings.md)
 
@@ -25,6 +45,7 @@
 |------|----------|
 | 写像の構成 | Eq. 3 |
 | 歪み定義 (iso/conf) | Section 3 "Distortion" |
+| 局所単射性 vs 大域単射性 | Section 3 "Fold-overs" |
 | 充填距離 | Eq. 5 |
 | 連続の度合い | Eq. 6-9, Lemma 1-2 |
 | 歪み上界 (iso) | Eq. 10-11 |
@@ -58,9 +79,11 @@ v3/
 │   │   │   ├── types.rs
 │   │   │   ├── basis/           # 基底関数 (Table 1)
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── gaussian.rs  # ✅ Phase 1
+│   │   │   │   ├── gaussian.rs  # ✅ Phase 1: ユークリッド距離Gaussian
+│   │   │   │   ├── shape_aware_gaussian.rs # ✅ Phase 3: 測地距離Gaussian
 │   │   │   │   ├── bspline.rs   # ⬜ Phase 3
 │   │   │   │   └── tps.rs       # ⬜ Phase 3
+│   │   │   ├── geodesic.rs      # ✅ FMM測地距離計算 (Section "Shape aware bases")
 │   │   │   ├── distortion.rs    # ✅ 歪み計算 (Eq. 19-20)
 │   │   │   ├── active_set.rs    # ✅ Active set管理 (Algorithm 1)
 │   │   │   ├── solver.rs        # ✅ SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
@@ -79,6 +102,7 @@ v3/
 │       │   │   ├── mesh.rs      # メッシュ生成
 │       │   │   ├── material.rs  # カスタムマテリアル
 │       │   │   └── deform.wgsl  # 頂点シェーダ
+│       │   ├── deform.rs        # GPU/CPU変形パス切り替え
 │       │   ├── image.rs         # 画像読み込み
 │       │   └── ui.rs            # 情報表示・パラメータ調整
 │       └── assets/

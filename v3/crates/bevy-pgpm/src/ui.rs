@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use crate::state::{
-    AlgoParams, AppState, DeformationInfo, DeformationState, ImageInfo,
+    AlgoParams, AppState, DeformationInfo, DeformationState, ImageInfo, ImagePathConfig,
 };
 
 // ── Marker components for UI widgets ────────────────────────────────
@@ -40,6 +40,12 @@ pub struct LambdaUpButton;
 
 #[derive(Component)]
 pub struct RegModeButton;
+
+#[derive(Component)]
+pub struct ImagePathText;
+
+#[derive(Component)]
+pub struct ImageLoadButton;
 
 /// Shared font handle loaded at startup.
 #[derive(Resource)]
@@ -106,6 +112,28 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
             // ── Regularization type ─────────────────────────
             label(panel, "Regularization type", &font);
             wide_button(panel, "ARAP", RegModeButton, &font);
+
+            separator(panel);
+
+            // ── Image path ──────────────────────────────────
+            label(panel, "Image path", &font);
+            // Editable path display
+            panel.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    padding: UiRect::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.12, 0.12, 0.18)),
+            )).with_children(|row| {
+                row.spawn((
+                    Text::new("texture.png"),
+                    TextFont { font: font.clone(), font_size: 11.0, ..default() },
+                    TextColor(VALUE_COLOR),
+                    ImagePathText,
+                ));
+            });
+            wide_button(panel, "\u{f07c}  Load Image", ImageLoadButton, &font);
         });
 }
 
@@ -375,6 +403,48 @@ fn push_params(params: &AlgoParams, deform_state: &mut DeformationState) {
         };
         algo.update_params(core_params);
         deform_state.needs_solve = true;
+    }
+}
+
+/// System: handle the "Load Image" button click.
+/// Opens a native file dialog to pick a PNG image, then triggers reload.
+pub fn on_image_path(
+    query: Query<&Interaction, (Changed<Interaction>, With<ImageLoadButton>)>,
+    mut path_config: ResMut<ImagePathConfig>,
+    mut path_text: Query<&mut Text, With<ImagePathText>>,
+    state: Res<State<AppState>>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+
+        // Only allow image loading in Setup mode
+        if *state.get() != AppState::Setup {
+            info!("Switch to Setup mode before loading a new image");
+            continue;
+        }
+
+        // Open native file dialog
+        let dialog = rfd::FileDialog::new()
+            .add_filter("PNG Images", &["png"])
+            .add_filter("All Images", &["png", "jpg", "jpeg", "bmp", "tga"])
+            .set_title("Select Image");
+
+        if let Some(path) = dialog.pick_file() {
+            let abs_path = path.to_string_lossy().into_owned();
+            info!("Selected image: {}", abs_path);
+
+            // Update the display text (show just filename)
+            let display_name = path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| abs_path.clone());
+            for mut text in &mut path_text {
+                **text = display_name.clone();
+            }
+
+            // Trigger reload
+            path_config.abs_path = abs_path;
+            path_config.needs_reload = true;
+        }
     }
 }
 

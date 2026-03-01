@@ -4,6 +4,7 @@
 //! each providing value, gradient, Hessian, and gradient modulus.
 
 pub mod gaussian;
+pub mod shape_aware_gaussian;
 
 use crate::types::CoefficientMatrix;
 use nalgebra::{DVector, Vector2};

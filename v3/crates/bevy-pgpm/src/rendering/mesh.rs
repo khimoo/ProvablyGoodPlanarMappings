@@ -110,9 +110,11 @@ pub fn create_contour_mesh(size: Vec2, subdivisions: UVec2, contour: &[(f32, f32
         }
     }
 
+    // MAIN_WORLD is needed for CPU-side mesh updates (shape-aware basis
+    // computes vertex positions on CPU). RENDER_WORLD for GPU rendering.
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);

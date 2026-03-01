@@ -146,12 +146,20 @@ pub fn update_deformation(
         return;
     }
 
-    if !deform_state.needs_solve {
+    // Keep iterating while dragging OR while distortion exceeds the bound.
+    // This ensures the algorithm converges even after drag release.
+    let needs_more = deform_state.needs_solve
+        || (deform_info.max_distortion > deform_info.k_bound
+            && deform_info.step_count > 0);
+
+    if !needs_more {
         return;
     }
 
     let targets: Vec<nalgebra::Vector2<f64>> = deform_state.target_handles.clone();
 
+    // Run exactly one Algorithm 1 step per frame (SOCP is blocking).
+    // Auto-continuation ensures this is called every frame until convergence.
     if let Some(ref mut algo) = deform_state.algorithm {
         match algo.step(&targets) {
             Ok(step_info) => {

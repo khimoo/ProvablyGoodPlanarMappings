@@ -79,7 +79,7 @@
             export WGPU_BACKEND=vulkan
 
             # nix run が実行されたディレクトリ（= flake.nix のあるディレクトリ）で cargo run
-            exec cargo run -p bevy-pgpm
+            exec cargo run --features bevy/dynamic_linking -p bevy-pgpm
           ''}/bin/run-bevy-pgpm";
         };
       }

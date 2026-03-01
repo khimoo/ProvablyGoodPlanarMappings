@@ -28,4 +28,5 @@ bevy = { version = "0.15", default-features = false, features = [
 image = "0.25"
 imageproc = "0.25"
 geo = "0.28"
+rfd = "0.15"
 delaunator = "1.0.2"

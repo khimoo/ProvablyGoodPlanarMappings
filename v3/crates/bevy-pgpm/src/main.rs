@@ -14,6 +14,7 @@
 //! 3. Adjust K bound, regularization type and lambda via the panel buttons.
 
 use bevy::{
+    asset::AssetPlugin,
     prelude::*,
     render::camera::OrthographicProjection,
     sprite::{Material2dPlugin, MeshMaterial2d},
@@ -29,26 +30,89 @@ use bevy_pgpm::{
     ui,
 };
 
+/// Resolve the default image path.
+/// Looks for texture.png in the crate's own assets/ directory.
+fn default_image_abs_path() -> String {
+    // Try CARGO_MANIFEST_DIR first (available during `cargo run`)
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = std::path::PathBuf::from(&manifest)
+            .join("assets")
+            .join("texture.png");
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    // Fallback: try relative to cwd
+    let candidates = [
+        "crates/bevy-pgpm/assets/texture.png",
+        "assets/texture.png",
+        "texture.png",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return std::fs::canonicalize(c)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| c.to_string());
+        }
+    }
+    // Last resort
+    "texture.png".to_string()
+}
+
+/// Resolve the Bevy AssetPlugin base path.
+/// Points to the crate's assets/ directory so AssetServer can find textures/fonts/shaders.
+fn resolve_asset_folder() -> String {
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = std::path::PathBuf::from(&manifest).join("assets");
+        if p.is_dir() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    let candidates = [
+        "crates/bevy-pgpm/assets",
+        "assets",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).is_dir() {
+            return std::fs::canonicalize(c)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| c.to_string());
+        }
+    }
+    "assets".to_string()
+}
+
 fn main() {
+    let asset_folder = resolve_asset_folder();
+    info!("Asset folder: {}", asset_folder);
+
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "PGPM v3 — Provably Good Planar Mappings".into(),
-                resolution: (900.0, 900.0).into(),
+        .add_plugins(DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "PGPM v3 — Provably Good Planar Mappings".into(),
+                    resolution: (900.0, 900.0).into(),
+                    ..default()
+                }),
                 ..default()
-            }),
-            ..default()
-        }))
+            })
+            .set(AssetPlugin {
+                file_path: asset_folder,
+                ..default()
+            })
+        )
         .add_plugins(Material2dPlugin::<DeformMaterial>::default())
         .init_state::<AppState>()
         .init_resource::<DeformationState>()
         .init_resource::<DeformationInfo>()
         .init_resource::<AlgoParams>()
-        .add_systems(Startup, (setup, ui::spawn_control_panel))
+        .insert_resource(ImagePathConfig::new(default_image_abs_path()))
+        .add_systems(Startup, (setup_camera, ui::spawn_control_panel))
         .add_systems(Update, (
+            load_image,
             setup_camera_scale,
             handle_input,
-            update_deformation,
+            update_deformation.before(update_deform_material),
             update_deform_material,
         ))
         .add_systems(Update, (
@@ -59,6 +123,7 @@ fn main() {
             ui::on_k_bound,
             ui::on_lambda,
             ui::on_reg_mode,
+            ui::on_image_path,
             ui::update_status_text,
             ui::update_toggle_label,
             ui::update_k_text,
@@ -68,39 +133,55 @@ fn main() {
         .run();
 }
 
-fn setup(
+/// Startup: spawn camera only.  Image loading is handled by the `load_image` system.
+fn setup_camera(mut commands: Commands) {
+    commands.spawn((Camera2d::default(), MainCamera));
+}
+
+/// System: load (or reload) the image when `ImagePathConfig.needs_reload` is set.
+fn load_image(
     mut commands: Commands,
+    mut path_config: ResMut<ImagePathConfig>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
+    existing_image: Query<Entity, With<DeformedImage>>,
+    mut deform_state: ResMut<DeformationState>,
+    mut deform_info: ResMut<DeformationInfo>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
-    // Camera
-    commands.spawn((Camera2d::default(), MainCamera));
+    if !path_config.needs_reload {
+        return;
+    }
+    path_config.needs_reload = false;
 
-    // Load image
-    let image_path = "texture.png";
-    let image_handle = asset_server.load(image_path);
+    let abs_path = &path_config.abs_path;
+    info!("Loading image from: {}", abs_path);
 
-    let full_image_path = format!("assets/{}", image_path);
-    let (image_width, image_height) = match image::open(&full_image_path) {
+    // Open image via `image` crate for dimensions + contour
+    let (image_width, image_height) = match image::open(abs_path) {
         Ok(img) => {
             let (w, h) = img.dimensions();
-            info!("Loaded image: {}x{}", w, h);
+            info!("Image dimensions: {}x{}", w, h);
             (w as f32, h as f32)
         }
         Err(e) => {
-            warn!("Failed to load image: {}, using default 512x512", e);
+            warn!("Failed to load image '{}': {}, using default 512x512", abs_path, e);
             (512.0, 512.0)
         }
     };
 
-    // Extract contour for non-rectangular images
-    let contour = extract_contour_from_image(&full_image_path);
+    let contour = extract_contour_from_image(abs_path);
     if contour.is_empty() {
         info!("No contour extracted, using full image domain");
     } else {
         info!("Extracted contour with {} points", contour.len());
     }
+
+    // Load texture through Bevy's AssetServer.
+    // If the path is absolute, AssetServer can load it directly.
+    // Otherwise it resolves relative to the configured asset folder.
+    let image_handle: Handle<Image> = asset_server.load(abs_path.to_string());
 
     commands.insert_resource(ImageInfo {
         width: image_width,
@@ -108,6 +189,21 @@ fn setup(
         handle: image_handle.clone(),
         contour: contour.clone(),
     });
+
+    // Remove previous image entity if reloading
+    for entity in existing_image.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    // Reset deformation state on image change
+    deform_state.source_handles.clear();
+    deform_state.target_handles.clear();
+    deform_state.algorithm = None;
+    deform_state.dragging = false;
+    deform_state.dragging_index = None;
+    deform_state.needs_solve = false;
+    *deform_info = DeformationInfo::default();
+    next_state.set(AppState::Setup);
 
     // Create mesh (Delaunay triangulation)
     let grid_mesh = create_contour_mesh(
@@ -140,18 +236,18 @@ fn setup(
     ));
 }
 
-/// One-shot system: scale camera to fit the image in the window.
+/// System: scale camera to fit the image in the window.
+/// Re-runs whenever ImageInfo is inserted or changed (e.g. after image reload).
 fn setup_camera_scale(
     image_info: Option<Res<ImageInfo>>,
     windows: Query<&Window>,
     mut camera_q: Query<&mut OrthographicProjection, With<MainCamera>>,
-    mut done: Local<bool>,
 ) {
-    if *done {
+    let Some(image_info) = image_info else { return };
+    if !image_info.is_changed() {
         return;
     }
 
-    let Some(image_info) = image_info else { return };
     let Ok(window) = windows.get_single() else { return };
     let Ok(mut projection) = camera_q.get_single_mut() else { return };
 
@@ -171,6 +267,4 @@ fn setup_camera_scale(
         "Camera scale adjusted: window={}x{}, image={}x{}, scale={}",
         window_width, window_height, image_width, image_height, projection.scale
     );
-
-    *done = true;
 }

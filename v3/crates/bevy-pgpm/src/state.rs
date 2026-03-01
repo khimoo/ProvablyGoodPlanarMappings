@@ -263,6 +263,38 @@ pub struct MainCamera;
 #[derive(Component)]
 pub struct DeformedImage;
 
+/// Configuration for the image file path.
+///
+/// The `abs_path` is used for `image::open()` (contour extraction, dimension query).
+/// The `bevy_path` is used for `AssetServer::load()` (GPU texture).
+#[derive(Resource)]
+pub struct ImagePathConfig {
+    /// Absolute filesystem path to the image file.
+    pub abs_path: String,
+    /// Whether the image needs to be (re)loaded.
+    pub needs_reload: bool,
+}
+
+impl Default for ImagePathConfig {
+    fn default() -> Self {
+        // Default: texture.png inside the crate's assets/ directory.
+        // Resolved at runtime relative to CARGO_MANIFEST_DIR or cwd.
+        Self {
+            abs_path: String::new(),
+            needs_reload: true,
+        }
+    }
+}
+
+impl ImagePathConfig {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            abs_path: path.into(),
+            needs_reload: true,
+        }
+    }
+}
+
 /// Data about the loaded image.
 #[derive(Resource)]
 pub struct ImageInfo {
