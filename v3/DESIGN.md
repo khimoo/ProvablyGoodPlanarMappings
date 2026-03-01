@@ -618,63 +618,145 @@ step(target_handles):
 
 ```
 bevy-pgpm/src/
-├── main.rs             # Bevy app setup
+├── main.rs             # Bevy app setup, プラグイン登録
 ├── state.rs            # App states, resources
-├── input.rs            # マウス・キーボード入力
+├── input.rs            # マウス・キーボード入力 (ハンドル操作)
 ├── rendering/
 │   ├── mod.rs
 │   ├── mesh.rs         # メッシュ生成 (Delaunay of collocation points)
 │   ├── material.rs     # カスタムマテリアル
 │   └── deform.wgsl     # 頂点シェーダ (forward mapping)
 ├── image.rs            # 画像読み込み・輪郭抽出
-└── ui.rs               # テキスト表示・ギズモ
+└── ui.rs               # テキスト表示・パラメータ調整パネル
 ```
 
-### 2.3 pgpm-core との統合
+### 2.3 アプリケーション状態
 
 ```rust
 // state.rs
+
+/// アプリ全体の状態遷移
+#[derive(States, Default, Clone, Eq, PartialEq, Hash, Debug)]
+pub enum AppState {
+    #[default]
+    Setup,       // 画像読み込み・ハンドル配置
+    Deforming,   // インタラクティブ変形
+    Verifying,   // Strategy 2 による検証 (Phase 3 で有効化)
+}
+
+/// pgpm-core の Algorithm をラップするリソース
+#[derive(Resource)]
 pub struct DeformationState {
-    pub algorithm: Algorithm,  // pgpm-core の Algorithm 1
+    pub algorithm: Algorithm,
+    pub source_handles: Vec<Vector2<f64>>,
+    pub target_handles: Vec<Vector2<f64>>,
 }
 
-// 毎フレームのシステム
-fn update_deformation(
-    mut state: ResMut<DeformationState>,
-    input: Res<InputState>,
-) {
-    if input.is_dragging {
-        // Algorithm 1 の 1 ステップを実行
-        state.algorithm.step(&input.target_handles).unwrap();
-        // 係数をレンダリング側に反映
-    }
+/// UI表示用の情報リソース
+#[derive(Resource, Default)]
+pub struct DeformationInfo {
+    pub max_distortion: f64,
+    pub active_set_size: usize,
+    pub stable_set_size: usize,
+    pub step_count: usize,
+    pub k_bound: f64,
+    pub verification_status: VerificationStatus,
 }
 
-fn on_drag_end(
-    mut state: ResMut<DeformationState>,
-    params: Res<AlgorithmParams>,
-) {
-    // Strategy 2 の検証 (論文 Section 6)
-    let result = state.algorithm.verify_and_refine(params.k_max);
-    match result {
-        VerificationResult::Verified { actual_k_max } => {
-            info!("Distortion bound verified: K_max = {actual_k_max}");
-        }
-        VerificationResult::Refined { new_h, .. } => {
-            info!("Grid refined to h = {new_h}");
-        }
-        _ => {}
-    }
+#[derive(Default)]
+pub enum VerificationStatus {
+    #[default]
+    NotVerified,
+    Verified { k_max: f64 },
+    CannotGuarantee,
 }
 ```
 
-### 2.4 GPU レンダリング
+### 2.4 入力システム
+
+```rust
+// input.rs
+
+/// ハンドルの選択・ドラッグ操作
+///
+/// 操作フロー:
+/// 1. Setup 状態: クリックでハンドル追加
+/// 2. Deforming 状態: ハンドルをドラッグ → target_handles 更新
+/// 3. ドラッグ中の毎フレーム: algorithm.step() を呼び出し
+
+fn handle_mouse_input(
+    mouse: Res<ButtonInput<MouseButton>>,
+    window: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform)>,
+    mut state: ResMut<DeformationState>,
+    mut info: ResMut<DeformationInfo>,
+) {
+    // マウス座標をワールド座標に変換
+    // ハンドルの選択・ドラッグ・リリースを処理
+}
+```
+
+### 2.5 pgpm-core との統合
+
+```rust
+/// ドラッグ中に毎フレーム呼ばれるシステム
+fn update_deformation(
+    mut state: ResMut<DeformationState>,
+    mut info: ResMut<DeformationInfo>,
+) {
+    // Algorithm 1 の 1 ステップを実行
+    match state.algorithm.step(&state.target_handles) {
+        Ok(step_info) => {
+            info.max_distortion = step_info.max_distortion;
+            info.active_set_size = step_info.active_set_size;
+            info.stable_set_size = step_info.stable_set_size;
+            info.step_count += 1;
+        }
+        Err(e) => warn!("SOCP solve failed: {e:?}"),
+    }
+}
+
+/// ドラッグ終了時に呼ばれるシステム (Phase 3 で Strategy 2 検証を追加)
+fn on_drag_end(
+    mut state: ResMut<DeformationState>,
+    mut info: ResMut<DeformationInfo>,
+) {
+    // Phase 3: Strategy 2 の検証
+    // let result = state.algorithm.verify_and_refine(k_max);
+    // 現時点では未検証のまま
+    info.verification_status = VerificationStatus::NotVerified;
+}
+```
+
+### 2.6 GPU レンダリング
 
 v2 の設計を踏襲するが改善:
 
 - **Storage Buffer** (Uniform ではなく) で RBF パラメータを渡す → 基底関数数の制限を撤廃
 - 頂点シェーダで forward mapping $f(x)$ を評価、UV は元座標を保持 (v2 と同じ方式)
 - メッシュは Delaunay 三角形分割 (collocation points を頂点とする)
+
+### 2.7 UI パネル
+
+テキストオーバーレイで以下を常時表示:
+
+| 表示項目 | 情報源 |
+|----------|--------|
+| max D(z) | `StepInfo::max_distortion` |
+| K bound | `AlgorithmParams::k_bound` |
+| Active set size | `StepInfo::active_set_size` |
+| Step count | フレームカウンタ |
+| Verification | `VerificationStatus` (Phase 3) |
+
+パラメータ調整 (キーボード):
+
+| キー | 操作 |
+|------|------|
+| `K` / `Shift+K` | K bound 増減 |
+| `L` / `Shift+L` | λ (正則化重み) 増減 |
+| `R` | リセット (恒等写像に戻る) |
+| `Space` | Setup ↔ Deforming 切り替え |
+| `V` | Strategy 2 検証実行 (Phase 3) |
 
 ---
 
@@ -694,7 +776,7 @@ v2 の設計を踏襲するが改善:
 
 ## 4. 実装順序
 
-### Phase 1: pgpm-core 最小構成
+### Phase 1: pgpm-core 最小構成 ✅
 1. `types.rs`: 型定義
 2. `basis/gaussian.rs`: Gaussian RBF (最も単純、v1/v2 で実績あり)
 3. `distortion.rs`: 歪み計算 (Eq. 19-20)
@@ -703,17 +785,35 @@ v2 の設計を踏襲するが改善:
 6. `algorithm.rs`: Algorithm 1 統合
 7. **テスト**: 恒等写像 → 単純な変形で distortion bound 検証
 
-### Phase 2: pgpm-core 完成
-8. `strategy.rs`: Strategy 1/2/3
-9. `basis/bspline.rs`: B-Spline
-10. `basis/tps.rs`: TPS
-11. **テスト**: 論文 Section 6 の実験再現
+### Phase 2: bevy-pgpm (Gaussian + Isometric で動くUI)
 
-### Phase 3: bevy-pgpm
-12. Bevy app 基盤 (state, input)
-13. GPU レンダリング (mesh, material, shader)
-14. 画像読み込み・輪郭抽出
-15. UI (テキスト表示・パラメータ調整)
+Phase 1 の pgpm-core 最小構成（Gaussian 基底 + Isometric 歪み + Algorithm 1）で
+インタラクティブなアプリケーションを先に構築する。
+Phase 3 の未実装機能はスタブ/無効化で対応する。
+
+8. Bevy app 基盤: `main.rs`, `state.rs` (AppState, DeformationState)
+9. 入力システム: `input.rs` (ハンドル配置・ドラッグ)
+10. GPU レンダリング: `rendering/` (mesh, material, deform.wgsl)
+11. 画像読み込み: `image.rs` (テクスチャロード・輪郭からドメイン定義)
+12. UI: `ui.rs` (情報表示パネル・パラメータ調整)
+13. **テスト**: ハンドル操作 → リアルタイム変形の動作確認
+
+**Phase 2 時点でのスタブ/制限事項:**
+
+| Phase 3 機能 | Phase 2 での対応 |
+|---|---|
+| Strategy 1/2/3 (`strategy.rs`) | `verify_and_refine()` は `CannotGuarantee` を返す。UIでは「未検証」表示 |
+| B-Spline (`bspline.rs`) | 未実装。基底選択UIでは Gaussian のみ有効 |
+| TPS (`tps.rs`) | 未実装。基底選択UIでは Gaussian のみ有効 |
+| Conformal 歪み | Isometric モードのみ使用可能。Conformal はグレーアウト |
+
+### Phase 3: pgpm-core 完成 + bevy-pgpm 拡張
+14. `strategy.rs`: Strategy 1/2/3
+15. `basis/bspline.rs`: B-Spline
+16. `basis/tps.rs`: TPS
+17. Conformal 歪みのフル対応 (δ を Strategy に基づいて計算)
+18. bevy-pgpm: Strategy 2 検証UI、基底切替、Conformal モード
+19. **テスト**: 論文 Section 6 の実験再現
 
 ---
 

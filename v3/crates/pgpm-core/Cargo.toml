@@ -1,0 +1,12 @@
+[package]
+name = "pgpm-core"
+version = "0.1.0"
+edition = "2021"
+description = "Provably Good Planar Mappings (Poranne & Lipman 2014) — pure algorithm crate"
+
+[dependencies]
+clarabel = "0.10"
+nalgebra = "0.33"
+
+[dev-dependencies]
+approx = "0.5"

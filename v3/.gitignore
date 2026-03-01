@@ -1,0 +1,18 @@
+# Build artifacts
+/target/
+
+# Nix
+result
+.direnv/
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db

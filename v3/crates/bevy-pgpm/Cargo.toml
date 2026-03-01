@@ -1,0 +1,30 @@
+[package]
+name = "bevy-pgpm"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive deformation UI for Provably Good Planar Mappings"
+
+[dependencies]
+pgpm-core = { path = "../pgpm-core" }
+nalgebra = "0.33"
+
+bevy = { version = "0.15", default-features = false, features = [
+    "bevy_asset",
+    "bevy_winit",
+    "bevy_core_pipeline",
+    "bevy_render",
+    "bevy_sprite",
+    "bevy_gizmos",
+    "bevy_ui",
+    "bevy_text",
+    "bevy_state",
+    "png",
+    "multi_threaded",
+    "x11",
+    "wayland",
+] }
+
+image = "0.25"
+imageproc = "0.25"
+geo = "0.28"
+delaunator = "1.0.2"

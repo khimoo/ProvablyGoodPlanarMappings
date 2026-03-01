@@ -53,19 +53,51 @@ v3/
 ├── crates/
 │   ├── pgpm-core/               # 論文アルゴリズムの純粋実装
 │   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── basis/           # 基底関数 (Table 1)
-│   │       ├── distortion.rs    # 歪み計算 (Eq. 19-20, Section 3)
-│   │       ├── active_set.rs    # Active set管理 (Algorithm 1)
-│   │       ├── solver.rs        # SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
-│   │       ├── strategy.rs      # Strategy 1/2/3 (Eq. 11, 14-17)
-│   │       └── algorithm.rs     # Algorithm 1 統合
-│   └── bevy-pgpm/               # Bevy統合 (レンダリング・UI)
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── types.rs
+│   │   │   ├── basis/           # 基底関数 (Table 1)
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── gaussian.rs  # ✅ Phase 1
+│   │   │   │   ├── bspline.rs   # ⬜ Phase 3
+│   │   │   │   └── tps.rs       # ⬜ Phase 3
+│   │   │   ├── distortion.rs    # ✅ 歪み計算 (Eq. 19-20)
+│   │   │   ├── active_set.rs    # ✅ Active set管理 (Algorithm 1)
+│   │   │   ├── solver.rs        # ✅ SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
+│   │   │   ├── strategy.rs      # ⬜ Phase 3: Strategy 1/2/3 (Eq. 11, 14-17)
+│   │   │   └── algorithm.rs     # ✅ Algorithm 1 統合
+│   │   └── tests/
+│   │       └── integration_verify.rs
+│   └── bevy-pgpm/               # Phase 2: Bevy統合 (レンダリング・UI)
 │       ├── Cargo.toml
-│       └── src/
+│       ├── src/
+│       │   ├── main.rs          # Bevy app setup
+│       │   ├── state.rs         # AppState, DeformationState
+│       │   ├── input.rs         # マウス・キーボード入力
+│       │   ├── rendering/
+│       │   │   ├── mod.rs
+│       │   │   ├── mesh.rs      # メッシュ生成
+│       │   │   ├── material.rs  # カスタムマテリアル
+│       │   │   └── deform.wgsl  # 頂点シェーダ
+│       │   ├── image.rs         # 画像読み込み
+│       │   └── ui.rs            # 情報表示・パラメータ調整
+│       └── assets/
 └── assets/
 ```
+
+## 実装フェーズ
+
+| Phase | 内容 | 状態 |
+|-------|------|------|
+| **Phase 1** | pgpm-core 最小構成 (Gaussian + Isometric + Algorithm 1) | ✅ 完了 |
+| **Phase 2** | bevy-pgpm UI構築 (Gaussian + Isometric のみで動作) | ⬜ 次 |
+| **Phase 3** | pgpm-core 完成 (Strategy, B-Spline, TPS) + bevy-pgpm 拡張 | ⬜ |
+
+**Phase 2 の方針**: pgpm-core の Phase 1 成果物のみで動作するUIを構築する。
+Phase 3 の未実装機能はスタブ/無効化で対応し、UIレベルで制限を明示する。
+- Strategy 1/2/3 → `verify_and_refine()` は `CannotGuarantee` を返す → UIで「未検証」表示
+- B-Spline / TPS → 基底選択UIでは Gaussian のみ有効
+- Conformal → Isometric モードのみ使用可能
 
 ## 開発時の注意
 
@@ -73,3 +105,12 @@ v3/
   - 例: `// Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||`
 - テストケースは論文 Section 6 の実験設定を再現すること
 - パフォーマンスチューニングは論文の範囲内で行うこと（例: 200²グリッド）
+
+### bevy-pgpm 開発時の注意 (Phase 2)
+
+- pgpm-core の公開APIのみを使用し、内部実装に依存しないこと
+- Phase 3 未実装の機能を呼び出す箇所には `// Phase 3: ...` コメントを残すこと
+- SOCP求解はブロッキングなので、フレーム内で `step()` を1回のみ呼ぶこと
+  - 将来の非同期化が必要になったら Phase 3 以降で検討
+- GPU レンダリング (頂点シェーダでの写像評価) は v2 の `deform.wgsl` を参考にすること
+- UI の状態管理は Bevy の `States` + `Resource` パターンで行うこと
