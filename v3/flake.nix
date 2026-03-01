@@ -28,6 +28,9 @@
           mold
         ];
 
+        # Nerd Fonts (FiraCode — ASCII + Unicode記号 + Nerdアイコン all-in-one)
+        nerdFonts = pkgs.nerd-fonts.fira-code;
+
         # Bevyに必要なネイティブライブラリ群 (Linux用)
         buildInputs = with pkgs; [
           udev
@@ -57,6 +60,11 @@
             echo "Rust: $(rustc --version)"
             echo "=========================================================="
             export WGPU_BACKEND=vulkan
+
+            # Nerd Fonts を assets/fonts/ にリンク
+            mkdir -p crates/bevy-pgpm/assets/fonts
+            ln -sfn ${nerdFonts}/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf \
+              crates/bevy-pgpm/assets/fonts/FiraCodeNerdFontMono-Regular.ttf
           '';
         };
 

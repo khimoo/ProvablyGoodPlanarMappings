@@ -5,6 +5,9 @@
 result
 .direnv/
 
+# Nix store symlinks (fonts etc.)
+crates/bevy-pgpm/assets/fonts/
+
 # Editor
 *.swp
 *.swo

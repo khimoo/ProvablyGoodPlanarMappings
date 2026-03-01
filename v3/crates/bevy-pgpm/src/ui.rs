@@ -41,6 +41,10 @@ pub struct LambdaUpButton;
 #[derive(Component)]
 pub struct RegModeButton;
 
+/// Shared font handle loaded at startup.
+#[derive(Resource)]
+pub struct UiFont(pub Handle<Font>);
+
 // ── Colours ─────────────────────────────────────────────────────────
 
 const PANEL_BG: Color = Color::srgba(0.08, 0.08, 0.12, 0.92);
@@ -53,7 +57,10 @@ const VALUE_COLOR: Color = Color::srgb(0.95, 0.85, 0.40);
 
 // ── Spawn the whole panel (called from main.rs Startup) ─────────────
 
-pub fn spawn_control_panel(mut commands: Commands) {
+pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let font: Handle<Font> = asset_server.load("fonts/FiraCodeNerdFontMono-Regular.ttf");
+    commands.insert_resource(UiFont(font.clone()));
+
     commands
         .spawn((
             Node {
@@ -73,7 +80,7 @@ pub fn spawn_control_panel(mut commands: Commands) {
             // ── Status text ─────────────────────────────────
             panel.spawn((
                 Text::new("Mode: SETUP\nHandles: 0\nClick to add handles"),
-                TextFont { font_size: 14.0, ..default() },
+                TextFont { font: font.clone(), font_size: 14.0, ..default() },
                 TextColor(VALUE_COLOR),
                 StatusText,
             ));
@@ -81,24 +88,24 @@ pub fn spawn_control_panel(mut commands: Commands) {
             separator(panel);
 
             // ── Toggle mode ─────────────────────────────────
-            wide_button(panel, "▶  Start Deforming", ToggleModeButton);
+            wide_button(panel, "\u{f04b}  Start Deforming", ToggleModeButton, &font);
 
             // ── Reset ───────────────────────────────────────
-            wide_button(panel, "↺  Reset", ResetButton);
+            wide_button(panel, "\u{f0e2}  Reset", ResetButton, &font);
 
             separator(panel);
 
             // ── K bound ─────────────────────────────────────
-            label(panel, "Distortion bound K");
-            param_row(panel, "3.0", KBoundText, "−", KMinusButton, "+", KPlusButton);
+            label(panel, "Distortion bound K", &font);
+            param_row(panel, "3.0", KBoundText, "\u{f068}", KMinusButton, "\u{f067}", KPlusButton, &font);
 
             // ── Lambda ──────────────────────────────────────
-            label(panel, "Regularization λ");
-            param_row(panel, "1.0e-2", LambdaText, "÷10", LambdaDownButton, "×10", LambdaUpButton);
+            label(panel, "Regularization \u{03bb}", &font);
+            param_row(panel, "1.0e-2", LambdaText, "/10", LambdaDownButton, "x10", LambdaUpButton, &font);
 
             // ── Regularization type ─────────────────────────
-            label(panel, "Regularization type");
-            wide_button(panel, "ARAP", RegModeButton);
+            label(panel, "Regularization type", &font);
+            wide_button(panel, "ARAP", RegModeButton, &font);
         });
 }
 
@@ -116,15 +123,15 @@ fn separator(parent: &mut ChildBuilder) {
     ));
 }
 
-fn label(parent: &mut ChildBuilder, text: &str) {
+fn label(parent: &mut ChildBuilder, text: &str, font: &Handle<Font>) {
     parent.spawn((
         Text::new(text.to_string()),
-        TextFont { font_size: 12.0, ..default() },
+        TextFont { font: font.clone(), font_size: 12.0, ..default() },
         TextColor(LABEL_COLOR),
     ));
 }
 
-fn wide_button<M: Component>(parent: &mut ChildBuilder, text: &str, marker: M) {
+fn wide_button<M: Component>(parent: &mut ChildBuilder, text: &str, marker: M, font: &Handle<Font>) {
     parent
         .spawn((
             Button,
@@ -141,7 +148,7 @@ fn wide_button<M: Component>(parent: &mut ChildBuilder, text: &str, marker: M) {
         .with_children(|btn| {
             btn.spawn((
                 Text::new(text.to_string()),
-                TextFont { font_size: 14.0, ..default() },
+                TextFont { font: font.clone(), font_size: 14.0, ..default() },
                 TextColor(BTN_TEXT),
             ));
         });
@@ -155,6 +162,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
     left_marker: LB,
     right_label: &str,
     right_marker: RB,
+    font: &Handle<Font>,
 ) {
     parent
         .spawn(Node {
@@ -182,7 +190,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
             .with_children(|btn| {
                 btn.spawn((
                     Text::new(left_label.to_string()),
-                    TextFont { font_size: 13.0, ..default() },
+                    TextFont { font: font.clone(), font_size: 13.0, ..default() },
                     TextColor(BTN_TEXT),
                 ));
             });
@@ -190,7 +198,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
             // Value text
             row.spawn((
                 Text::new(initial.to_string()),
-                TextFont { font_size: 14.0, ..default() },
+                TextFont { font: font.clone(), font_size: 14.0, ..default() },
                 TextColor(VALUE_COLOR),
                 text_marker,
             ));
@@ -211,7 +219,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
             .with_children(|btn| {
                 btn.spawn((
                     Text::new(right_label.to_string()),
-                    TextFont { font_size: 13.0, ..default() },
+                    TextFont { font: font.clone(), font_size: 13.0, ..default() },
                     TextColor(BTN_TEXT),
                 ));
             });
@@ -409,8 +417,8 @@ pub fn update_toggle_label(
             for &child in children.iter() {
                 if let Ok(mut txt) = text_q.get_mut(child) {
                     **txt = match state.get() {
-                        AppState::Setup => "▶  Start Deforming".to_string(),
-                        AppState::Deforming => "■  Back to Setup".to_string(),
+                        AppState::Setup => "\u{f04b}  Start Deforming".to_string(),
+                        AppState::Deforming => "\u{f04d}  Back to Setup".to_string(),
                     };
                 }
             }
