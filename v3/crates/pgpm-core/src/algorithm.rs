@@ -40,6 +40,12 @@ impl Algorithm {
     /// - `source_handles`: Fixed handle positions {p_l} (Eq. 29)
     /// - `grid_resolution`: Number of grid points per side (paper Section 6: 200)
     /// - `fps_k`: Number of farthest point samples for Z'' (stable set)
+    /// - `domain_contour`: Optional contour polygon (pixel coords) defining
+    ///   the non-rectangular domain Ω.  When `Some`, only grid points inside
+    ///   the polygon are eligible for the active/stable sets and ARAP
+    ///   regularisation.  The rectangular grid structure is preserved for
+    ///   local-maxima detection (Section 5).  When `None`, all grid points
+    ///   are considered inside the domain.
     pub fn new(
         basis: Box<dyn BasisFunction>,
         params: AlgorithmParams,
@@ -47,6 +53,7 @@ impl Algorithm {
         source_handles: Vec<Vector2<f64>>,
         grid_resolution: usize,
         fps_k: usize,
+        domain_contour: Option<&[Vector2<f64>]>,
     ) -> Self {
         // Generate collocation grid
         // Section 4: "consider all the points from a surrounding
@@ -56,6 +63,18 @@ impl Algorithm {
 
         let m = collocation_points.len();
         let _n_basis = basis.count();
+
+        // Build domain mask: true for points inside the contour polygon.
+        // Paper Section 4: "consider all the points from a surrounding
+        // uniform grid that fall inside the domain"
+        let domain_mask = match domain_contour {
+            Some(contour) if !contour.is_empty() => {
+                collocation_points.iter()
+                    .map(|pt| point_in_polygon(pt, contour))
+                    .collect()
+            }
+            _ => vec![true; m], // no contour → all points are inside
+        };
 
         // Section 5 "Activation of constraints":
         // K_high = 0.1 + 0.9*K, K_low = 0.5 + 0.5*K
@@ -69,8 +88,10 @@ impl Algorithm {
         // Initialize with identity coefficients
         let coefficients = basis.identity_coefficients();
 
-        // Initialize stable set with FPS
-        let stable_set = active_set::initialize_stable_set(&collocation_points, fps_k);
+        // Initialize stable set with FPS (only among domain-interior points)
+        let stable_set = active_set::initialize_stable_set(
+            &collocation_points, fps_k, &domain_mask,
+        );
 
         let state = AlgorithmState {
             coefficients,
@@ -80,6 +101,7 @@ impl Algorithm {
             frames,
             k_high,
             k_low,
+            domain_mask,
             precomputed: None,
         };
 
@@ -252,6 +274,49 @@ impl Algorithm {
     pub fn state(&self) -> &AlgorithmState {
         &self.state
     }
+
+    /// Update algorithm parameters at runtime.
+    ///
+    /// This allows changing K, λ, and regularization type while the
+    /// deformation is running, without re-creating the Algorithm.
+    /// K_high and K_low are re-derived from the new K bound.
+    /// The active set is NOT cleared — stale points will be naturally
+    /// removed at the next step when their distortion falls below K_low.
+    pub fn update_params(&mut self, params: AlgorithmParams) {
+        let k = params.k_bound;
+        self.state.k_high = 0.1 + 0.9 * k;
+        self.state.k_low = 0.5 + 0.5 * k;
+
+        // If switching to a regularization that needs biharmonic matrix,
+        // ensure it's computed.
+        let needs_bh = matches!(
+            params.regularization,
+            RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
+        );
+        let has_bh = self.state.precomputed.as_ref()
+            .map_or(false, |p| p.biharmonic_matrix.is_some());
+
+        if needs_bh && !has_bh {
+            if let Some(ref mut precomputed) = self.state.precomputed {
+                let n = self.basis.count();
+                precomputed.biharmonic_matrix = Some(
+                    solver::build_biharmonic_matrix(
+                        self.basis.as_ref(),
+                        &self.state.collocation_points,
+                        &self.domain_bounds,
+                        n,
+                    )
+                );
+            }
+        }
+
+        self.params = params;
+    }
+
+    /// Get current algorithm parameters (for inspection).
+    pub fn params(&self) -> &AlgorithmParams {
+        &self.params
+    }
 }
 
 /// Information returned from each algorithm step.
@@ -295,6 +360,31 @@ fn generate_collocation_grid(
     (points, res_x, res_y)
 }
 
+/// Ray-casting point-in-polygon test (Euclidean distance).
+///
+/// Paper Section 4: "To generate a set of collocation points with a
+/// prescribed Euclidean fill-distance in a non-convex domain it is
+/// enough to … consider all the points from a surrounding uniform grid
+/// that fall inside the domain."
+fn point_in_polygon(pt: &Vector2<f64>, polygon: &[Vector2<f64>]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let (x, y) = (pt.x, pt.y);
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (polygon[i].x, polygon[i].y);
+        let (xj, yj) = (polygon[j].x, polygon[j].y);
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,8 +418,8 @@ mod tests {
             Vector2::new(0.5, 0.5),
         ];
 
-        // Small grid for testing
-        Algorithm::new(basis, params, domain, handles, 10, 4)
+        // Small grid for testing (no contour → full rectangle)
+        Algorithm::new(basis, params, domain, handles, 10, 4, None)
     }
 
     #[test]
@@ -442,6 +532,89 @@ mod tests {
             );
             // After the first step, distortion should be finite
             assert!(info.max_distortion.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_point_in_polygon_square() {
+        let square = vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(1.0, 0.0),
+            Vector2::new(1.0, 1.0),
+            Vector2::new(0.0, 1.0),
+        ];
+        // Inside
+        assert!(point_in_polygon(&Vector2::new(0.5, 0.5), &square));
+        assert!(point_in_polygon(&Vector2::new(0.1, 0.1), &square));
+        // Outside
+        assert!(!point_in_polygon(&Vector2::new(1.5, 0.5), &square));
+        assert!(!point_in_polygon(&Vector2::new(-0.1, 0.5), &square));
+        assert!(!point_in_polygon(&Vector2::new(0.5, -0.1), &square));
+    }
+
+    #[test]
+    fn test_point_in_polygon_triangle() {
+        let triangle = vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(2.0, 0.0),
+            Vector2::new(1.0, 2.0),
+        ];
+        // Inside the triangle
+        assert!(point_in_polygon(&Vector2::new(1.0, 0.5), &triangle));
+        // Outside
+        assert!(!point_in_polygon(&Vector2::new(0.0, 2.0), &triangle));
+        assert!(!point_in_polygon(&Vector2::new(3.0, 0.0), &triangle));
+    }
+
+    #[test]
+    fn test_domain_mask_with_contour() {
+        // Create algorithm with a circular-ish contour inside [0,1]²
+        let centers = vec![
+            Vector2::new(0.5, 0.5),
+        ];
+        let basis = Box::new(GaussianBasis::new(centers.clone(), 0.3));
+        let params = AlgorithmParams {
+            distortion_type: DistortionType::Isometric,
+            k_bound: 3.0,
+            lambda_reg: 0.0,
+            regularization: RegularizationType::Arap,
+        };
+        let domain = DomainBounds {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        };
+
+        // A diamond contour that excludes the corners of the unit square
+        let contour = vec![
+            Vector2::new(0.5, 0.0),
+            Vector2::new(1.0, 0.5),
+            Vector2::new(0.5, 1.0),
+            Vector2::new(0.0, 0.5),
+        ];
+
+        let alg = Algorithm::new(
+            basis, params, domain, centers, 5, 2,
+            Some(&contour),
+        );
+
+        // Grid is 5×5 = 25 points, but some should be masked out
+        let mask = &alg.state().domain_mask;
+        assert_eq!(mask.len(), 25);
+
+        // Corners of the grid (0,0), (1,0), (0,1), (1,1) should be outside
+        assert!(!mask[0],  "(0,0) should be outside diamond");
+        assert!(!mask[4],  "(1,0) should be outside diamond");
+        assert!(!mask[20], "(0,1) should be outside diamond");
+        assert!(!mask[24], "(1,1) should be outside diamond");
+
+        // Center (0.5, 0.5) should be inside
+        assert!(mask[12], "(0.5,0.5) should be inside diamond");
+
+        // Stable set should only contain domain-interior points
+        for &idx in &alg.state().stable_set {
+            assert!(mask[idx], "Stable set point {} should be inside domain", idx);
         }
     }
 }

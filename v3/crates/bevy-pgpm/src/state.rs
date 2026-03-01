@@ -48,7 +48,19 @@ impl Default for DeformationState {
 
 impl DeformationState {
     /// Finalize the setup: create the Algorithm with current handles.
-    pub fn finalize(&mut self, image_width: f64, image_height: f64, algo_params: &AlgoParams) {
+    ///
+    /// `contour` is the image's alpha-channel contour in pixel coordinates.
+    /// If non-empty, only collocation points inside this polygon will be
+    /// eligible for distortion constraints and ARAP regularisation
+    /// (Paper Section 4: "points from a surrounding uniform grid that
+    /// fall inside the domain").
+    pub fn finalize(
+        &mut self,
+        image_width: f64,
+        image_height: f64,
+        algo_params: &AlgoParams,
+        contour: &[(f32, f32)],
+    ) {
         let epsilon = algo_params.epsilon;
         let domain = DomainBounds {
             x_min: -epsilon,
@@ -68,8 +80,22 @@ impl DeformationState {
         let params = AlgorithmParams {
             distortion_type: DistortionType::Isometric,
             k_bound: algo_params.k_bound,
-            lambda_reg: algo_params.lambda_reg,
-            regularization: RegularizationType::Arap,
+            lambda_reg: algo_params.reg_mode.effective_lambda(algo_params.lambda_reg),
+            regularization: algo_params.reg_mode.to_core(
+                algo_params.lambda_arap,
+                algo_params.lambda_bh,
+            ),
+        };
+
+        // Convert contour from (f32, f32) to Vector2<f64> for pgpm-core
+        let contour_v2: Vec<nalgebra::Vector2<f64>> = contour
+            .iter()
+            .map(|&(x, y)| nalgebra::Vector2::new(x as f64, y as f64))
+            .collect();
+        let domain_contour = if contour_v2.is_empty() {
+            None
+        } else {
+            Some(contour_v2.as_slice())
         };
 
         let algorithm = Algorithm::new(
@@ -79,6 +105,7 @@ impl DeformationState {
             self.source_handles.clone(),
             algo_params.grid_resolution,
             algo_params.fps_k,
+            domain_contour,
         );
 
         self.target_handles = self.source_handles.clone();
@@ -115,7 +142,7 @@ fn compute_rbf_scale(centers: &[Vector2<f64>], width: f64, height: f64) -> f64 {
 }
 
 /// UI display information, updated each step.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct DeformationInfo {
     pub max_distortion: f64,
     pub active_set_size: usize,
@@ -123,7 +150,78 @@ pub struct DeformationInfo {
     pub step_count: usize,
     pub k_bound: f64,
     pub lambda_reg: f64,
+    pub reg_mode_label: &'static str,
     // Phase 3: pub verification_status: VerificationStatus,
+}
+
+impl Default for DeformationInfo {
+    fn default() -> Self {
+        Self {
+            max_distortion: 0.0,
+            active_set_size: 0,
+            stable_set_size: 0,
+            step_count: 0,
+            k_bound: 3.0,
+            lambda_reg: 1e-2,
+            reg_mode_label: "ARAP",
+        }
+    }
+}
+
+/// Which regularization mode the user has selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegMode {
+    Arap,
+    Biharmonic,
+    Mixed,
+    None,
+}
+
+impl RegMode {
+    pub fn next(self) -> Self {
+        match self {
+            RegMode::Arap => RegMode::Biharmonic,
+            RegMode::Biharmonic => RegMode::Mixed,
+            RegMode::Mixed => RegMode::None,
+            RegMode::None => RegMode::Arap,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RegMode::Arap => "ARAP",
+            RegMode::Biharmonic => "Biharmonic",
+            RegMode::Mixed => "Mixed",
+            RegMode::None => "None",
+        }
+    }
+
+    /// Convert to pgpm-core RegularizationType.
+    pub fn to_core(self, lambda_arap: f64, lambda_bh: f64) -> RegularizationType {
+        match self {
+            RegMode::Arap => RegularizationType::Arap,
+            RegMode::Biharmonic => RegularizationType::Biharmonic,
+            RegMode::Mixed => RegularizationType::Mixed {
+                lambda_bh,
+                lambda_arap,
+            },
+            RegMode::None => RegularizationType::Arap, // λ=0 handles this
+        }
+    }
+
+    /// Effective λ_reg: for None mode we force 0.
+    pub fn effective_lambda(self, lambda_reg: f64) -> f64 {
+        match self {
+            RegMode::None => 0.0,
+            _ => lambda_reg,
+        }
+    }
+}
+
+impl std::fmt::Display for RegMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
 }
 
 /// Adjustable algorithm parameters.
@@ -134,6 +232,12 @@ pub struct AlgoParams {
     pub grid_resolution: usize,
     pub fps_k: usize,
     pub epsilon: f64,
+    /// Regularization mode (ARAP / Biharmonic / Mixed / None)
+    pub reg_mode: RegMode,
+    /// ARAP weight for Mixed mode
+    pub lambda_arap: f64,
+    /// Biharmonic weight for Mixed mode
+    pub lambda_bh: f64,
 }
 
 impl Default for AlgoParams {
@@ -144,6 +248,9 @@ impl Default for AlgoParams {
             grid_resolution: 50,
             fps_k: 8,
             epsilon: 40.0,
+            reg_mode: RegMode::Arap,
+            lambda_arap: 1.0,
+            lambda_bh: 0.1,
         }
     }
 }
@@ -155,10 +262,6 @@ pub struct MainCamera;
 /// Marker for the deformed image entity.
 #[derive(Component)]
 pub struct DeformedImage;
-
-/// Marker for the UI text entity.
-#[derive(Component)]
-pub struct InfoText;
 
 /// Data about the loaded image.
 #[derive(Resource)]

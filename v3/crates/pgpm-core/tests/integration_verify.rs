@@ -49,7 +49,7 @@ fn make_verification_algorithm(
         y_max: 1.0,
     };
 
-    Algorithm::new(basis, params, domain, handles_src, grid_res, 8)
+    Algorithm::new(basis, params, domain, handles_src, grid_res, 8, None)
 }
 
 // ────────────────────────────────────────────────────────────

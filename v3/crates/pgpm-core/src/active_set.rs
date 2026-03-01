@@ -30,8 +30,9 @@ pub fn update_active_set(
 
     // Step 2: Add local maxima exceeding K_high
     // "foreach z ∈ Z_max such that D(z) > K_high do insert z to Z'"
+    // Paper Section 4: only points that fall inside the domain are constrained.
     for &idx in &local_maxima {
-        if distortions[idx] > state.k_high {
+        if distortions[idx] > state.k_high && state.domain_mask[idx] {
             if !state.active_set.contains(&idx) {
                 state.active_set.push(idx);
             }
@@ -101,33 +102,36 @@ fn find_local_maxima(
 /// Algorithm 1: "Initialize set Z'' with farthest point samples"
 ///
 /// Farthest Point Sampling (FPS) to select k evenly-spaced points
-/// from the collocation points.
+/// from the collocation points **that lie inside the domain**.
 ///
 /// Section 5: "we may keep a small subset of equally spread
 /// collocation points always active"
 pub fn initialize_stable_set(
     collocation_points: &[Vector2<f64>],
     k: usize,
+    domain_mask: &[bool],
 ) -> Vec<usize> {
     let n = collocation_points.len();
-    if k == 0 || n == 0 {
+    // Candidate indices: only domain-interior points
+    let candidates: Vec<usize> = (0..n).filter(|&i| domain_mask[i]).collect();
+    if k == 0 || candidates.is_empty() {
         return Vec::new();
     }
-    if k >= n {
-        return (0..n).collect();
+    if k >= candidates.len() {
+        return candidates;
     }
 
     let mut selected = Vec::with_capacity(k);
     let mut min_dists = vec![f64::INFINITY; n];
 
-    // Start from the first point (arbitrary choice)
-    selected.push(0);
+    // Start from the first candidate
+    selected.push(candidates[0]);
 
     for _ in 1..k {
         // Update minimum distances based on the last selected point
         let last = *selected.last().unwrap();
         let last_pt = collocation_points[last];
-        for i in 0..n {
+        for &i in &candidates {
             let d = (collocation_points[i] - last_pt).norm_squared();
             if d < min_dists[i] {
                 min_dists[i] = d;
@@ -138,8 +142,9 @@ pub fn initialize_stable_set(
             min_dists[s] = 0.0;
         }
 
-        // Select the point with maximum minimum distance
-        let best = (0..n)
+        // Select the candidate with maximum minimum distance
+        let best = candidates.iter()
+            .copied()
             .filter(|i| !selected.contains(i))
             .max_by(|&a, &b| min_dists[a].partial_cmp(&min_dists[b]).unwrap())
             .unwrap();
@@ -205,6 +210,7 @@ mod tests {
             frames: Vec::new(),
             k_high: 2.8, // 0.1 + 0.9*3
             k_low: 2.0,   // 0.5 + 0.5*3
+            domain_mask: vec![true; 9],
             precomputed: None,
         };
 
@@ -231,6 +237,7 @@ mod tests {
             frames: Vec::new(),
             k_high: 2.8,
             k_low: 2.0,
+            domain_mask: vec![true; 9],
             precomputed: None,
         };
 
@@ -256,8 +263,9 @@ mod tests {
             Vector2::new(0.0, 1.0),
             Vector2::new(1.0, 1.0),
         ];
+        let mask = vec![true; 4];
 
-        let selected = initialize_stable_set(&points, 4);
+        let selected = initialize_stable_set(&points, 4, &mask);
         assert_eq!(selected.len(), 4);
         // All 4 should be selected
         for i in 0..4 {
@@ -271,11 +279,60 @@ mod tests {
         let points: Vec<Vector2<f64>> = (0..11)
             .map(|i| Vector2::new(i as f64, 0.0))
             .collect();
+        let mask = vec![true; 11];
 
-        let selected = initialize_stable_set(&points, 3);
+        let selected = initialize_stable_set(&points, 3, &mask);
         assert_eq!(selected.len(), 3);
         // Should include first point (0) and farthest (10), then middle (5)
         assert!(selected.contains(&0));
         assert!(selected.contains(&10));
+    }
+
+    #[test]
+    fn test_active_set_skips_exterior_points() {
+        // 3x3 grid: center is outside domain (mask = false)
+        let mut state = crate::types::AlgorithmState {
+            coefficients: nalgebra::DMatrix::zeros(2, 1),
+            collocation_points: Vec::new(),
+            active_set: Vec::new(),
+            stable_set: Vec::new(),
+            frames: Vec::new(),
+            k_high: 2.8,
+            k_low: 2.0,
+            domain_mask: vec![true, true, true, true, false, true, true, true, true],
+            precomputed: None,
+        };
+
+        // Center has high distortion but is outside domain
+        #[rustfmt::skip]
+        let distortions = vec![
+            1.0, 1.0, 1.0,
+            1.0, 5.0, 1.0,
+            1.0, 1.0, 1.0,
+        ];
+
+        update_active_set(&mut state, &distortions, 3, 3);
+        // Center (idx=4) is a local max and D=5.0 > K_high, but domain_mask[4]=false
+        assert!(!state.active_set.contains(&4),
+            "Exterior point should not be added to active set");
+    }
+
+    #[test]
+    fn test_fps_skips_exterior_points() {
+        // 5 points, but point 2 is outside domain
+        let points = vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(1.0, 0.0),
+            Vector2::new(2.0, 0.0), // outside
+            Vector2::new(3.0, 0.0),
+            Vector2::new(4.0, 0.0),
+        ];
+        let mask = vec![true, true, false, true, true];
+
+        let selected = initialize_stable_set(&points, 3, &mask);
+        assert_eq!(selected.len(), 3);
+        // Point 2 should never be selected
+        assert!(!selected.contains(&2),
+            "Exterior point should not be in stable set");
     }
 }

@@ -699,12 +699,16 @@ fn build_regularization(
     // Constant part (1 per sample): ignored (doesn't affect optimization)
     //
     // Paper Eq. 33: sample points R'' are "a set of regularization sample points"
-    // We use ALL collocation points for stable regularization.
+    // We use all domain-interior collocation points for stable regularization.
+    // Points outside the domain contour are excluded (Section 4).
     if lambda_arap > 0.0 {
-        let m = state.collocation_points.len();
-        let scale = lambda * lambda_arap / m as f64; // normalize by count
+        let interior_indices: Vec<usize> = (0..state.collocation_points.len())
+            .filter(|&i| state.domain_mask[i])
+            .collect();
+        let m_interior = interior_indices.len().max(1);
+        let scale = lambda * lambda_arap / m_interior as f64; // normalize by interior count
 
-        for pt_idx in 0..m {
+        for &pt_idx in &interior_indices {
             let d = state.frames[pt_idx];
 
             let mut a_js_x = DVector::zeros(2 * n_basis);

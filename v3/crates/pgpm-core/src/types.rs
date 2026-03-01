@@ -85,6 +85,16 @@ pub struct AlgorithmState {
     pub k_high: f64,
     pub k_low: f64,
 
+    /// Domain interior mask: `true` if the collocation point falls inside
+    /// the domain Ω (contour polygon).  Points outside the domain are kept
+    /// in the rectangular grid (so local-maxima detection on the grid still
+    /// works), but they are never added to the active/stable sets and are
+    /// excluded from ARAP regularisation sampling.
+    ///
+    /// Paper Section 4: "consider all the points from a surrounding uniform
+    /// grid that fall inside the domain"
+    pub domain_mask: Vec<bool>,
+
     /// Precomputed basis function evaluations at collocation points
     pub precomputed: Option<PrecomputedData>,
 }

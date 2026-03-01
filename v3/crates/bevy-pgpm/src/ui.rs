@@ -1,61 +1,463 @@
-//! UI overlay: information text and control point gizmos.
+//! GUI panel: buttons, parameter controls, and handle gizmos.
+//!
+//! All user interactions (except handle placement/dragging on the canvas)
+//! are performed through on-screen UI elements.  No keyboard shortcuts.
 
 use bevy::prelude::*;
 
 use crate::state::{
-    AppState, DeformationInfo, DeformationState, ImageInfo, InfoText,
+    AlgoParams, AppState, DeformationInfo, DeformationState, ImageInfo,
 };
 
-/// System: update the info text overlay.
-pub fn update_ui_text(
-    state: Res<State<AppState>>,
-    deform_info: Res<DeformationInfo>,
-    deform_state: Res<DeformationState>,
-    mut query: Query<(&mut Text, &mut TextColor), With<InfoText>>,
-) {
-    let Ok((mut text, mut color)) = query.get_single_mut() else {
-        return;
-    };
+// ── Marker components for UI widgets ────────────────────────────────
 
-    match state.get() {
-        AppState::Setup => {
-            let n = deform_state.source_handles.len();
-            **text = format!(
-                "Mode: SETUP\n\
-                 Handles: {}\n\
-                 [Click] Add handle\n\
-                 [Space] Start deforming\n\
-                 [R] Reset",
-                n
-            );
-            color.0 = Color::srgb(0.0, 1.0, 0.0);
-        }
-        AppState::Deforming => {
-            **text = format!(
-                "Mode: DEFORM\n\
-                 max D = {:.2}\n\
-                 K = {:.1}\n\
-                 λ = {:.1e}\n\
-                 Active: {} | Stable: {}\n\
-                 Steps: {}\n\
-                 [Drag] Move handles\n\
-                 [K/Shift+K] K ±0.5\n\
-                 [L/Shift+L] λ ×/÷10\n\
-                 [Space] Back to setup\n\
-                 [R] Reset",
-                deform_info.max_distortion,
-                deform_info.k_bound,
-                deform_info.lambda_reg,
-                deform_info.active_set_size,
-                deform_info.stable_set_size,
-                deform_info.step_count,
-            );
-            color.0 = Color::srgb(1.0, 0.5, 0.5);
+#[derive(Component)]
+pub struct StatusText;
+
+#[derive(Component)]
+pub struct ToggleModeButton;
+
+#[derive(Component)]
+pub struct ResetButton;
+
+#[derive(Component)]
+pub struct KBoundText;
+
+#[derive(Component)]
+pub struct KMinusButton;
+
+#[derive(Component)]
+pub struct KPlusButton;
+
+#[derive(Component)]
+pub struct LambdaText;
+
+#[derive(Component)]
+pub struct LambdaDownButton;
+
+#[derive(Component)]
+pub struct LambdaUpButton;
+
+#[derive(Component)]
+pub struct RegModeButton;
+
+// ── Colours ─────────────────────────────────────────────────────────
+
+const PANEL_BG: Color = Color::srgba(0.08, 0.08, 0.12, 0.92);
+const BTN_NORMAL: Color = Color::srgb(0.25, 0.25, 0.35);
+const BTN_HOVERED: Color = Color::srgb(0.35, 0.35, 0.50);
+const BTN_PRESSED: Color = Color::srgb(0.50, 0.40, 0.20);
+const BTN_TEXT: Color = Color::srgb(0.95, 0.95, 0.95);
+const LABEL_COLOR: Color = Color::srgb(0.70, 0.70, 0.70);
+const VALUE_COLOR: Color = Color::srgb(0.95, 0.85, 0.40);
+
+// ── Spawn the whole panel (called from main.rs Startup) ─────────────
+
+pub fn spawn_control_panel(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(0.0),
+                top: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                width: Val::Px(220.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(10.0)),
+                row_gap: Val::Px(6.0),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+        ))
+        .with_children(|panel| {
+            // ── Status text ─────────────────────────────────
+            panel.spawn((
+                Text::new("Mode: SETUP\nHandles: 0\nClick to add handles"),
+                TextFont { font_size: 14.0, ..default() },
+                TextColor(VALUE_COLOR),
+                StatusText,
+            ));
+
+            separator(panel);
+
+            // ── Toggle mode ─────────────────────────────────
+            wide_button(panel, "▶  Start Deforming", ToggleModeButton);
+
+            // ── Reset ───────────────────────────────────────
+            wide_button(panel, "↺  Reset", ResetButton);
+
+            separator(panel);
+
+            // ── K bound ─────────────────────────────────────
+            label(panel, "Distortion bound K");
+            param_row(panel, "3.0", KBoundText, "−", KMinusButton, "+", KPlusButton);
+
+            // ── Lambda ──────────────────────────────────────
+            label(panel, "Regularization λ");
+            param_row(panel, "1.0e-2", LambdaText, "÷10", LambdaDownButton, "×10", LambdaUpButton);
+
+            // ── Regularization type ─────────────────────────
+            label(panel, "Regularization type");
+            wide_button(panel, "ARAP", RegModeButton);
+        });
+}
+
+// ── Builder helpers ─────────────────────────────────────────────────
+
+fn separator(parent: &mut ChildBuilder) {
+    parent.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(1.0),
+            margin: UiRect::vertical(Val::Px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
+    ));
+}
+
+fn label(parent: &mut ChildBuilder, text: &str) {
+    parent.spawn((
+        Text::new(text.to_string()),
+        TextFont { font_size: 12.0, ..default() },
+        TextColor(LABEL_COLOR),
+    ));
+}
+
+fn wide_button<M: Component>(parent: &mut ChildBuilder, text: &str, marker: M) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(32.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(BTN_NORMAL),
+            marker,
+        ))
+        .with_children(|btn| {
+            btn.spawn((
+                Text::new(text.to_string()),
+                TextFont { font_size: 14.0, ..default() },
+                TextColor(BTN_TEXT),
+            ));
+        });
+}
+
+fn param_row<TM: Component, LB: Component, RB: Component>(
+    parent: &mut ChildBuilder,
+    initial: &str,
+    text_marker: TM,
+    left_label: &str,
+    left_marker: LB,
+    right_label: &str,
+    right_marker: RB,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(4.0),
+            ..default()
+        })
+        .with_children(|row| {
+            // Left button
+            row.spawn((
+                Button,
+                Node {
+                    width: Val::Px(44.0),
+                    height: Val::Px(28.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(BTN_NORMAL),
+                left_marker,
+            ))
+            .with_children(|btn| {
+                btn.spawn((
+                    Text::new(left_label.to_string()),
+                    TextFont { font_size: 13.0, ..default() },
+                    TextColor(BTN_TEXT),
+                ));
+            });
+
+            // Value text
+            row.spawn((
+                Text::new(initial.to_string()),
+                TextFont { font_size: 14.0, ..default() },
+                TextColor(VALUE_COLOR),
+                text_marker,
+            ));
+
+            // Right button
+            row.spawn((
+                Button,
+                Node {
+                    width: Val::Px(44.0),
+                    height: Val::Px(28.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(BTN_NORMAL),
+                right_marker,
+            ))
+            .with_children(|btn| {
+                btn.spawn((
+                    Text::new(right_label.to_string()),
+                    TextFont { font_size: 13.0, ..default() },
+                    TextColor(BTN_TEXT),
+                ));
+            });
+        });
+}
+
+// ── Systems: button hover/press visual feedback ─────────────────────
+
+pub fn button_visuals(
+    mut query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<Button>)>,
+) {
+    for (interaction, mut bg) in &mut query {
+        *bg = match interaction {
+            Interaction::Pressed => BackgroundColor(BTN_PRESSED),
+            Interaction::Hovered => BackgroundColor(BTN_HOVERED),
+            Interaction::None => BackgroundColor(BTN_NORMAL),
+        };
+    }
+}
+
+// ── Systems: button actions ─────────────────────────────────────────
+
+pub fn on_toggle_mode(
+    query: Query<&Interaction, (Changed<Interaction>, With<ToggleModeButton>)>,
+    state: Res<State<AppState>>,
+    mut next_state: ResMut<NextState<AppState>>,
+    mut deform_state: ResMut<DeformationState>,
+    mut deform_info: ResMut<DeformationInfo>,
+    algo_params: Res<AlgoParams>,
+    image_info: Option<Res<ImageInfo>>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+        match state.get() {
+            AppState::Setup => {
+                let Some(ref image_info) = image_info else { return };
+                if deform_state.source_handles.is_empty() {
+                    info!("No handles added yet!");
+                    return;
+                }
+                deform_state.finalize(
+                    image_info.width as f64,
+                    image_info.height as f64,
+                    &algo_params,
+                    &image_info.contour,
+                );
+                deform_info.k_bound = algo_params.k_bound;
+                deform_info.lambda_reg = algo_params.lambda_reg;
+                deform_info.reg_mode_label = algo_params.reg_mode.label();
+                next_state.set(AppState::Deforming);
+            }
+            AppState::Deforming => {
+                deform_state.dragging = false;
+                deform_state.dragging_index = None;
+                next_state.set(AppState::Setup);
+            }
         }
     }
 }
 
-/// System: draw handle gizmos.
+pub fn on_reset(
+    query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
+    mut deform_state: ResMut<DeformationState>,
+    mut deform_info: ResMut<DeformationInfo>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+        deform_state.source_handles.clear();
+        deform_state.target_handles.clear();
+        deform_state.algorithm = None;
+        deform_state.dragging = false;
+        deform_state.dragging_index = None;
+        deform_state.needs_solve = false;
+        *deform_info = DeformationInfo::default();
+        next_state.set(AppState::Setup);
+    }
+}
+
+pub fn on_k_bound(
+    q_minus: Query<&Interaction, (Changed<Interaction>, With<KMinusButton>)>,
+    q_plus: Query<&Interaction, (Changed<Interaction>, With<KPlusButton>)>,
+    mut params: ResMut<AlgoParams>,
+    mut info: ResMut<DeformationInfo>,
+    mut deform_state: ResMut<DeformationState>,
+) {
+    let mut changed = false;
+    for interaction in &q_minus {
+        if *interaction == Interaction::Pressed {
+            params.k_bound = (params.k_bound - 0.5).max(1.1);
+            changed = true;
+        }
+    }
+    for interaction in &q_plus {
+        if *interaction == Interaction::Pressed {
+            params.k_bound += 0.5;
+            changed = true;
+        }
+    }
+    if changed {
+        info.k_bound = params.k_bound;
+        push_params(&params, &mut deform_state);
+    }
+}
+
+pub fn on_lambda(
+    q_down: Query<&Interaction, (Changed<Interaction>, With<LambdaDownButton>)>,
+    q_up: Query<&Interaction, (Changed<Interaction>, With<LambdaUpButton>)>,
+    mut params: ResMut<AlgoParams>,
+    mut info: ResMut<DeformationInfo>,
+    mut deform_state: ResMut<DeformationState>,
+) {
+    let mut changed = false;
+    for interaction in &q_down {
+        if *interaction == Interaction::Pressed {
+            params.lambda_reg /= 10.0;
+            changed = true;
+        }
+    }
+    for interaction in &q_up {
+        if *interaction == Interaction::Pressed {
+            params.lambda_reg *= 10.0;
+            changed = true;
+        }
+    }
+    if changed {
+        info.lambda_reg = params.lambda_reg;
+        push_params(&params, &mut deform_state);
+    }
+}
+
+pub fn on_reg_mode(
+    query: Query<&Interaction, (Changed<Interaction>, With<RegModeButton>)>,
+    mut params: ResMut<AlgoParams>,
+    mut info: ResMut<DeformationInfo>,
+    mut deform_state: ResMut<DeformationState>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+        params.reg_mode = params.reg_mode.next();
+        info.reg_mode_label = params.reg_mode.label();
+        push_params(&params, &mut deform_state);
+    }
+}
+
+fn push_params(params: &AlgoParams, deform_state: &mut DeformationState) {
+    if let Some(ref mut algo) = deform_state.algorithm {
+        let core_params = pgpm_core::AlgorithmParams {
+            distortion_type: pgpm_core::DistortionType::Isometric,
+            k_bound: params.k_bound,
+            lambda_reg: params.reg_mode.effective_lambda(params.lambda_reg),
+            regularization: params.reg_mode.to_core(params.lambda_arap, params.lambda_bh),
+        };
+        algo.update_params(core_params);
+        deform_state.needs_solve = true;
+    }
+}
+
+// ── Systems: update dynamic text ────────────────────────────────────
+
+pub fn update_status_text(
+    state: Res<State<AppState>>,
+    deform_info: Res<DeformationInfo>,
+    deform_state: Res<DeformationState>,
+    mut query: Query<(&mut Text, &mut TextColor), With<StatusText>>,
+) {
+    let Ok((mut text, mut color)) = query.get_single_mut() else { return };
+    match state.get() {
+        AppState::Setup => {
+            let n = deform_state.source_handles.len();
+            **text = format!("Mode: SETUP\nHandles: {n}\nClick to add handles");
+            color.0 = Color::srgb(0.4, 1.0, 0.4);
+        }
+        AppState::Deforming => {
+            **text = format!(
+                "Mode: DEFORM\nmax D = {:.2}\nActive: {} | Stable: {}\nSteps: {}",
+                deform_info.max_distortion,
+                deform_info.active_set_size,
+                deform_info.stable_set_size,
+                deform_info.step_count,
+            );
+            color.0 = Color::srgb(1.0, 0.65, 0.4);
+        }
+    }
+}
+
+pub fn update_toggle_label(
+    state: Res<State<AppState>>,
+    query: Query<Entity, With<ToggleModeButton>>,
+    children_q: Query<&Children>,
+    mut text_q: Query<&mut Text>,
+) {
+    for entity in &query {
+        if let Ok(children) = children_q.get(entity) {
+            for &child in children.iter() {
+                if let Ok(mut txt) = text_q.get_mut(child) {
+                    **txt = match state.get() {
+                        AppState::Setup => "▶  Start Deforming".to_string(),
+                        AppState::Deforming => "■  Back to Setup".to_string(),
+                    };
+                }
+            }
+        }
+    }
+}
+
+pub fn update_k_text(
+    params: Res<AlgoParams>,
+    mut query: Query<&mut Text, With<KBoundText>>,
+) {
+    if !params.is_changed() { return; }
+    for mut text in &mut query {
+        **text = format!("{:.1}", params.k_bound);
+    }
+}
+
+pub fn update_lambda_text(
+    params: Res<AlgoParams>,
+    mut query: Query<&mut Text, With<LambdaText>>,
+) {
+    if !params.is_changed() { return; }
+    for mut text in &mut query {
+        **text = format!("{:.1e}", params.lambda_reg);
+    }
+}
+
+pub fn update_reg_mode_label(
+    params: Res<AlgoParams>,
+    query: Query<Entity, With<RegModeButton>>,
+    children_q: Query<&Children>,
+    mut text_q: Query<&mut Text>,
+) {
+    if !params.is_changed() { return; }
+    for entity in &query {
+        if let Ok(children) = children_q.get(entity) {
+            for &child in children.iter() {
+                if let Ok(mut txt) = text_q.get_mut(child) {
+                    **txt = params.reg_mode.label().to_string();
+                }
+            }
+        }
+    }
+}
+
+// ── Gizmos ──────────────────────────────────────────────────────────
+
 pub fn draw_handles(
     deform_state: Res<DeformationState>,
     state: Res<State<AppState>>,
@@ -74,31 +476,24 @@ pub fn draw_handles(
         ),
     };
 
-    // Draw source handles (small, dimmer in deform mode)
-    for (_i, src) in deform_state.source_handles.iter().enumerate() {
+    for src in deform_state.source_handles.iter() {
         let wx = src.x as f32 - img_w / 2.0;
         let wy = img_h / 2.0 - src.y as f32;
-        let pos = Vec2::new(wx, wy);
-
-        gizmos.circle_2d(pos, 6.0, source_color);
+        gizmos.circle_2d(Vec2::new(wx, wy), 6.0, source_color);
     }
 
-    // Draw target handles (only in deform mode)
     if *state.get() == AppState::Deforming {
         for (i, tgt) in deform_state.target_handles.iter().enumerate() {
             let wx = tgt.x as f32 - img_w / 2.0;
             let wy = img_h / 2.0 - tgt.y as f32;
             let pos = Vec2::new(wx, wy);
-
             let color = if deform_state.dragging_index == Some(i) {
                 Color::srgb(1.0, 0.0, 0.0)
             } else {
                 target_color
             };
-
             gizmos.circle_2d(pos, 8.0, color);
 
-            // Draw line from source to target
             let src = &deform_state.source_handles[i];
             let src_wx = src.x as f32 - img_w / 2.0;
             let src_wy = img_h / 2.0 - src.y as f32;

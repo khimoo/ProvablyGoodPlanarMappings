@@ -8,8 +8,10 @@
 //!   cargo run -p bevy-pgpm
 //!
 //! Place a texture.png in the assets/ directory.
-//! 1. Setup mode: click to place control handles, then press Space.
+//! All interactions are via the on-screen control panel:
+//! 1. Setup mode: click to place control handles, then click "Start Deforming".
 //! 2. Deform mode: drag handles to deform the image.
+//! 3. Adjust K bound, regularization type and lambda via the panel buttons.
 
 use bevy::{
     prelude::*,
@@ -24,7 +26,7 @@ use bevy_pgpm::{
     input::{handle_input, update_deformation},
     rendering::{create_contour_mesh, DeformMaterial, DeformUniform, RBFCoeff},
     state::*,
-    ui::{draw_handles, update_ui_text},
+    ui,
 };
 
 fn main() {
@@ -42,7 +44,7 @@ fn main() {
         .init_resource::<DeformationState>()
         .init_resource::<DeformationInfo>()
         .init_resource::<AlgoParams>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, ui::spawn_control_panel))
         .add_systems(Update, (
             setup_camera_scale,
             handle_input,
@@ -50,8 +52,18 @@ fn main() {
             update_deform_material,
         ))
         .add_systems(Update, (
-            draw_handles,
-            update_ui_text,
+            ui::draw_handles,
+            ui::button_visuals,
+            ui::on_toggle_mode,
+            ui::on_reset,
+            ui::on_k_bound,
+            ui::on_lambda,
+            ui::on_reg_mode,
+            ui::update_status_text,
+            ui::update_toggle_label,
+            ui::update_k_text,
+            ui::update_lambda_text,
+            ui::update_reg_mode_label,
         ))
         .run();
 }
@@ -64,19 +76,6 @@ fn setup(
 ) {
     // Camera
     commands.spawn((Camera2d::default(), MainCamera));
-
-    // UI text
-    commands.spawn((
-        Text::new("Mode: SETUP\n[Click] Add handle\n[Space] Start deforming\n[R] Reset"),
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-        InfoText,
-    ));
 
     // Load image
     let image_path = "texture.png";
