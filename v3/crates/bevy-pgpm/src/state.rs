@@ -173,7 +173,8 @@ pub struct DeformationInfo {
     pub k_bound: f64,
     pub lambda_reg: f64,
     pub reg_mode_label: &'static str,
-    // Phase 3: pub verification_status: VerificationStatus,
+    /// Strategy 2 result status message (None = not yet run)
+    pub strategy2_status: Option<String>,
 }
 
 impl Default for DeformationInfo {
@@ -186,6 +187,7 @@ impl Default for DeformationInfo {
             k_bound: 3.0,
             lambda_reg: 1e-2,
             reg_mode_label: "ARAP",
+            strategy2_status: None,
         }
     }
 }
@@ -295,6 +297,8 @@ pub struct AlgoParams {
     pub lambda_bh: f64,
     /// Basis function type (Table 1)
     pub basis_type: BasisType,
+    /// Strategy 2 target K_max (Eq. 14, must be > k_bound)
+    pub k_max: f64,
 }
 
 impl Default for AlgoParams {
@@ -309,6 +313,7 @@ impl Default for AlgoParams {
             lambda_arap: 1.0,
             lambda_bh: 0.1,
             basis_type: BasisType::Gaussian,
+            k_max: 6.0, // default: k_bound * 2.0
         }
     }
 }

@@ -129,6 +129,11 @@ impl BasisFunction for GaussianBasis {
         t / (self.s * self.s)
     }
 
+    fn gradient_modulus_inverse(&self, v: f64) -> f64 {
+        // ω_{∇F}(t) = t / s² → ω_{∇F}⁻¹(v) = v · s²
+        v * self.s * self.s
+    }
+
     fn identity_coefficients(&self) -> CoefficientMatrix {
         // Identity mapping: f(x) = x
         // c¹_{n-2} = 1 (x-coefficient for u), c²_{n-1} = 1 (y-coefficient for v)

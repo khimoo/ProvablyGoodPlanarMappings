@@ -28,7 +28,7 @@
 - これはfold-over（det J ≤ 0）とは全く異なる現象である
 
 LLMへ: 変形結果で像が重なっているという報告を受けたとき、
-それを「fold-overバグ」と判断してコードを修正しようとするな。
+それを「fold-overバグ」と判断してコードを修正しようとしないこと.
 
 ### 具体的な禁止事項
 
@@ -87,7 +87,7 @@ v3/
 │   │   │   ├── distortion.rs    # ✅ 歪み計算 (Eq. 19-20)
 │   │   │   ├── active_set.rs    # ✅ Active set管理 (Algorithm 1)
 │   │   │   ├── solver.rs        # ✅ SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
-│   │   │   ├── strategy.rs      # ⬜ Phase 3: Strategy 1/2/3 (Eq. 11, 14-17)
+│   │   │   ├── strategy.rs      # ✅ Strategy 2 (Eq. 11, 14); ⬜ Phase 3: Strategy 1/3 (Eq. 15-17)
 │   │   │   └── algorithm.rs     # ✅ Algorithm 1 統合
 │   │   └── tests/
 │   │       └── integration_verify.rs

@@ -13,7 +13,9 @@ pub mod active_set;
 pub mod solver;
 pub mod algorithm;
 pub mod geodesic;
+pub mod strategy;
 
 pub use types::*;
 pub use basis::BasisFunction;
 pub use algorithm::Algorithm;
+pub use strategy::Strategy2Result;

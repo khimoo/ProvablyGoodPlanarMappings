@@ -36,6 +36,10 @@ pub trait BasisFunction: Send + Sync {
     /// Used in Eq. 9: ω = 2 |||c||| ω_{∇F}
     fn gradient_modulus(&self, t: f64) -> f64;
 
+    /// Inverse of gradient modulus: ω_{∇F}⁻¹(v) = t such that ω_{∇F}(t) = v.
+    /// Used in Strategy 2 (Eq. 14) to compute the required fill distance h.
+    fn gradient_modulus_inverse(&self, v: f64) -> f64;
+
     /// Identity mapping coefficients c ∈ R^{2×n} such that f(x) = x.
     /// (J_f = I everywhere)
     fn identity_coefficients(&self) -> CoefficientMatrix;

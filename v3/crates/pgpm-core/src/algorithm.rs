@@ -8,6 +8,7 @@ use crate::active_set;
 use crate::basis::BasisFunction;
 use crate::distortion;
 use crate::solver;
+use crate::strategy;
 use crate::types::*;
 use nalgebra::{DMatrix, Vector2};
 
@@ -319,6 +320,135 @@ impl Algorithm {
     /// Get current algorithm parameters (for inspection).
     pub fn params(&self) -> &AlgorithmParams {
         &self.params
+    }
+
+    /// Get domain bounds.
+    pub fn domain_bounds(&self) -> &DomainBounds {
+        &self.domain_bounds
+    }
+
+    /// Get grid resolution (points per side).
+    pub fn grid_width(&self) -> usize {
+        self.grid_width
+    }
+
+    /// Strategy 2 re-optimization (Section 4, Eq. 14).
+    ///
+    /// 1. Compute |||c||| from current coefficients (Eq. 8)
+    /// 2. Compute required fill distance h via Eq. 14
+    /// 3. Determine grid resolution to achieve h
+    /// 4. Rebuild collocation grid and precomputed data at higher resolution
+    ///    (coefficients c are preserved as the initial guess)
+    /// 5. Run Algorithm 1 steps until convergence or step limit
+    ///
+    /// Convergence: max_distortion ≤ K and active set unchanged from previous step.
+    /// Step limit: `strategy::MAX_REFINEMENT_STEPS`.
+    pub fn refine_strategy2(
+        &mut self,
+        k_max: f64,
+        target_handles: &[Vector2<f64>],
+    ) -> Result<strategy::Strategy2Result, AlgorithmError> {
+        let k = self.params.k_bound;
+        if k_max <= k {
+            return Err(AlgorithmError::InvalidInput(format!(
+                "Strategy 2 requires K_max ({}) > K ({})",
+                k_max, k
+            )));
+        }
+
+        // Step 1: compute |||c||| (Eq. 8)
+        let c_norm = strategy::compute_c_norm(&self.state.coefficients);
+
+        // Step 2: compute required h (Eq. 14, isometric)
+        let required_h = strategy::required_h_isometric(
+            k, k_max, c_norm, self.basis.as_ref(),
+        ).ok_or_else(|| AlgorithmError::InvalidInput(
+            "Strategy 2: cannot compute required h (K_max too close to K or c_norm issue)".into(),
+        ))?;
+
+        // Current fill distance
+        let current_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
+
+        // Step 3: determine required resolution
+        let mut new_resolution = strategy::resolution_for_h(&self.domain_bounds, required_h);
+        // Cap at maximum
+        if new_resolution > strategy::MAX_REFINEMENT_RESOLUTION {
+            new_resolution = strategy::MAX_REFINEMENT_RESOLUTION;
+        }
+
+        // Only rebuild if we need a denser grid
+        if new_resolution > self.grid_width {
+            // Step 4: rebuild collocation grid at higher resolution
+            let (new_points, new_gw, new_gh) =
+                generate_collocation_grid(&self.domain_bounds, new_resolution);
+
+            let m = new_points.len();
+
+            // Rebuild domain mask (no contour support in refinement — use all points)
+            // The original domain_mask was based on the original grid; for the refined
+            // grid we mark all points as interior (rectangular domain assumption for
+            // Strategy 2, consistent with paper Section 6 using rectangular grids).
+            let new_mask = vec![true; m];
+
+            // Reinitialize frames to (1,0) for new points
+            let new_frames = vec![Vector2::new(1.0, 0.0); m];
+
+            // Reinitialize stable set with FPS on the new grid
+            let fps_k = self.state.stable_set.len().max(4);
+            let new_stable_set = active_set::initialize_stable_set(
+                &new_points, fps_k, &new_mask,
+            );
+
+            // Preserve current coefficients as initial guess
+            let coefficients = self.state.coefficients.clone();
+
+            self.state = AlgorithmState {
+                coefficients,
+                collocation_points: new_points,
+                active_set: Vec::new(),
+                stable_set: new_stable_set,
+                frames: new_frames,
+                k_high: self.state.k_high,
+                k_low: self.state.k_low,
+                domain_mask: new_mask,
+                precomputed: None,
+            };
+
+            self.grid_width = new_gw;
+            self.grid_height = new_gh;
+            self.is_first_step = true;
+        }
+
+        // Step 5: run Algorithm 1 steps until convergence
+        let mut refinement_steps = 0;
+        let mut prev_active_set: Vec<usize> = Vec::new();
+
+        for _ in 0..strategy::MAX_REFINEMENT_STEPS {
+            let info = self.step(target_handles)?;
+            refinement_steps += 1;
+
+            // Check convergence: max_distortion ≤ K and active set stable
+            let current_active = self.state.active_set.clone();
+            if info.max_distortion <= k && current_active == prev_active_set {
+                break;
+            }
+            prev_active_set = current_active;
+        }
+
+        // Compute achieved K_max (Eq. 11)
+        let final_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
+        let final_omega = strategy::omega(final_h, c_norm, self.basis.as_ref());
+        let k_max_achieved = strategy::compute_k_max_isometric(k, final_omega)
+            .unwrap_or(f64::INFINITY);
+
+        Ok(strategy::Strategy2Result {
+            required_h,
+            required_resolution: new_resolution,
+            current_h,
+            k_max_achieved,
+            c_norm,
+            refinement_steps,
+        })
     }
 }
 

@@ -189,6 +189,12 @@ impl BasisFunction for ShapeAwareGaussianBasis {
         t / (self.s * self.s)
     }
 
+    fn gradient_modulus_inverse(&self, v: f64) -> f64 {
+        // Same approximation as gradient_modulus (Euclidean bound).
+        // ω_{∇F}(t) = t / s² → ω_{∇F}⁻¹(v) = v · s²
+        v * self.s * self.s
+    }
+
     fn identity_coefficients(&self) -> CoefficientMatrix {
         // Same as Euclidean Gaussian: affine terms encode identity.
         let n = self.count();

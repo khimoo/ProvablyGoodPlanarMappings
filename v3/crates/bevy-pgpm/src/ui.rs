@@ -50,6 +50,18 @@ pub struct ImagePathText;
 #[derive(Component)]
 pub struct ImageLoadButton;
 
+#[derive(Component)]
+pub struct Strategy2Button;
+
+#[derive(Component)]
+pub struct KMaxText;
+
+#[derive(Component)]
+pub struct KMaxMinusButton;
+
+#[derive(Component)]
+pub struct KMaxPlusButton;
+
 /// Shared font handle loaded at startup.
 #[derive(Resource)]
 pub struct UiFont(pub Handle<Font>);
@@ -121,6 +133,14 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
             // ── Basis type ──────────────────────────────────
             label(panel, "Basis function", &font);
             wide_button(panel, "Gaussian", BasisTypeButton, &font);
+
+            separator(panel);
+
+            // ── Strategy 2 ─────────────────────────────────
+            label(panel, "Strategy 2 (Eq. 14)", &font);
+            label(panel, "K_max target", &font);
+            param_row(panel, "6.0", KMaxText, "\u{f068}", KMaxMinusButton, "\u{f067}", KMaxPlusButton, &font);
+            wide_button(panel, "\u{f0e7}  Refine (Strategy 2)", Strategy2Button, &font);
 
             separator(panel);
 
@@ -500,6 +520,94 @@ pub fn on_image_path(
     }
 }
 
+/// System: adjust K_max parameter via +/- buttons.
+pub fn on_k_max(
+    q_minus: Query<&Interaction, (Changed<Interaction>, With<KMaxMinusButton>)>,
+    q_plus: Query<&Interaction, (Changed<Interaction>, With<KMaxPlusButton>)>,
+    mut params: ResMut<AlgoParams>,
+) {
+    let mut changed = false;
+    for interaction in &q_minus {
+        if *interaction == Interaction::Pressed {
+            params.k_max = (params.k_max - 0.5).max(params.k_bound + 0.1);
+            changed = true;
+        }
+    }
+    for interaction in &q_plus {
+        if *interaction == Interaction::Pressed {
+            params.k_max += 0.5;
+            changed = true;
+        }
+    }
+    if changed {
+        info!("K_max = {:.1}", params.k_max);
+    }
+}
+
+/// System: update K_max display text.
+pub fn update_k_max_text(
+    params: Res<AlgoParams>,
+    mut query: Query<&mut Text, With<KMaxText>>,
+) {
+    if !params.is_changed() { return; }
+    for mut text in &mut query {
+        **text = format!("{:.1}", params.k_max);
+    }
+}
+
+/// System: handle the "Refine (Strategy 2)" button click.
+pub fn on_strategy2(
+    query: Query<&Interaction, (Changed<Interaction>, With<Strategy2Button>)>,
+    state: Res<State<AppState>>,
+    mut deform_state: ResMut<DeformationState>,
+    mut deform_info: ResMut<DeformationInfo>,
+    params: Res<AlgoParams>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+
+        if *state.get() != AppState::Deforming {
+            info!("Strategy 2 is only available in Deforming mode");
+            continue;
+        }
+
+        if deform_state.algorithm.is_none() {
+            info!("No algorithm instance");
+            continue;
+        };
+
+        let targets = deform_state.target_handles.clone();
+        let k_max = params.k_max;
+
+        info!(
+            "Strategy 2: K={:.2}, K_max={:.2}, running refinement...",
+            params.k_bound, k_max
+        );
+
+        let algo = deform_state.algorithm.as_mut().unwrap();
+        match algo.refine_strategy2(k_max, &targets) {
+            Ok(result) => {
+                let msg = format!(
+                    "h_req={:.4}, res={}, steps={}\nK_max={:.3}, |||c|||={:.3}",
+                    result.required_h,
+                    result.required_resolution,
+                    result.refinement_steps,
+                    result.k_max_achieved,
+                    result.c_norm,
+                );
+                info!("Strategy 2 complete: {}", msg);
+                deform_info.strategy2_status = Some(msg);
+                deform_state.needs_solve = false;
+            }
+            Err(e) => {
+                let msg = format!("Error: {}", e);
+                warn!("Strategy 2 failed: {}", msg);
+                deform_info.strategy2_status = Some(msg);
+            }
+        }
+    }
+}
+
 // ── Systems: update dynamic text ────────────────────────────────────
 
 pub fn update_status_text(
@@ -516,13 +624,17 @@ pub fn update_status_text(
             color.0 = Color::srgb(0.4, 1.0, 0.4);
         }
         AppState::Deforming => {
-            **text = format!(
+            let mut s = format!(
                 "Mode: DEFORM\nmax D = {:.2}\nActive: {} | Stable: {}\nSteps: {}",
                 deform_info.max_distortion,
                 deform_info.active_set_size,
                 deform_info.stable_set_size,
                 deform_info.step_count,
             );
+            if let Some(ref status) = deform_info.strategy2_status {
+                s.push_str(&format!("\n---\nStrategy 2:\n{}", status));
+            }
+            **text = s;
             color.0 = Color::srgb(1.0, 0.65, 0.4);
         }
     }

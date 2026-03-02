@@ -126,12 +126,15 @@ fn main() {
             ui::on_reg_mode,
             ui::on_basis_type,
             ui::on_image_path,
+            ui::on_k_max,
+            ui::on_strategy2,
             ui::update_status_text,
             ui::update_toggle_label,
             ui::update_k_text,
             ui::update_lambda_text,
             ui::update_reg_mode_label,
             ui::update_basis_type_label,
+            ui::update_k_max_text,
         ))
         .run();
 }
