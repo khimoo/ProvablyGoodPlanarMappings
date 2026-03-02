@@ -179,6 +179,10 @@ impl GeodesicField {
     }
 
     /// Bilinear interpolation of the distance field at an arbitrary point.
+    ///
+    /// If any of the 2×2 bilinear neighbors have Inf distance (Wall cells),
+    /// they are excluded and only finite neighbors contribute. This prevents
+    /// Inf from contaminating interpolation near the domain boundary.
     pub fn interpolate(&self, x: Vector2<f64>) -> f64 {
         let cf = (x.x - self.x_min) / self.dx;
         let rf = (x.y - self.y_min) / self.dy;
@@ -196,10 +200,33 @@ impl GeodesicField {
         let d01 = self.distances[r1 * self.width + c0];
         let d11 = self.distances[r1 * self.width + c1];
 
-        let d0 = d00 * (1.0 - tc) + d10 * tc;
-        let d1 = d01 * (1.0 - tc) + d11 * tc;
+        // Check if all four are finite → standard bilinear
+        if d00.is_finite() && d10.is_finite() && d01.is_finite() && d11.is_finite() {
+            let d0 = d00 * (1.0 - tc) + d10 * tc;
+            let d1 = d01 * (1.0 - tc) + d11 * tc;
+            return d0 * (1.0 - tr) + d1 * tr;
+        }
 
-        d0 * (1.0 - tr) + d1 * tr
+        // Some neighbors are walls: weighted average of finite neighbors only
+        let corners = [
+            (d00, (1.0 - tc) * (1.0 - tr)),
+            (d10, tc * (1.0 - tr)),
+            (d01, (1.0 - tc) * tr),
+            (d11, tc * tr),
+        ];
+        let mut sum = 0.0;
+        let mut w_sum = 0.0;
+        for &(d, w) in &corners {
+            if d.is_finite() {
+                sum += d * w;
+                w_sum += w;
+            }
+        }
+        if w_sum > 0.0 {
+            sum / w_sum
+        } else {
+            f64::INFINITY
+        }
     }
 
     /// Gradient of the distance field at a grid point (central differences).
@@ -228,6 +255,9 @@ impl GeodesicField {
     }
 
     /// Interpolated gradient at an arbitrary point.
+    ///
+    /// Skips Wall cells (Inf distance) when interpolating, analogous to
+    /// `interpolate()`.
     pub fn interpolate_gradient(&self, x: Vector2<f64>) -> Vector2<f64> {
         let cf = (x.x - self.x_min) / self.dx;
         let rf = (x.y - self.y_min) / self.dy;
@@ -240,15 +270,33 @@ impl GeodesicField {
         let tc = (cf - c0 as f64).clamp(0.0, 1.0);
         let tr = (rf - r0 as f64).clamp(0.0, 1.0);
 
-        let g00 = self.gradient_at_index(r0 * self.width + c0);
-        let g10 = self.gradient_at_index(r0 * self.width + c1);
-        let g01 = self.gradient_at_index(r1 * self.width + c0);
-        let g11 = self.gradient_at_index(r1 * self.width + c1);
+        let indices = [
+            (r0 * self.width + c0, (1.0 - tc) * (1.0 - tr)),
+            (r0 * self.width + c1, tc * (1.0 - tr)),
+            (r1 * self.width + c0, (1.0 - tc) * tr),
+            (r1 * self.width + c1, tc * tr),
+        ];
 
-        let g0 = g00 * (1.0 - tc) + g10 * tc;
-        let g1 = g01 * (1.0 - tc) + g11 * tc;
+        let mut gx = 0.0;
+        let mut gy = 0.0;
+        let mut w_sum = 0.0;
 
-        g0 * (1.0 - tr) + g1 * tr
+        for &(idx, w) in &indices {
+            if self.distances[idx].is_finite() {
+                let g = self.gradient_at_index(idx);
+                if g.x.is_finite() && g.y.is_finite() {
+                    gx += g.x * w;
+                    gy += g.y * w;
+                    w_sum += w;
+                }
+            }
+        }
+
+        if w_sum > 0.0 {
+            Vector2::new(gx / w_sum, gy / w_sum)
+        } else {
+            Vector2::new(0.0, 0.0)
+        }
     }
 
     /// Grid dimensions.
@@ -337,7 +385,15 @@ fn solve_eikonal_2d(
 /// Build a domain mask on a grid from a polygon contour.
 ///
 /// Returns a Vec<bool> of length width*height (row-major).
-/// `true` if the grid cell at (col, row) is inside the polygon.
+/// `true` if the grid cell at (col, row) is inside the polygon
+/// **or within one grid cell of the polygon boundary**.
+///
+/// The standard ray-casting point-in-polygon test returns `false` for
+/// points exactly on the boundary. Since the FMM marks non-interior
+/// cells as walls (distance = Inf), this causes bilinear interpolation
+/// to produce Inf near the boundary. Including boundary-adjacent cells
+/// ensures the distance field is well-defined everywhere inside the
+/// contour.
 pub fn build_domain_mask(
     bounds: &DomainBounds,
     width: usize,
@@ -346,6 +402,7 @@ pub fn build_domain_mask(
 ) -> Vec<bool> {
     let dx = (bounds.x_max - bounds.x_min) / (width as f64 - 1.0);
     let dy = (bounds.y_max - bounds.y_min) / (height as f64 - 1.0);
+    let margin = dx.max(dy) * 1.5; // include cells within 1.5 grid spacings of boundary
 
     let mut mask = vec![false; width * height];
 
@@ -353,11 +410,50 @@ pub fn build_domain_mask(
         for col in 0..width {
             let x = bounds.x_min + col as f64 * dx;
             let y = bounds.y_min + row as f64 * dy;
-            mask[row * width + col] = point_in_polygon_f64(x, y, polygon);
+            mask[row * width + col] =
+                point_in_polygon_f64(x, y, polygon)
+                || point_near_polygon_edge(x, y, polygon, margin);
         }
     }
 
     mask
+}
+
+/// Check whether a point is within `margin` distance of any polygon edge.
+fn point_near_polygon_edge(x: f64, y: f64, polygon: &[Vector2<f64>], margin: f64) -> bool {
+    let n = polygon.len();
+    if n < 2 {
+        return false;
+    }
+    let margin_sq = margin * margin;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (ax, ay) = (polygon[i].x, polygon[i].y);
+        let (bx, by) = (polygon[j].x, polygon[j].y);
+        // Project point onto the line segment [a, b]
+        let abx = bx - ax;
+        let aby = by - ay;
+        let len_sq = abx * abx + aby * aby;
+        if len_sq < 1e-30 {
+            // Degenerate edge
+            let dx = x - ax;
+            let dy = y - ay;
+            if dx * dx + dy * dy <= margin_sq {
+                return true;
+            }
+            continue;
+        }
+        let t = ((x - ax) * abx + (y - ay) * aby) / len_sq;
+        let t_clamped = t.clamp(0.0, 1.0);
+        let px = ax + t_clamped * abx;
+        let py = ay + t_clamped * aby;
+        let dx = x - px;
+        let dy = y - py;
+        if dx * dx + dy * dy <= margin_sq {
+            return true;
+        }
+    }
+    false
 }
 
 /// Ray-casting point-in-polygon test.

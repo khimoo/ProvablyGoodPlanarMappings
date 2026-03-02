@@ -283,6 +283,7 @@ pub fn on_toggle_mode(
     query: Query<&Interaction, (Changed<Interaction>, With<ToggleModeButton>)>,
     state: Res<State<AppState>>,
     mut next_state: ResMut<NextState<AppState>>,
+    mut commands: Commands,
     mut deform_state: ResMut<DeformationState>,
     mut deform_info: ResMut<DeformationInfo>,
     algo_params: Res<AlgoParams>,
@@ -297,11 +298,14 @@ pub fn on_toggle_mode(
                     info!("No handles added yet!");
                     return;
                 }
-                deform_state.finalize(
+                let is_shape_aware = deform_state.finalize(
                     image_info.width as f64,
                     image_info.height as f64,
                     &algo_params,
                     &image_info.contour,
+                );
+                commands.insert_resource(
+                    crate::deform::UseShapeAwareBasis(is_shape_aware),
                 );
                 deform_info.k_bound = algo_params.k_bound;
                 deform_info.lambda_reg = algo_params.lambda_reg;
@@ -420,6 +424,24 @@ pub fn on_reg_mode(
         params.reg_mode = params.reg_mode.next();
         info.reg_mode_label = params.reg_mode.label();
         push_params(&params, &mut deform_state);
+    }
+}
+
+/// System: cycle basis function type.
+/// Only effective in Setup mode (basis is baked into the Algorithm on finalize).
+pub fn on_basis_type(
+    query: Query<&Interaction, (Changed<Interaction>, With<BasisTypeButton>)>,
+    mut params: ResMut<AlgoParams>,
+    state: Res<State<AppState>>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+        if *state.get() != AppState::Setup {
+            info!("Basis type can only be changed in Setup mode");
+            continue;
+        }
+        params.basis_type = params.basis_type.next();
+        info!("Basis type: {}", params.basis_type.label());
     }
 }
 
@@ -558,6 +580,24 @@ pub fn update_reg_mode_label(
             for &child in children.iter() {
                 if let Ok(mut txt) = text_q.get_mut(child) {
                     **txt = params.reg_mode.label().to_string();
+                }
+            }
+        }
+    }
+}
+
+pub fn update_basis_type_label(
+    params: Res<AlgoParams>,
+    query: Query<Entity, With<BasisTypeButton>>,
+    children_q: Query<&Children>,
+    mut text_q: Query<&mut Text>,
+) {
+    if !params.is_changed() { return; }
+    for entity in &query {
+        if let Ok(children) = children_q.get(entity) {
+            for &child in children.iter() {
+                if let Ok(mut txt) = text_q.get_mut(child) {
+                    **txt = params.basis_type.label().to_string();
                 }
             }
         }

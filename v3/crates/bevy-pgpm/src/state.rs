@@ -54,13 +54,15 @@ impl DeformationState {
     /// eligible for distortion constraints and ARAP regularisation
     /// (Paper Section 4: "points from a surrounding uniform grid that
     /// fall inside the domain").
+    /// Returns `true` if shape-aware basis was selected (caller should set
+    /// the `UseShapeAwareBasis` resource accordingly).
     pub fn finalize(
         &mut self,
         image_width: f64,
         image_height: f64,
         algo_params: &AlgoParams,
         contour: &[(f32, f32)],
-    ) {
+    ) -> bool {
         let epsilon = algo_params.epsilon;
         let domain = DomainBounds {
             x_min: -epsilon,
@@ -72,10 +74,34 @@ impl DeformationState {
         // Determine RBF scale s from the average distance between centers.
         let s = compute_rbf_scale(&self.source_handles, image_width, image_height);
 
-        let basis = Box::new(pgpm_core::basis::gaussian::GaussianBasis::new(
-            self.source_handles.clone(),
-            s,
-        ));
+        let is_shape_aware = algo_params.basis_type == BasisType::ShapeAwareGaussian;
+
+        // Convert contour from (f32, f32) to Vector2<f64> for pgpm-core
+        let contour_v2: Vec<nalgebra::Vector2<f64>> = contour
+            .iter()
+            .map(|&(x, y)| nalgebra::Vector2::new(x as f64, y as f64))
+            .collect();
+
+        let basis: Box<dyn pgpm_core::basis::BasisFunction> = match algo_params.basis_type {
+            BasisType::Gaussian => {
+                Box::new(pgpm_core::basis::gaussian::GaussianBasis::new(
+                    self.source_handles.clone(),
+                    s,
+                ))
+            }
+            BasisType::ShapeAwareGaussian => {
+                let fmm_resolution = 256; // Grid resolution for geodesic FMM
+                Box::new(
+                    pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis::new(
+                        self.source_handles.clone(),
+                        s,
+                        &contour_v2,
+                        &domain,
+                        fmm_resolution,
+                    ),
+                )
+            }
+        };
 
         let params = AlgorithmParams {
             distortion_type: DistortionType::Isometric,
@@ -87,11 +113,6 @@ impl DeformationState {
             ),
         };
 
-        // Convert contour from (f32, f32) to Vector2<f64> for pgpm-core
-        let contour_v2: Vec<nalgebra::Vector2<f64>> = contour
-            .iter()
-            .map(|&(x, y)| nalgebra::Vector2::new(x as f64, y as f64))
-            .collect();
         let domain_contour = if contour_v2.is_empty() {
             None
         } else {
@@ -110,6 +131,7 @@ impl DeformationState {
 
         self.target_handles = self.source_handles.clone();
         self.algorithm = Some(algorithm);
+        is_shape_aware
     }
 }
 
@@ -165,6 +187,39 @@ impl Default for DeformationInfo {
             lambda_reg: 1e-2,
             reg_mode_label: "ARAP",
         }
+    }
+}
+
+/// Which basis function type to use (Table 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasisType {
+    /// Standard Euclidean Gaussian — GPU path (vertex shader evaluates RBFs).
+    Gaussian,
+    /// Shape-aware Gaussian using geodesic distance — CPU path.
+    ShapeAwareGaussian,
+    // Phase 3: BSpline,
+    // Phase 3: TPS,
+}
+
+impl BasisType {
+    pub fn next(self) -> Self {
+        match self {
+            BasisType::Gaussian => BasisType::ShapeAwareGaussian,
+            BasisType::ShapeAwareGaussian => BasisType::Gaussian,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BasisType::Gaussian => "Gaussian",
+            BasisType::ShapeAwareGaussian => "Shape-Aware",
+        }
+    }
+}
+
+impl std::fmt::Display for BasisType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
     }
 }
 
@@ -238,6 +293,8 @@ pub struct AlgoParams {
     pub lambda_arap: f64,
     /// Biharmonic weight for Mixed mode
     pub lambda_bh: f64,
+    /// Basis function type (Table 1)
+    pub basis_type: BasisType,
 }
 
 impl Default for AlgoParams {
@@ -251,6 +308,7 @@ impl Default for AlgoParams {
             reg_mode: RegMode::Arap,
             lambda_arap: 1.0,
             lambda_bh: 0.1,
+            basis_type: BasisType::Gaussian,
         }
     }
 }

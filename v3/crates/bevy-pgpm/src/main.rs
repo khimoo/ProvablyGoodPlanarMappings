@@ -22,7 +22,7 @@ use bevy::{
 use image::GenericImageView;
 
 use bevy_pgpm::{
-    deform::update_deform_material,
+    deform::{update_deform_material, cpu_update_mesh_positions},
     image::extract_contour_from_image,
     input::{handle_input, update_deformation},
     rendering::{create_contour_mesh, DeformMaterial, DeformUniform, RBFCoeff},
@@ -114,6 +114,7 @@ fn main() {
             handle_input,
             update_deformation.before(update_deform_material),
             update_deform_material,
+            cpu_update_mesh_positions,
         ))
         .add_systems(Update, (
             ui::draw_handles,
@@ -123,12 +124,14 @@ fn main() {
             ui::on_k_bound,
             ui::on_lambda,
             ui::on_reg_mode,
+            ui::on_basis_type,
             ui::on_image_path,
             ui::update_status_text,
             ui::update_toggle_label,
             ui::update_k_text,
             ui::update_lambda_text,
             ui::update_reg_mode_label,
+            ui::update_basis_type_label,
         ))
         .run();
 }
@@ -211,6 +214,26 @@ fn load_image(
         UVec2::new(200, 200),
         &contour,
     );
+
+    // Store original pixel-space vertex positions for CPU deformation path.
+    // Vertex POSITION is in world-centered coords: bx = px - w/2, by = h/2 - py.
+    // Invert to recover pixel coords: px = bx + w/2, py = h/2 - by.
+    let pixel_positions: Vec<[f32; 2]> = grid_mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .and_then(|attr| attr.as_float3())
+        .map(|positions| {
+            positions
+                .iter()
+                .map(|[bx, by, _]| {
+                    [bx + image_width * 0.5, image_height * 0.5 - by]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    commands.insert_resource(bevy_pgpm::deform::OriginalVertexPositions {
+        positions: pixel_positions,
+    });
+
     let mesh_handle = meshes.add(grid_mesh);
 
     // Create initial material with identity mapping (affine only)
