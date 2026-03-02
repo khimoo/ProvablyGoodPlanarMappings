@@ -42,6 +42,9 @@ pub struct LambdaUpButton;
 pub struct RegModeButton;
 
 #[derive(Component)]
+pub struct BasisTypeButton;
+
+#[derive(Component)]
 pub struct ImagePathText;
 
 #[derive(Component)]
@@ -112,6 +115,12 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
             // ── Regularization type ─────────────────────────
             label(panel, "Regularization type", &font);
             wide_button(panel, "ARAP", RegModeButton, &font);
+
+            separator(panel);
+
+            // ── Basis type ──────────────────────────────────
+            label(panel, "Basis function", &font);
+            wide_button(panel, "Gaussian", BasisTypeButton, &font);
 
             separator(panel);
 
@@ -313,6 +322,12 @@ pub fn on_reset(
     mut deform_state: ResMut<DeformationState>,
     mut deform_info: ResMut<DeformationInfo>,
     mut next_state: ResMut<NextState<AppState>>,
+    image_info: Option<Res<ImageInfo>>,
+    mut materials: ResMut<Assets<crate::rendering::DeformMaterial>>,
+    mat_query: Query<
+        &bevy::sprite::MeshMaterial2d<crate::rendering::DeformMaterial>,
+        With<crate::state::DeformedImage>,
+    >,
 ) {
     for interaction in &query {
         if *interaction != Interaction::Pressed { continue; }
@@ -324,6 +339,21 @@ pub fn on_reset(
         deform_state.needs_solve = false;
         *deform_info = DeformationInfo::default();
         next_state.set(AppState::Setup);
+
+        // Reset shader uniform to identity mapping
+        if let (Some(ref image_info), Ok(mat_handle)) = (image_info.as_ref(), mat_query.get_single()) {
+            if let Some(material) = materials.get_mut(&mat_handle.0) {
+                let mut params = crate::rendering::DeformUniform::default();
+                params.image_width = image_info.width;
+                params.image_height = image_info.height;
+                params.n_rbf = 0;
+                // Identity: const=(0,0), x=(1,0), y=(0,1)
+                params.coeffs[0] = crate::rendering::RBFCoeff { x: 0.0, y: 0.0, _padding: Vec2::ZERO };
+                params.coeffs[1] = crate::rendering::RBFCoeff { x: 1.0, y: 0.0, _padding: Vec2::ZERO };
+                params.coeffs[2] = crate::rendering::RBFCoeff { x: 0.0, y: 1.0, _padding: Vec2::ZERO };
+                material.params = params;
+            }
+        }
     }
 }
 
