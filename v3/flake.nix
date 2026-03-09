@@ -78,6 +78,11 @@
             export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
             export WGPU_BACKEND=vulkan
 
+            # Nerd Fonts を assets/fonts/ にリンク (shellHook と同じ処理)
+            mkdir -p crates/bevy-pgpm/assets/fonts
+            ln -sfn ${nerdFonts}/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf \
+              crates/bevy-pgpm/assets/fonts/FiraCodeNerdFontMono-Regular.ttf
+
             # nix run が実行されたディレクトリ（= flake.nix のあるディレクトリ）で cargo run
             exec cargo run --features bevy/dynamic_linking -p bevy-pgpm
           ''}/bin/run-bevy-pgpm";

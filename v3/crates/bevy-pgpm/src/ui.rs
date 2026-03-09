@@ -402,6 +402,7 @@ pub fn on_k_bound(
         }
     }
     if changed {
+        enforce_k_max_invariant(&mut params);
         info.k_bound = params.k_bound;
         push_params(&params, &mut deform_state);
     }
@@ -462,6 +463,15 @@ pub fn on_basis_type(
         }
         params.basis_type = params.basis_type.next();
         info!("Basis type: {}", params.basis_type.label());
+    }
+}
+
+/// Enforce Strategy 2 invariant: K_max > K (Eq. 14 precondition).
+/// Called after any change to k_bound or k_max.
+fn enforce_k_max_invariant(params: &mut AlgoParams) {
+    let min_k_max = params.k_bound + 0.1;
+    if params.k_max < min_k_max {
+        params.k_max = min_k_max;
     }
 }
 
@@ -529,7 +539,7 @@ pub fn on_k_max(
     let mut changed = false;
     for interaction in &q_minus {
         if *interaction == Interaction::Pressed {
-            params.k_max = (params.k_max - 0.5).max(params.k_bound + 0.1);
+            params.k_max -= 0.5;
             changed = true;
         }
     }
@@ -540,6 +550,7 @@ pub fn on_k_max(
         }
     }
     if changed {
+        enforce_k_max_invariant(&mut params);
         info!("K_max = {:.1}", params.k_max);
     }
 }

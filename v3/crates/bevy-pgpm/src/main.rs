@@ -14,7 +14,6 @@
 //! 3. Adjust K bound, regularization type and lambda via the panel buttons.
 
 use bevy::{
-    asset::AssetPlugin,
     prelude::*,
     render::camera::OrthographicProjection,
     sprite::{Material2dPlugin, MeshMaterial2d},
@@ -59,48 +58,16 @@ fn default_image_abs_path() -> String {
     "texture.png".to_string()
 }
 
-/// Resolve the Bevy AssetPlugin base path.
-/// Points to the crate's assets/ directory so AssetServer can find textures/fonts/shaders.
-fn resolve_asset_folder() -> String {
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = std::path::PathBuf::from(&manifest).join("assets");
-        if p.is_dir() {
-            return p.to_string_lossy().into_owned();
-        }
-    }
-    let candidates = [
-        "crates/bevy-pgpm/assets",
-        "assets",
-    ];
-    for c in &candidates {
-        if std::path::Path::new(c).is_dir() {
-            return std::fs::canonicalize(c)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| c.to_string());
-        }
-    }
-    "assets".to_string()
-}
-
 fn main() {
-    let asset_folder = resolve_asset_folder();
-    info!("Asset folder: {}", asset_folder);
-
     App::new()
-        .add_plugins(DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "PGPM v3 — Provably Good Planar Mappings".into(),
-                    resolution: (900.0, 900.0).into(),
-                    ..default()
-                }),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "PGPM v3 — Provably Good Planar Mappings".into(),
+                resolution: (900.0, 900.0).into(),
                 ..default()
-            })
-            .set(AssetPlugin {
-                file_path: asset_folder,
-                ..default()
-            })
-        )
+            }),
+            ..default()
+        }))
         .add_plugins(Material2dPlugin::<DeformMaterial>::default())
         .init_state::<AppState>()
         .init_resource::<DeformationState>()
