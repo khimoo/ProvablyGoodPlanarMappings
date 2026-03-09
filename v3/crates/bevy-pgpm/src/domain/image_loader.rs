@@ -29,7 +29,7 @@ pub fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
     // Check if image has any transparent pixels at all
     let has_transparency = rgba.pixels().any(|p| p[3] < ALPHA_THRESHOLD);
     if !has_transparency {
-        // Fully opaque → use full rectangle, return empty (caller handles this)
+        // Fully opaque: use full rectangle, return empty (caller handles this)
         return vec![];
     }
 

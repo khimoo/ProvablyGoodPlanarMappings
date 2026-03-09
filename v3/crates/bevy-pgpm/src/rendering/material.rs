@@ -56,6 +56,21 @@ impl Default for DeformUniform {
     }
 }
 
+impl DeformUniform {
+    /// Create an identity mapping uniform: f(x) = x (no deformation).
+    /// coeffs[0] = const(0,0), coeffs[1] = x(1,0), coeffs[2] = y(0,1)
+    pub fn identity(width: f32, height: f32) -> Self {
+        let mut params = Self::default();
+        params.image_width = width;
+        params.image_height = height;
+        params.n_rbf = 0;
+        params.coeffs[0] = RBFCoeff { x: 0.0, y: 0.0, _padding: Vec2::ZERO };
+        params.coeffs[1] = RBFCoeff { x: 1.0, y: 0.0, _padding: Vec2::ZERO };
+        params.coeffs[2] = RBFCoeff { x: 0.0, y: 1.0, _padding: Vec2::ZERO };
+        params
+    }
+}
+
 /// The Bevy material that holds texture + deformation parameters.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct DeformMaterial {

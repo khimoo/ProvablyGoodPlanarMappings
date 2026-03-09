@@ -94,17 +94,31 @@ v3/
 │   └── bevy-pgpm/               # Phase 2: Bevy統合 (レンダリング・UI)
 │       ├── Cargo.toml
 │       ├── src/
-│       │   ├── main.rs          # Bevy app setup
-│       │   ├── state.rs         # AppState, DeformationState
-│       │   ├── input.rs         # マウス・キーボード入力
+│       │   ├── main.rs          # Bevy app setup, カメラ
+│       │   ├── lib.rs           # モジュール宣言
+│       │   ├── lifecycle.rs     # 画像ロード・アルゴリズムステップ
+│       │   ├── input.rs         # マウス入力 (ハンドル配置・ドラッグ)
+│       │   ├── domain/          # ドメインユーティリティ (Bevy非依存部分)
+│       │   │   ├── coords.rs    # 座標変換 (pixel <-> world) 一元管理
+│       │   │   ├── rbf.rs       # RBFスケール計算
+│       │   │   └── image_loader.rs # 画像読み込み・輪郭抽出
+│       │   ├── state/           # Bevy Resource定義 (責務分割)
+│       │   │   ├── algorithm.rs # AlgorithmState (アルゴリズム・ハンドル)
+│       │   │   ├── interaction.rs # DragState (ドラッグUI状態)
+│       │   │   ├── params.rs    # AlgoParams, BasisType, RegMode
+│       │   │   ├── image_info.rs # ImageInfo, ImagePathConfig
+│       │   │   └── display_info.rs # DeformationInfo (表示用)
 │       │   ├── rendering/
-│       │   │   ├── mod.rs
 │       │   │   ├── mesh.rs      # メッシュ生成
-│       │   │   ├── material.rs  # カスタムマテリアル
-│       │   │   └── deform.wgsl  # 頂点シェーダ
-│       │   ├── deform.rs        # GPU/CPU変形パス切り替え
-│       │   ├── image.rs         # 画像読み込み
-│       │   └── ui.rs            # 情報表示・パラメータ調整
+│       │   │   ├── material.rs  # カスタムマテリアル + identity()
+│       │   │   ├── gpu_deform.rs # GPU変形パス (シェーダuniform更新)
+│       │   │   └── cpu_deform.rs # CPU変形パス (頂点位置更新)
+│       │   └── ui/              # UI (責務分割)
+│       │       ├── markers.rs   # マーカーコンポーネント定義
+│       │       ├── panel.rs     # パネル構築
+│       │       ├── actions.rs   # ボタンアクション
+│       │       ├── display.rs   # テキスト更新・ボタン視覚フィードバック
+│       │       └── gizmos.rs    # ハンドル描画
 │       └── assets/
 └── assets/
 ```
@@ -165,6 +179,10 @@ Phase 3 の未実装機能はスタブ/無効化で対応し、UIレベルで制
 
 ## 開発時の注意
 
+- **ビルド・実行は必ず `nix develop` シェル内で行うこと**
+  - `nix develop` で開発シェルに入った後に `cargo build`, `cargo run` 等を実行する
+  - もしくは `nix run` でそのまま実行可能
+  - Nix 外でビルドすると Bevy の依存ライブラリ (Vulkan, X11, Wayland 等) が見つからない
 - コードにコメントを書く際、必ず論文の式番号を付記すること
   - 例: `// Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||`
 - テストケースは論文 Section 6 の実験設定を再現すること
