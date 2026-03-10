@@ -404,6 +404,7 @@ pub fn build_domain_mask(
     width: usize,
     height: usize,
     polygon: &[Vector2<f64>],
+    holes: &[&[Vector2<f64>]],
 ) -> Vec<bool> {
     let dx = (bounds.x_max - bounds.x_min) / (width as f64 - 1.0);
     let dy = (bounds.y_max - bounds.y_min) / (height as f64 - 1.0);
@@ -415,9 +416,18 @@ pub fn build_domain_mask(
         for col in 0..width {
             let x = bounds.x_min + col as f64 * dx;
             let y = bounds.y_min + row as f64 * dy;
-            mask[row * width + col] =
-                point_in_polygon_f64(x, y, polygon)
+
+            let in_outer = point_in_polygon_f64(x, y, polygon)
                 || point_near_polygon_edge(x, y, polygon, margin);
+
+            // Exclude points inside hole interiors (but keep those near hole edges
+            // for smooth distance field transition)
+            let in_hole = holes.iter().any(|hole| {
+                point_in_polygon_f64(x, y, hole)
+                    && !point_near_polygon_edge(x, y, hole, margin)
+            });
+
+            mask[row * width + col] = in_outer && !in_hole;
         }
     }
 

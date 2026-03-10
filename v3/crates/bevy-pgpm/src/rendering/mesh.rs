@@ -22,23 +22,44 @@ use geo::{Contains, Coord, LineString, Polygon};
 /// - POSITION: world-space position (centered at origin)
 /// - UV_0: normalized texture coordinates [0,1]²
 /// - NORMAL: (0, 0, 1)
-pub fn create_contour_mesh(size: Vec2, subdivisions: UVec2, contour: &[(f32, f32)]) -> Mesh {
+pub fn create_contour_mesh(
+    size: Vec2,
+    subdivisions: UVec2,
+    contour: &[(f32, f32)],
+    holes: &[Vec<(f32, f32)>],
+) -> Mesh {
     let width_segments = subdivisions.x as usize;
     let height_segments = subdivisions.y as usize;
 
     let has_contour = !contour.is_empty();
     let polygon = if has_contour {
-        let coords: Vec<Coord<f32>> = contour.iter().map(|&(x, y)| Coord { x, y }).collect();
-        Some(Polygon::new(LineString::from(coords), vec![]))
+        let outer_coords: Vec<Coord<f32>> =
+            contour.iter().map(|&(x, y)| Coord { x, y }).collect();
+        let hole_rings: Vec<LineString<f32>> = holes
+            .iter()
+            .map(|hole| {
+                let coords: Vec<Coord<f32>> =
+                    hole.iter().map(|&(x, y)| Coord { x, y }).collect();
+                LineString::from(coords)
+            })
+            .collect();
+        Some(Polygon::new(LineString::from(outer_coords), hole_rings))
     } else {
         None
     };
 
     let mut valid_points = Vec::new();
 
-    // Add contour points themselves (they are on the boundary)
+    // Add outer contour points (they are on the boundary)
     if has_contour {
         for &(x, y) in contour {
+            valid_points.push(Vec2::new(x, y));
+        }
+    }
+
+    // Add hole contour points (they are on the hole boundaries)
+    for hole in holes {
+        for &(x, y) in hole {
             valid_points.push(Vec2::new(x, y));
         }
     }

@@ -4,6 +4,7 @@
 use nalgebra::Vector2;
 use pgpm_core::{
     Algorithm, AlgorithmParams, DomainBounds, DistortionType, RegularizationType,
+    PolygonDomain,
     basis::shape_aware_gaussian::ShapeAwareGaussianBasis,
     basis::BasisFunction,
     geodesic::{GeodesicField, build_domain_mask},
@@ -42,7 +43,7 @@ fn test_fmm_distances_finite_inside_polygon() {
         y_min: -epsilon, y_max: h + epsilon,
     };
     let resolution = 200;
-    let mask = build_domain_mask(&bounds, resolution, resolution, &contour);
+    let mask = build_domain_mask(&bounds, resolution, resolution, &contour, &[]);
 
     // Count inside cells
     let inside_count = mask.iter().filter(|&&b| b).count();
@@ -97,7 +98,7 @@ fn test_shape_aware_basis_evaluate_nonzero() {
     ];
     let s = 80.0;
 
-    let basis = ShapeAwareGaussianBasis::new(centers.clone(), s, &contour, &bounds, 200);
+    let basis = ShapeAwareGaussianBasis::new(centers.clone(), s, &contour, &[], &bounds, 200);
 
     // Evaluate at center - should have phi=1 for that center
     let phi_at_center0 = basis.evaluate(Vector2::new(64.0, 128.0));
@@ -129,7 +130,7 @@ fn test_shape_aware_basis_gradient_nonzero() {
     ];
     let s = 80.0;
 
-    let basis = ShapeAwareGaussianBasis::new(centers, s, &contour, &bounds, 200);
+    let basis = ShapeAwareGaussianBasis::new(centers, s, &contour, &[], &bounds, 200);
 
     // Gradient at a non-center point should be nonzero
     let (gx, gy) = basis.gradient(Vector2::new(100.0, 128.0));
@@ -160,7 +161,7 @@ fn test_shape_aware_algorithm_step() {
     let contour_v2: Vec<Vector2<f64>> = contour.clone();
 
     let basis = Box::new(ShapeAwareGaussianBasis::new(
-        source_handles.clone(), s, &contour_v2, &bounds, 200,
+        source_handles.clone(), s, &contour_v2, &[], &bounds, 200,
     ));
 
     let params = AlgorithmParams {
@@ -170,9 +171,10 @@ fn test_shape_aware_algorithm_step() {
         regularization: RegularizationType::Arap,
     };
 
+    let domain = PolygonDomain::new(contour_v2, vec![]);
     let mut algo = Algorithm::new(
         basis, params, bounds, source_handles.clone(),
-        50, 8, Some(&contour_v2),
+        50, 8, Some(Box::new(domain)),
     );
 
     // Step with the handle moved

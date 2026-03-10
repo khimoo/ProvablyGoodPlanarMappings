@@ -10,7 +10,10 @@ pub struct ImageInfo {
     pub width: f32,
     pub height: f32,
     pub handle: Handle<Image>,
+    /// Outer boundary contour in pixel coordinates (empty = full rectangle).
     pub contour: Vec<(f32, f32)>,
+    /// Interior hole contours in pixel coordinates.
+    pub holes: Vec<Vec<(f32, f32)>>,
 }
 
 impl ImageInfo {

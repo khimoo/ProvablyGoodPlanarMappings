@@ -3,24 +3,34 @@
 //! Loads a PNG image, extracts the alpha-channel contour (for non-rectangular
 //! images), and resamples it to a manageable number of points.
 
-use imageproc::contours::find_contours;
+use imageproc::contours::{find_contours, BorderType};
 use image::GenericImageView;
-use log::{error, warn};
+use log::{error, info, warn};
 
 pub const CONTOUR_TARGET_POINTS: usize = 1024;
 pub const ALPHA_THRESHOLD: u8 = 128;
 
+/// Extracted contour data: outer boundary and interior holes.
+pub struct ContourData {
+    /// Outer boundary contour in pixel coordinates.
+    /// Empty means "use full rectangle" (fully opaque image).
+    pub outer: Vec<(f32, f32)>,
+    /// Interior hole contours in pixel coordinates.
+    /// Each hole is a closed polygon; points inside a hole are outside the domain.
+    pub holes: Vec<Vec<(f32, f32)>>,
+}
+
 /// Extract the contour from an image's alpha channel.
 ///
-/// For fully opaque rectangular images, returns an empty vec (meaning "use full rect").
-/// For images with transparency, returns the longest contour as a list of (x, y) points
-/// in pixel coordinates.
-pub fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
+/// For fully opaque rectangular images, returns empty outer (meaning "use full rect").
+/// For images with transparency, returns the longest outer contour and any
+/// hole contours that are direct children of it.
+pub fn extract_contour_from_image(image_path: &str) -> ContourData {
     let img = match image::open(image_path) {
         Ok(img) => img,
         Err(e) => {
             error!("Failed to load image for contour extraction: {}", e);
-            return vec![];
+            return ContourData { outer: vec![], holes: vec![] };
         }
     };
 
@@ -31,7 +41,7 @@ pub fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
     let has_transparency = rgba.pixels().any(|p| p[3] < ALPHA_THRESHOLD);
     if !has_transparency {
         // Fully opaque: use full rectangle, return empty (caller handles this)
-        return vec![];
+        return ContourData { outer: vec![], holes: vec![] };
     }
 
     let binary_image = imageproc::map::map_pixels(&rgba, |_x, _y, p| {
@@ -46,26 +56,52 @@ pub fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
 
     if contours.is_empty() {
         warn!("No contours found in image despite transparency; using rectangular boundary");
-        return vec![
-            (0.0, 0.0),
-            (width as f32, 0.0),
-            (width as f32, height as f32),
-            (0.0, height as f32),
-        ];
+        return ContourData {
+            outer: vec![
+                (0.0, 0.0),
+                (width as f32, 0.0),
+                (width as f32, height as f32),
+                (0.0, height as f32),
+            ],
+            holes: vec![],
+        };
     }
 
-    let longest_contour = contours
+    // Find the longest Outer contour → main domain boundary
+    let (outer_idx, longest_outer) = contours
         .iter()
-        .max_by_key(|c| c.points.len())
+        .enumerate()
+        .filter(|(_, c)| c.border_type == BorderType::Outer)
+        .max_by_key(|(_, c)| c.points.len())
         .unwrap();
 
-    let contour_points: Vec<(f32, f32)> = longest_contour
+    let outer_points: Vec<(f32, f32)> = longest_outer
         .points
         .iter()
         .map(|p| (p.x as f32, p.y as f32))
         .collect();
 
-    resample_contour(&contour_points, CONTOUR_TARGET_POINTS)
+    // Collect Hole contours whose parent is the main outer contour
+    let hole_contours: Vec<Vec<(f32, f32)>> = contours
+        .iter()
+        .filter(|c| c.border_type == BorderType::Hole && c.parent == Some(outer_idx))
+        .map(|c| {
+            let points: Vec<(f32, f32)> = c.points
+                .iter()
+                .map(|p| (p.x as f32, p.y as f32))
+                .collect();
+            resample_contour(&points, CONTOUR_TARGET_POINTS)
+        })
+        .collect();
+
+    if !hole_contours.is_empty() {
+        info!("Found {} hole contour(s) in image", hole_contours.len());
+    }
+
+    ContourData {
+        outer: resample_contour(&outer_points, CONTOUR_TARGET_POINTS),
+        holes: hole_contours,
+    }
 }
 
 /// Resample a contour to have at most `target_points` uniformly spaced points.

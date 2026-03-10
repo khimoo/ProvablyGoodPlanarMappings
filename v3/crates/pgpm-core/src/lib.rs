@@ -7,6 +7,7 @@
 //! No Bevy, no UI, no image processing dependencies.
 
 pub mod types;
+pub mod domain;
 pub mod basis;
 pub mod distortion;
 pub mod active_set;
@@ -16,6 +17,7 @@ pub mod geodesic;
 pub mod strategy;
 
 pub use types::*;
+pub use domain::{Domain, PolygonDomain};
 pub use basis::BasisFunction;
 pub use algorithm::Algorithm;
 pub use strategy::Strategy2Result;

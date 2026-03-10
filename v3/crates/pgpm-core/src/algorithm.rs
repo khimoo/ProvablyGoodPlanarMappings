@@ -7,6 +7,7 @@
 use crate::active_set;
 use crate::basis::BasisFunction;
 use crate::distortion;
+use crate::domain::Domain;
 use crate::solver;
 use crate::strategy;
 use crate::types::*;
@@ -30,6 +31,9 @@ pub struct Algorithm {
     is_first_step: bool,
     /// Domain bounds for biharmonic energy integration
     domain_bounds: DomainBounds,
+    /// Domain Ω for "x ∈ Ω" test (Paper Section 4).
+    /// When `None`, all grid points are considered inside the domain.
+    domain: Option<Box<dyn Domain>>,
 }
 
 impl Algorithm {
@@ -42,12 +46,11 @@ impl Algorithm {
     /// - `source_handles`: Fixed handle positions {p_l} (Eq. 29)
     /// - `grid_resolution`: Number of grid points per side (paper Section 6: 200)
     /// - `fps_k`: Number of farthest point samples for Z'' (stable set)
-    /// - `domain_contour`: Optional contour polygon (pixel coords) defining
-    ///   the non-rectangular domain Ω.  When `Some`, only grid points inside
-    ///   the polygon are eligible for the active/stable sets and ARAP
-    ///   regularisation.  The rectangular grid structure is preserved for
-    ///   local-maxima detection (Section 5).  When `None`, all grid points
-    ///   are considered inside the domain.
+    /// - `domain`: Abstract domain Ω. When `Some`, only grid points where
+    ///   `domain.contains(pt)` returns true are eligible for the active/stable
+    ///   sets and ARAP regularisation. The rectangular grid structure is
+    ///   preserved for local-maxima detection (Section 5). When `None`, all
+    ///   grid points are considered inside the domain.
     pub fn new(
         basis: Box<dyn BasisFunction>,
         params: AlgorithmParams,
@@ -55,7 +58,7 @@ impl Algorithm {
         source_handles: Vec<Vector2<f64>>,
         grid_resolution: usize,
         fps_k: usize,
-        domain_contour: Option<&[Vector2<f64>]>,
+        domain: Option<Box<dyn Domain>>,
     ) -> Self {
         // Generate collocation grid
         // Section 4: "consider all the points from a surrounding
@@ -64,19 +67,11 @@ impl Algorithm {
             generate_collocation_grid(&domain_bounds, grid_resolution);
 
         let m = collocation_points.len();
-        let _n_basis = basis.count();
 
-        // Build domain mask: true for points inside the contour polygon.
+        // Build domain mask: true for points inside Ω.
         // Paper Section 4: "consider all the points from a surrounding
         // uniform grid that fall inside the domain"
-        let domain_mask = match domain_contour {
-            Some(contour) if !contour.is_empty() => {
-                collocation_points.iter()
-                    .map(|pt| point_in_polygon(pt, contour))
-                    .collect()
-            }
-            _ => vec![true; m], // no contour → all points are inside
-        };
+        let domain_mask = build_domain_mask(&collocation_points, domain.as_deref());
 
         // Section 5 "Activation of constraints":
         // K_high = 0.1 + 0.9*K, K_low = 0.5 + 0.5*K
@@ -116,6 +111,7 @@ impl Algorithm {
             grid_height,
             is_first_step: true,
             domain_bounds,
+            domain,
         }
     }
 
@@ -396,11 +392,8 @@ impl Algorithm {
 
             let m = new_points.len();
 
-            // Rebuild domain mask (no contour support in refinement — use all points)
-            // The original domain_mask was based on the original grid; for the refined
-            // grid we mark all points as interior (rectangular domain assumption for
-            // Strategy 2, consistent with paper Section 6 using rectangular grids).
-            let new_mask = vec![true; m];
+            // Rebuild domain mask on the refined grid using the stored domain.
+            let new_mask = build_domain_mask(&new_points, self.domain.as_deref());
 
             // Reinitialize frames to (1,0) for new points
             let new_frames = vec![Vector2::new(1.0, 0.0); m];
@@ -512,29 +505,15 @@ fn generate_collocation_grid(
     (points, res_x, res_y)
 }
 
-/// Ray-casting point-in-polygon test (Euclidean distance).
+/// Build domain mask from collocation points and an optional domain.
 ///
-/// Paper Section 4: "To generate a set of collocation points with a
-/// prescribed Euclidean fill-distance in a non-convex domain it is
-/// enough to … consider all the points from a surrounding uniform grid
-/// that fall inside the domain."
-fn point_in_polygon(pt: &Vector2<f64>, polygon: &[Vector2<f64>]) -> bool {
-    let n = polygon.len();
-    if n < 3 {
-        return false;
+/// Paper Section 4: "consider all the points from a surrounding uniform
+/// grid that fall inside the domain"
+fn build_domain_mask(points: &[Vector2<f64>], domain: Option<&dyn Domain>) -> Vec<bool> {
+    match domain {
+        Some(d) => points.iter().map(|pt| d.contains(pt)).collect(),
+        None => vec![true; points.len()],
     }
-    let (x, y) = (pt.x, pt.y);
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = (polygon[i].x, polygon[i].y);
-        let (xj, yj) = (polygon[j].x, polygon[j].y);
-        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
 }
 
 #[cfg(test)]
@@ -570,7 +549,7 @@ mod tests {
             Vector2::new(0.5, 0.5),
         ];
 
-        // Small grid for testing (no contour → full rectangle)
+        // Small grid for testing (no domain constraint → full rectangle)
         Algorithm::new(basis, params, domain, handles, 10, 4, None)
     }
 
@@ -688,39 +667,9 @@ mod tests {
     }
 
     #[test]
-    fn test_point_in_polygon_square() {
-        let square = vec![
-            Vector2::new(0.0, 0.0),
-            Vector2::new(1.0, 0.0),
-            Vector2::new(1.0, 1.0),
-            Vector2::new(0.0, 1.0),
-        ];
-        // Inside
-        assert!(point_in_polygon(&Vector2::new(0.5, 0.5), &square));
-        assert!(point_in_polygon(&Vector2::new(0.1, 0.1), &square));
-        // Outside
-        assert!(!point_in_polygon(&Vector2::new(1.5, 0.5), &square));
-        assert!(!point_in_polygon(&Vector2::new(-0.1, 0.5), &square));
-        assert!(!point_in_polygon(&Vector2::new(0.5, -0.1), &square));
-    }
+    fn test_domain_mask_with_polygon_domain() {
+        use crate::domain::PolygonDomain;
 
-    #[test]
-    fn test_point_in_polygon_triangle() {
-        let triangle = vec![
-            Vector2::new(0.0, 0.0),
-            Vector2::new(2.0, 0.0),
-            Vector2::new(1.0, 2.0),
-        ];
-        // Inside the triangle
-        assert!(point_in_polygon(&Vector2::new(1.0, 0.5), &triangle));
-        // Outside
-        assert!(!point_in_polygon(&Vector2::new(0.0, 2.0), &triangle));
-        assert!(!point_in_polygon(&Vector2::new(3.0, 0.0), &triangle));
-    }
-
-    #[test]
-    fn test_domain_mask_with_contour() {
-        // Create algorithm with a circular-ish contour inside [0,1]²
         let centers = vec![
             Vector2::new(0.5, 0.5),
         ];
@@ -746,9 +695,10 @@ mod tests {
             Vector2::new(0.0, 0.5),
         ];
 
+        let polygon_domain = PolygonDomain::new(contour, vec![]);
         let alg = Algorithm::new(
             basis, params, domain, centers, 5, 2,
-            Some(&contour),
+            Some(Box::new(polygon_domain)),
         );
 
         // Grid is 5×5 = 25 points, but some should be masked out

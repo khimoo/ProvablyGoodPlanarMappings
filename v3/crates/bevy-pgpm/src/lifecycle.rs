@@ -36,12 +36,18 @@ pub fn load_image(
     let Some((image_width, image_height)) = load_image_dimensions(abs_path) else {
         return;
     };
-    let contour = extract_contour_from_image(abs_path);
+    let contour_data = extract_contour_from_image(abs_path);
+    let contour = contour_data.outer;
+    let holes = contour_data.holes;
 
     if contour.is_empty() {
         info!("No contour extracted, using full image domain");
     } else {
-        info!("Extracted contour with {} points", contour.len());
+        info!(
+            "Extracted contour with {} points, {} hole(s)",
+            contour.len(),
+            holes.len(),
+        );
     }
 
     let image_handle: Handle<Image> = asset_server.load(abs_path.to_string());
@@ -51,6 +57,7 @@ pub fn load_image(
         height: image_height,
         handle: image_handle.clone(),
         contour: contour.clone(),
+        holes: holes.clone(),
     });
 
     // Remove previous image entity if reloading
@@ -68,6 +75,7 @@ pub fn load_image(
         Vec2::new(image_width, image_height),
         UVec2::new(200, 200),
         &contour,
+        &holes,
     );
 
     // Store original pixel-space vertex positions for CPU deformation path.

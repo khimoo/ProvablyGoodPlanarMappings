@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
-use pgpm_core::{Algorithm, AlgorithmParams, DomainBounds, DistortionType};
+use pgpm_core::{Algorithm, AlgorithmParams, DomainBounds, DistortionType, PolygonDomain};
 
 use crate::domain::rbf::compute_rbf_scale;
 use crate::state::params::{AlgoParams, BasisType};
@@ -42,7 +42,8 @@ impl AlgorithmState {
 
     /// Finalize the setup: create the Algorithm with current handles.
     ///
-    /// `contour` is the image's alpha-channel contour in pixel coordinates.
+    /// `contour` is the image's alpha-channel outer contour in pixel coordinates.
+    /// `holes` are interior hole contours in pixel coordinates.
     /// Returns `true` if shape-aware basis was selected.
     pub fn finalize(
         &mut self,
@@ -50,6 +51,7 @@ impl AlgorithmState {
         image_height: f64,
         algo_params: &AlgoParams,
         contour: &[(f32, f32)],
+        holes: &[Vec<(f32, f32)>],
     ) -> bool {
         let epsilon = algo_params.epsilon;
         let domain = DomainBounds {
@@ -64,10 +66,19 @@ impl AlgorithmState {
 
         let is_shape_aware = algo_params.basis_type == BasisType::ShapeAwareGaussian;
 
-        // Convert contour from (f32, f32) to Vector2<f64> for pgpm-core
+        // Convert contours from (f32, f32) to Vector2<f64> for pgpm-core
         let contour_v2: Vec<Vector2<f64>> = contour
             .iter()
             .map(|&(x, y)| Vector2::new(x as f64, y as f64))
+            .collect();
+
+        let holes_v2: Vec<Vec<Vector2<f64>>> = holes
+            .iter()
+            .map(|hole| {
+                hole.iter()
+                    .map(|&(x, y)| Vector2::new(x as f64, y as f64))
+                    .collect()
+            })
             .collect();
 
         let basis: Box<dyn pgpm_core::basis::BasisFunction> = match algo_params.basis_type {
@@ -79,11 +90,14 @@ impl AlgorithmState {
             }
             BasisType::ShapeAwareGaussian => {
                 let fmm_resolution = 256; // Grid resolution for geodesic FMM
+                let holes_refs: Vec<&[Vector2<f64>]> =
+                    holes_v2.iter().map(|h| h.as_slice()).collect();
                 Box::new(
                     pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis::new(
                         self.source_handles.clone(),
                         s,
                         &contour_v2,
+                        &holes_refs,
                         &domain,
                         fmm_resolution,
                     ),
@@ -101,10 +115,12 @@ impl AlgorithmState {
             ),
         };
 
-        let domain_contour = if contour_v2.is_empty() {
+        // Build abstract domain Ω for the algorithm (Domain trait).
+        // The algorithm only needs "x ∈ Ω" — polygon details stay here.
+        let algo_domain: Option<Box<dyn pgpm_core::Domain>> = if contour_v2.is_empty() {
             None
         } else {
-            Some(contour_v2.as_slice())
+            Some(Box::new(PolygonDomain::new(contour_v2, holes_v2)))
         };
 
         let algorithm = Algorithm::new(
@@ -114,7 +130,7 @@ impl AlgorithmState {
             self.source_handles.clone(),
             algo_params.grid_resolution,
             algo_params.fps_k,
-            domain_contour,
+            algo_domain,
         );
 
         self.target_handles = self.source_handles.clone();

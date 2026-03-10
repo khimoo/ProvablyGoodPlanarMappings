@@ -40,19 +40,21 @@ impl ShapeAwareGaussianBasis {
     /// - `centers`: RBF center positions (source handle positions)
     /// - `s`: Gaussian scale parameter
     /// - `polygon`: Domain contour polygon (in domain coordinates)
+    /// - `holes`: Interior hole contour polygons
     /// - `bounds`: Domain bounding box
     /// - `fmm_resolution`: Grid resolution for the FMM computation
     pub fn new(
         centers: Vec<Vector2<f64>>,
         s: f64,
         polygon: &[Vector2<f64>],
+        holes: &[&[Vector2<f64>]],
         bounds: &DomainBounds,
         fmm_resolution: usize,
     ) -> Self {
         assert!(s > 0.0, "Scale parameter s must be positive");
 
-        // Build domain mask on the FMM grid
-        let mask = geodesic::build_domain_mask(bounds, fmm_resolution, fmm_resolution, polygon);
+        // Build domain mask on the FMM grid (excluding holes)
+        let mask = geodesic::build_domain_mask(bounds, fmm_resolution, fmm_resolution, polygon, holes);
 
         // Compute geodesic distance field from each center
         let distance_fields: Vec<GeodesicField> = centers

@@ -36,6 +36,7 @@ pub fn on_toggle_mode(
                     image_info.height as f64,
                     &algo_params,
                     &image_info.contour,
+                    &image_info.holes,
                 );
                 commands.insert_resource(UseShapeAwareBasis(is_shape_aware));
                 deform_info.k_bound = algo_params.k_bound;
