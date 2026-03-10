@@ -36,7 +36,9 @@ fn default_image_abs_path() -> String {
             .join("assets")
             .join("texture.png");
         if p.exists() {
-            return p.to_string_lossy().into_owned();
+            let path = p.to_string_lossy().into_owned();
+            info!("Using image: {}", path);
+            return path;
         }
     }
     // Fallback: try relative to cwd
@@ -47,13 +49,32 @@ fn default_image_abs_path() -> String {
     ];
     for c in &candidates {
         if std::path::Path::new(c).exists() {
-            return std::fs::canonicalize(c)
+            let path = std::fs::canonicalize(c)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| c.to_string());
+            info!("Using image: {}", path);
+            return path;
         }
     }
-    // Last resort
-    "texture.png".to_string()
+    // No image found — report all searched paths
+    let manifest_path = std::env::var("CARGO_MANIFEST_DIR")
+        .map(|m| format!("{}/assets/texture.png", m))
+        .unwrap_or_else(|_| "(CARGO_MANIFEST_DIR not set)".into());
+    error!(
+        "No default image found. Searched:\n  - {}\n  - {}\n  - {}\n  - {}\n\
+         Place a texture.png in the crates/bevy-pgpm/assets/ directory.",
+        manifest_path, candidates[0], candidates[1], candidates[2],
+    );
+    // Return the canonical expected path; load_image will handle the missing file
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        std::path::PathBuf::from(manifest)
+            .join("assets")
+            .join("texture.png")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        candidates[0].to_string()
+    }
 }
 
 fn main() {

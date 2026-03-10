@@ -61,6 +61,11 @@ impl PartialOrd for FmmEntry {
 impl Ord for FmmEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap (BinaryHeap is max-heap by default)
+        debug_assert!(
+            !self.dist.is_nan() && !other.dist.is_nan(),
+            "NaN distance in FMM priority queue (indices: {}, {})",
+            self.idx, other.idx,
+        );
         other.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
     }
 }

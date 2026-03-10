@@ -33,7 +33,9 @@ pub fn load_image(
     let abs_path = &path_config.abs_path;
     info!("Loading image from: {}", abs_path);
 
-    let (image_width, image_height) = load_image_dimensions(abs_path);
+    let Some((image_width, image_height)) = load_image_dimensions(abs_path) else {
+        return;
+    };
     let contour = extract_contour_from_image(abs_path);
 
     if contour.is_empty() {
@@ -130,32 +132,35 @@ pub fn update_deformation(
 
 // Private helpers
 
-fn load_image_dimensions(abs_path: &str) -> (f32, f32) {
+fn load_image_dimensions(abs_path: &str) -> Option<(f32, f32)> {
     match image::open(abs_path) {
         Ok(img) => {
             let (w, h) = img.dimensions();
             info!("Image dimensions: {}x{}", w, h);
-            (w as f32, h as f32)
+            Some((w as f32, h as f32))
         }
         Err(e) => {
-            warn!("Failed to load image '{}': {}, using default 512x512", abs_path, e);
-            (512.0, 512.0)
+            error!("Failed to load image '{}': {}", abs_path, e);
+            None
         }
     }
 }
 
 fn extract_pixel_positions(mesh: &Mesh, width: f32, height: f32) -> Vec<[f32; 2]> {
     let coords = ImageCoords::new(width, height);
-    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        .and_then(|attr| attr.as_float3())
-        .map(|positions| {
-            positions
-                .iter()
-                .map(|[bx, by, _]| {
-                    let (px, py) = coords.world_to_pixel(Vec2::new(*bx, *by));
-                    [px, py]
-                })
-                .collect()
+    let Some(attr) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+        error!("Mesh missing ATTRIBUTE_POSITION — cannot extract vertex positions");
+        return vec![];
+    };
+    let Some(positions) = attr.as_float3() else {
+        error!("Mesh ATTRIBUTE_POSITION is not Float32x3 — cannot extract vertex positions");
+        return vec![];
+    };
+    positions
+        .iter()
+        .map(|[bx, by, _]| {
+            let (px, py) = coords.world_to_pixel(Vec2::new(*bx, *by));
+            [px, py]
         })
-        .unwrap_or_default()
+        .collect()
 }

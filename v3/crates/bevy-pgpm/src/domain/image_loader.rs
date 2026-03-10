@@ -5,6 +5,7 @@
 
 use imageproc::contours::find_contours;
 use image::GenericImageView;
+use log::{error, warn};
 
 pub const CONTOUR_TARGET_POINTS: usize = 1024;
 pub const ALPHA_THRESHOLD: u8 = 128;
@@ -18,7 +19,7 @@ pub fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
     let img = match image::open(image_path) {
         Ok(img) => img,
         Err(e) => {
-            eprintln!("Failed to load image for contour extraction: {}", e);
+            error!("Failed to load image for contour extraction: {}", e);
             return vec![];
         }
     };
@@ -44,6 +45,7 @@ pub fn extract_contour_from_image(image_path: &str) -> Vec<(f32, f32)> {
     let contours = find_contours::<u32>(&binary_image);
 
     if contours.is_empty() {
+        warn!("No contours found in image despite transparency; using rectangular boundary");
         return vec![
             (0.0, 0.0),
             (width as f32, 0.0),

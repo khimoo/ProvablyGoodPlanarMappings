@@ -10,6 +10,7 @@ use crate::distortion;
 use crate::solver;
 use crate::strategy;
 use crate::types::*;
+use log::warn;
 use nalgebra::{DMatrix, Vector2};
 
 /// Algorithm 1: complete implementation.
@@ -204,6 +205,7 @@ impl Algorithm {
         let mut grad_phi_x = DMatrix::zeros(m, n);
         let mut grad_phi_y = DMatrix::zeros(m, n);
 
+        let mut nan_inf_count = 0usize;
         for (idx, pt) in self.state.collocation_points.iter().enumerate() {
             let val = self.basis.evaluate(*pt);
             let (gx, gy) = self.basis.gradient(*pt);
@@ -212,10 +214,20 @@ impl Algorithm {
                 // Guard against NaN/Inf from basis functions (can happen
                 // with shape-aware bases near domain boundaries where
                 // geodesic distances are infinite).
+                if !val[i].is_finite() || !gx[i].is_finite() || !gy[i].is_finite() {
+                    nan_inf_count += 1;
+                }
                 phi[(idx, i)] = if val[i].is_finite() { val[i] } else { 0.0 };
                 grad_phi_x[(idx, i)] = if gx[i].is_finite() { gx[i] } else { 0.0 };
                 grad_phi_y[(idx, i)] = if gy[i].is_finite() { gy[i] } else { 0.0 };
             }
+        }
+        if nan_inf_count > 0 {
+            warn!(
+                "Precompute: {} NaN/Inf basis values replaced with 0.0 \
+                 (expected near domain boundaries with shape-aware bases)",
+                nan_inf_count,
+            );
         }
 
         // Build biharmonic matrix if needed
@@ -439,7 +451,14 @@ impl Algorithm {
         let final_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
         let final_omega = strategy::omega(final_h, c_norm, self.basis.as_ref());
         let k_max_achieved = strategy::compute_k_max_isometric(k, final_omega)
-            .unwrap_or(f64::INFINITY);
+            .unwrap_or_else(|| {
+                warn!(
+                    "Strategy 2: cannot guarantee finite K_max \
+                     (omega(h)={:.4} >= 1/K={:.4})",
+                    final_omega, 1.0 / k,
+                );
+                f64::INFINITY
+            });
 
         Ok(strategy::Strategy2Result {
             required_h,

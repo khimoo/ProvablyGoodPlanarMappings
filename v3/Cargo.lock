@@ -534,6 +534,7 @@ dependencies = [
  "geo",
  "image",
  "imageproc",
+ "log",
  "nalgebra 0.33.2",
  "pgpm-core",
  "rfd",
@@ -3857,6 +3858,7 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "clarabel",
+ "log",
  "nalgebra 0.33.2",
 ]
 
