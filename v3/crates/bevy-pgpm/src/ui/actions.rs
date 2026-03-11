@@ -31,7 +31,7 @@ pub fn on_toggle_mode(
                     info!("No handles added yet!");
                     return;
                 }
-                let is_shape_aware = algo_state.finalize(
+                let is_shape_aware = algo_state.build_mapping(
                     image_info.width as f64,
                     image_info.height as f64,
                     &algo_params,
@@ -299,8 +299,7 @@ fn enforce_k_max_invariant(params: &mut AlgoParams) {
 /// Push updated parameters to the algorithm instance and flag for re-solve.
 fn push_params(params: &AlgoParams, algo_state: &mut AlgorithmState) {
     if let Some(ref mut algo) = algo_state.algorithm {
-        let core_params = pgpm_core::AlgorithmParams {
-            distortion_type: pgpm_core::DistortionType::Isometric,
+        let core_params = pgpm_core::MappingParams {
             k_bound: params.k_bound,
             lambda_reg: params.reg_mode.effective_lambda(params.lambda_reg),
             regularization: params.reg_mode.to_core(params.lambda_arap, params.lambda_bh),

@@ -1,8 +1,8 @@
-//! Core algorithm state: wraps pgpm-core's Algorithm for Bevy resource use.
+//! Core algorithm state: wraps pgpm-core's PlanarMapping for Bevy resource use.
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
-use pgpm_core::{Algorithm, AlgorithmParams, DomainBounds, DistortionType, PolygonDomain};
+use pgpm_core::{PlanarMapping, MappingParams, DomainBounds, PolygonDomain};
 
 use crate::domain::rbf::compute_rbf_scale;
 use crate::state::params::{AlgoParams, BasisType};
@@ -10,8 +10,8 @@ use crate::state::params::{AlgoParams, BasisType};
 /// Core algorithm state, used by the solver and rendering systems.
 #[derive(Resource)]
 pub struct AlgorithmState {
-    /// The pgpm-core algorithm instance. Created on finalization.
-    pub algorithm: Option<Algorithm>,
+    /// The pgpm-core mapping instance. Created on finalization.
+    pub algorithm: Option<Box<dyn PlanarMapping>>,
     /// Source handle positions in domain (pixel) coordinates.
     pub source_handles: Vec<Vector2<f64>>,
     /// Current target handle positions in domain (pixel) coordinates.
@@ -40,12 +40,12 @@ impl AlgorithmState {
         self.needs_solve = false;
     }
 
-    /// Finalize the setup: create the Algorithm with current handles.
+    /// Build the mapping: create the Algorithm with current handles.
     ///
     /// `contour` is the image's alpha-channel outer contour in pixel coordinates.
     /// `holes` are interior hole contours in pixel coordinates.
     /// Returns `true` if shape-aware basis was selected.
-    pub fn finalize(
+    pub fn build_mapping(
         &mut self,
         image_width: f64,
         image_height: f64,
@@ -105,8 +105,7 @@ impl AlgorithmState {
             }
         };
 
-        let params = AlgorithmParams {
-            distortion_type: DistortionType::Isometric,
+        let params = MappingParams {
             k_bound: algo_params.k_bound,
             lambda_reg: algo_params.reg_mode.effective_lambda(algo_params.lambda_reg),
             regularization: algo_params.reg_mode.to_core(
@@ -115,15 +114,15 @@ impl AlgorithmState {
             ),
         };
 
-        // Build abstract domain Ω for the algorithm (Domain trait).
-        // The algorithm only needs "x ∈ Ω" — polygon details stay here.
+        // Build abstract domain Omega for the algorithm (Domain trait).
+        // The algorithm only needs "x in Omega" -- polygon details stay here.
         let algo_domain: Option<Box<dyn pgpm_core::Domain>> = if contour_v2.is_empty() {
             None
         } else {
             Some(Box::new(PolygonDomain::new(contour_v2, holes_v2)))
         };
 
-        let algorithm = Algorithm::new(
+        let algorithm = pgpm_core::create_isometric_mapping(
             basis,
             params,
             domain,
@@ -131,6 +130,7 @@ impl AlgorithmState {
             algo_params.grid_resolution,
             algo_params.fps_k,
             algo_domain,
+            pgpm_core::SolverConfig::default(),
         );
 
         self.target_handles = self.source_handles.clone();

@@ -23,6 +23,9 @@ pub use gizmos::draw_handles;
 
 use bevy::prelude::*;
 
+/// Width of the right-side control panel in logical pixels.
+pub const PANEL_WIDTH: f32 = 220.0;
+
 // Shared colours used across UI sub-modules.
 pub(crate) const PANEL_BG: Color = Color::srgba(0.08, 0.08, 0.12, 0.92);
 pub(crate) const BTN_NORMAL: Color = Color::srgb(0.25, 0.25, 0.35);

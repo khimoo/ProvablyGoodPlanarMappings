@@ -5,7 +5,8 @@
 //! - Eq. 20: Singular values Σ, σ from J_S, J_A
 //! - D_iso = max{Σ, 1/σ}, D_conf = Σ/σ
 
-use crate::types::{CoefficientMatrix, DistortionType, PrecomputedData};
+use crate::distortion_policy::DistortionPolicy;
+use crate::types::{CoefficientMatrix, PrecomputedData};
 use nalgebra::Vector2;
 
 /// Eq. 19: Compute J_S f(x) and J_A f(x) from gradients of u and v.
@@ -99,7 +100,7 @@ fn grad_uv_at(
 pub fn evaluate_distortion_all(
     coefficients: &CoefficientMatrix,
     precomputed: &PrecomputedData,
-    distortion_type: &DistortionType,
+    policy: &dyn DistortionPolicy,
 ) -> Vec<f64> {
     let m = precomputed.grad_phi_x.nrows(); // number of collocation points
 
@@ -109,10 +110,7 @@ pub fn evaluate_distortion_all(
             let (j_s, j_a) = compute_j_s_j_a(grad_u, grad_v);
             let (sigma_max, sigma_min) = singular_values(j_s, j_a);
 
-            match distortion_type {
-                DistortionType::Isometric => isometric_distortion(sigma_max, sigma_min),
-                DistortionType::Conformal { .. } => conformal_distortion(sigma_max, sigma_min),
-            }
+            policy.distortion_value(sigma_max, sigma_min)
         })
         .collect()
 }

@@ -3,8 +3,9 @@
 
 use nalgebra::Vector2;
 use pgpm_core::{
-    Algorithm, AlgorithmParams, DomainBounds, DistortionType, RegularizationType,
-    PolygonDomain,
+    DomainBounds, MappingParams, RegularizationType,
+    PolygonDomain, IsometricPolicy, PlanarMapping,
+    algorithm::Algorithm,
     basis::shape_aware_gaussian::ShapeAwareGaussianBasis,
     basis::BasisFunction,
     geodesic::{GeodesicField, build_domain_mask},
@@ -43,7 +44,7 @@ fn test_fmm_distances_finite_inside_polygon() {
         y_min: -epsilon, y_max: h + epsilon,
     };
     let resolution = 200;
-    let mask = build_domain_mask(&bounds, resolution, resolution, &contour, &[]);
+    let mask = build_domain_mask(&bounds, resolution, resolution, &contour, &[], 1.5);
 
     // Count inside cells
     let inside_count = mask.iter().filter(|&&b| b).count();
@@ -164,8 +165,7 @@ fn test_shape_aware_algorithm_step() {
         source_handles.clone(), s, &contour_v2, &[], &bounds, 200,
     ));
 
-    let params = AlgorithmParams {
-        distortion_type: DistortionType::Isometric,
+    let params = MappingParams {
         k_bound: 3.0,
         lambda_reg: 1e-2,
         regularization: RegularizationType::Arap,
@@ -173,8 +173,9 @@ fn test_shape_aware_algorithm_step() {
 
     let domain = PolygonDomain::new(contour_v2, vec![]);
     let mut algo = Algorithm::new(
-        basis, params, bounds, source_handles.clone(),
+        basis, params, IsometricPolicy, bounds, source_handles.clone(),
         50, 8, Some(Box::new(domain)),
+        pgpm_core::SolverConfig::default(),
     );
 
     // Step with the handle moved

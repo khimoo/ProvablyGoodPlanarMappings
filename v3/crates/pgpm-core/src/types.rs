@@ -16,16 +16,6 @@ use nalgebra::{DMatrix, Vector2};
 // ───────────────────────────────────────────────────────────────
 pub type CoefficientMatrix = DMatrix<f64>;
 
-/// Section 3 "Distortion": type of distortion measure.
-#[derive(Debug, Clone)]
-pub enum DistortionType {
-    /// D_iso(x) = max{Σ(x), 1/σ(x)}
-    Isometric,
-    /// D_conf(x) = Σ(x) / σ(x)
-    /// δ must satisfy δ > ω(h) (Eq. 13)
-    Conformal { delta: f64 },
-}
-
 /// Eq. 5: Bounding box of domain Ω.
 #[derive(Debug, Clone)]
 pub struct DomainBounds {
@@ -33,20 +23,6 @@ pub struct DomainBounds {
     pub x_max: f64,
     pub y_min: f64,
     pub y_max: f64,
-}
-
-/// Algorithm 1 input parameters.
-#[derive(Debug, Clone)]
-pub struct AlgorithmParams {
-    /// Distortion type and upper bound K (Eq. 4: D(z_j) ≤ K)
-    pub distortion_type: DistortionType,
-    pub k_bound: f64,
-
-    /// Regularization weight λ (Eq. 1, 18)
-    pub lambda_reg: f64,
-
-    /// Regularization type and mixing weights
-    pub regularization: RegularizationType,
 }
 
 /// Section 5.4: regularization energy types.
@@ -60,6 +36,35 @@ pub enum RegularizationType {
     /// Paper Section 6: Figure 5 uses E_pos + 10^{-2} E_arap,
     ///                   Figure 8 uses E_pos + 10^{-1} E_bh
     Mixed { lambda_bh: f64, lambda_arap: f64 },
+}
+
+/// SOCP solver numerical tuning parameters.
+///
+/// These parameters control the solver's numerical behaviour and
+/// resource limits.  They are **implementation-specific** and do not
+/// appear in the paper's formulation.
+#[derive(Debug, Clone)]
+pub struct SolverConfig {
+    /// Diagonal regularization added to the P matrix for coefficient
+    /// variables (first 2n entries).  Prevents near-singular KKT systems
+    /// when the regularization weight λ is very small.
+    pub p_reg_coefficient: f64,
+    /// Diagonal regularization for auxiliary variables (r, t, s).
+    pub p_reg_auxiliary: f64,
+    /// Maximum grid resolution (points per side) for Strategy 2 refinement.
+    /// Paper Section 6 uses up to 6000².  Set according to available memory
+    /// and time budget.
+    pub max_refinement_resolution: usize,
+}
+
+impl Default for SolverConfig {
+    fn default() -> Self {
+        Self {
+            p_reg_coefficient: 1e-6,
+            p_reg_auxiliary: 1e-8,
+            max_refinement_resolution: 1000,
+        }
+    }
 }
 
 /// Algorithm 1 internal state.
@@ -143,6 +148,11 @@ impl std::error::Error for SolverError {}
 pub enum AlgorithmError {
     Solver(SolverError),
     InvalidInput(String),
+    /// Strategy 2 requires a grid resolution exceeding the configured
+    /// maximum (`SolverConfig::max_refinement_resolution`).
+    /// The caller (e.g. UI) should ask the user whether to proceed
+    /// with the required resolution.
+    ResolutionExceeded { required: usize, max: usize },
 }
 
 impl std::fmt::Display for AlgorithmError {
@@ -150,6 +160,11 @@ impl std::fmt::Display for AlgorithmError {
         match self {
             AlgorithmError::Solver(e) => write!(f, "Algorithm solver error: {}", e),
             AlgorithmError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            AlgorithmError::ResolutionExceeded { required, max } => write!(
+                f,
+                "Strategy 2 requires resolution {} which exceeds max {}",
+                required, max
+            ),
         }
     }
 }
@@ -160,4 +175,32 @@ impl From<SolverError> for AlgorithmError {
     fn from(e: SolverError) -> Self {
         AlgorithmError::Solver(e)
     }
+}
+
+/// Algorithm 1 input parameters (distortion-type-agnostic).
+///
+/// This struct contains the parameters that are independent of the
+/// distortion measure (isometric vs conformal). The distortion-specific
+/// behaviour is handled by the `DistortionPolicy` trait.
+#[derive(Debug, Clone)]
+pub struct MappingParams {
+    /// Distortion upper bound K (Eq. 4: D(z_j) ≤ K)
+    pub k_bound: f64,
+
+    /// Regularization weight λ (Eq. 1, 18)
+    pub lambda_reg: f64,
+
+    /// Regularization type and mixing weights
+    pub regularization: RegularizationType,
+}
+
+/// Information returned from each algorithm step.
+#[derive(Debug)]
+pub struct StepInfo {
+    /// Maximum distortion over all collocation points
+    pub max_distortion: f64,
+    /// Number of points in the active set Z'
+    pub active_set_size: usize,
+    /// Number of points in the stable set Z''
+    pub stable_set_size: usize,
 }

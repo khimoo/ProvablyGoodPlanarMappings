@@ -15,12 +15,17 @@
 //! where K is a product of cones.
 
 use crate::basis::BasisFunction;
+use crate::distortion_policy::DistortionPolicy;
 use crate::types::*;
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{
     DefaultSettings, DefaultSolver, IPSolver, NonnegativeConeT, SecondOrderConeT, SolverStatus,
 };
 use nalgebra::{DMatrix, DVector, Vector2};
+
+// ─────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────
 
 /// Solve the SOCP problem from Eq. 18.
 ///
@@ -32,61 +37,355 @@ pub fn solve_socp(
     target_handles: &[Vector2<f64>],
     basis: &dyn BasisFunction,
     state: &AlgorithmState,
-    params: &AlgorithmParams,
+    params: &MappingParams,
+    policy: &dyn DistortionPolicy,
+    solver_config: &SolverConfig,
 ) -> Result<CoefficientMatrix, SolverError> {
     let precomputed = state.precomputed.as_ref().ok_or_else(|| {
         SolverError::NumericalError("Precomputed data not available".to_string())
     })?;
 
     let n_basis = basis.count();
-    // Decision variables layout:
-    // [c¹_0, c¹_1, ..., c¹_{n-1}, c²_0, c²_1, ..., c²_{n-1}, r_0, ..., r_{L-1}, t_0, s_0, t_1, s_1, ...]
-    //  \___________ 2n ___________/  \_______ L _______/  \_______ 2*n_active ________/
-    //
-    // where:
-    //   - c¹, c² are the coefficient vectors (2n variables)
-    //   - r_l are position constraint epigraph variables (L = num handles)
-    //   - t_i, s_i are auxiliary variables for isometric constraints
-    //     (one pair per active collocation point)
-
     let n_handles = source_handles.len();
-
-    // Collect active point indices (Z' ∪ Z'')
     let active_indices = collect_active_indices(state);
     let n_active = active_indices.len();
 
-    match params.distortion_type {
-        DistortionType::Isometric => {
-            build_and_solve_isometric(
-                source_handles,
-                target_handles,
-                basis,
-                state,
-                params,
-                precomputed,
-                n_basis,
-                n_handles,
-                &active_indices,
-                n_active,
-            )
+    // Decision variable layout (Eq. 18):
+    // Common: [c¹(n), c²(n), r(L)]
+    // Isometric adds: [t(n_active), s(n_active)]  (Eq. 23)
+    let n_vars = 2 * n_basis + n_handles
+        + policy.extra_vars_per_active() * n_active;
+
+    // === Build objective (Eq. 18, 30, 31, 33) ===
+    let mut q = vec![0.0; n_vars];
+    // Position energy (Eq. 30): min Σ r_l
+    for l in 0..n_handles {
+        q[2 * n_basis + l] = 1.0;
+    }
+    let (p_mat, q_reg) = build_regularization(
+        basis, state, params, precomputed, n_basis, n_vars,
+    );
+    for i in 0..q_reg.len().min(n_vars) {
+        q[i] += q_reg[i];
+    }
+
+    // === Build constraints ===
+    let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+    let mut b_vec: Vec<f64> = Vec::new();
+    let mut cones: Vec<clarabel::solver::SupportedConeT<f64>> = Vec::new();
+
+    // Position constraints (Eq. 30)
+    append_position_constraints(
+        source_handles, target_handles, basis, n_basis,
+        &mut rows, &mut b_vec, &mut cones,
+    );
+
+    // Distortion constraints (Eq. 23/26 or 28) — delegated to policy
+    policy.append_constraints(
+        state, precomputed, n_basis, n_handles,
+        &active_indices, n_active, params.k_bound,
+        &mut rows, &mut b_vec, &mut cones,
+    );
+
+    // === Assemble and solve ===
+    assemble_and_solve(p_mat, &q, &rows, &b_vec, &cones, n_vars, n_basis, solver_config)
+}
+
+// ─────────────────────────────────────────────
+// Constraint builders
+// ─────────────────────────────────────────────
+
+/// Position constraints (Eq. 30).
+///
+/// ||Σ c_i f_i(p_l) - q_l|| ≤ r_l   (SOC(3) per handle)
+fn append_position_constraints(
+    source_handles: &[Vector2<f64>],
+    target_handles: &[Vector2<f64>],
+    basis: &dyn BasisFunction,
+    n_basis: usize,
+    rows: &mut Vec<Vec<(usize, f64)>>,
+    b: &mut Vec<f64>,
+    cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+) {
+    for l in 0..source_handles.len() {
+        let phi_l = basis.evaluate(source_handles[l]);
+        let r_col = 2 * n_basis + l;
+
+        // s_1 = r_l
+        rows.push(vec![(r_col, -1.0)]);
+        b.push(0.0);
+
+        // s_2 = q_l_x - Σ c¹_i f_i(p_l)
+        let mut row = Vec::new();
+        for i in 0..n_basis {
+            if phi_l[i].abs() > 1e-15 {
+                row.push((i, phi_l[i]));
+            }
         }
-        DistortionType::Conformal { delta } => {
-            build_and_solve_conformal(
-                source_handles,
-                target_handles,
-                basis,
-                state,
-                params,
-                precomputed,
-                n_basis,
-                n_handles,
-                &active_indices,
-                n_active,
-                delta,
-            )
+        rows.push(row);
+        b.push(target_handles[l].x);
+
+        // s_3 = q_l_y - Σ c²_i f_i(p_l)
+        let mut row = Vec::new();
+        for i in 0..n_basis {
+            if phi_l[i].abs() > 1e-15 {
+                row.push((n_basis + i, phi_l[i]));
+            }
         }
+        rows.push(row);
+        b.push(target_handles[l].y);
+
+        cones.push(SecondOrderConeT(3));
     }
 }
+
+/// Isometric distortion constraints (Eq. 23a-c, 26).
+///
+/// Per active point i:
+///   ||J_S f(z_i)|| ≤ t_i          SOC(3)     (Eq. 23a)
+///   ||J_A f(z_i)|| ≤ s_i          SOC(3)     (Eq. 23b)
+///   t_i + s_i ≤ K                  NN         (Eq. 23c)
+///   J_S f(z_i)·d_i - s_i ≥ 1/K    NN         (Eq. 26)
+pub(crate) fn append_isometric_constraints(
+    state: &AlgorithmState,
+    precomputed: &PrecomputedData,
+    n_basis: usize,
+    n_handles: usize,
+    active_indices: &[usize],
+    n_active: usize,
+    k: f64,
+    rows: &mut Vec<Vec<(usize, f64)>>,
+    b: &mut Vec<f64>,
+    cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+) {
+    for (ai, &pt_idx) in active_indices.iter().enumerate() {
+        let t_col = 2 * n_basis + n_handles + ai;
+        let s_col = 2 * n_basis + n_handles + n_active + ai;
+        let d = state.frames[pt_idx]; // Eq. 27
+
+        // (a) ||J_S f(z_i)|| ≤ t_i — SOC(3) (Eq. 23a)
+        rows.push(vec![(t_col, -1.0)]);
+        b.push(0.0);
+        rows.push(j_s_x_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        rows.push(j_s_y_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        cones.push(SecondOrderConeT(3));
+
+        // (b) ||J_A f(z_i)|| ≤ s_i — SOC(3) (Eq. 23b)
+        rows.push(vec![(s_col, -1.0)]);
+        b.push(0.0);
+        rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        cones.push(SecondOrderConeT(3));
+
+        // (c) t_i + s_i ≤ K — NN: K - t_i - s_i ≥ 0 (Eq. 23c)
+        rows.push(vec![(t_col, 1.0), (s_col, 1.0)]);
+        b.push(k);
+
+        // (d) J_S f·d_i - s_i ≥ 1/K — NN (Eq. 26)
+        // Clarabel: Ax + s = b, s ≥ 0  →  Ax ≤ b
+        // We want: J_S·d - s_i ≥ 1/K  →  -J_S·d + s_i ≤ -1/K
+        let mut row = neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d);
+        row.push((s_col, 1.0));
+        rows.push(row);
+        b.push(-1.0 / k);
+
+        cones.push(NonnegativeConeT(2));
+    }
+}
+
+/// Conformal distortion constraints (Eq. 28a-b).
+///
+/// Per active point i:
+///   ||J_A f(z_i)|| ≤ ((K-1)/(K+1)) · J_S f(z_i)·d_i   (Eq. 28a)
+///   ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ                (Eq. 28b)
+pub(crate) fn append_conformal_constraints(
+    state: &AlgorithmState,
+    precomputed: &PrecomputedData,
+    n_basis: usize,
+    active_indices: &[usize],
+    k: f64,
+    delta: f64,
+    rows: &mut Vec<Vec<(usize, f64)>>,
+    b: &mut Vec<f64>,
+    cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+) {
+    let ratio = (k - 1.0) / (k + 1.0);
+
+    for &pt_idx in active_indices {
+        let d = state.frames[pt_idx];
+
+        // (a) ||J_A f(z_i)|| ≤ ratio · J_S f(z_i)·d_i — SOC(3) (Eq. 28a)
+        // s_1 = ratio · J_S·d
+        {
+            let mut row = neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d);
+            for entry in &mut row {
+                entry.1 *= ratio;
+            }
+            rows.push(row);
+            b.push(0.0);
+        }
+        rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        cones.push(SecondOrderConeT(3));
+
+        // (b) ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ — SOC(3) (Eq. 28b)
+        // s_1 = J_S·d - δ = -δ - (-J_S·d terms · x)
+        rows.push(neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d));
+        b.push(-delta);
+        rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
+        b.push(0.0);
+        cones.push(SecondOrderConeT(3));
+    }
+}
+
+// ─────────────────────────────────────────────
+// Jacobian decomposition row builders (Eq. 19)
+// ─────────────────────────────────────────────
+
+/// J_S_x(z) = (1/2)(Σ c¹_i ∂f_i/∂x + Σ c²_i ∂f_i/∂y)  (Eq. 19)
+fn j_s_x_row(precomputed: &PrecomputedData, pt_idx: usize, n_basis: usize) -> Vec<(usize, f64)> {
+    let mut row = Vec::new();
+    for i in 0..n_basis {
+        let gx = precomputed.grad_phi_x[(pt_idx, i)];
+        let gy = precomputed.grad_phi_y[(pt_idx, i)];
+        if gx.abs() > 1e-15 { row.push((i, 0.5 * gx)); }
+        if gy.abs() > 1e-15 { row.push((n_basis + i, 0.5 * gy)); }
+    }
+    row
+}
+
+/// J_S_y(z) = (1/2)(Σ c¹_i ∂f_i/∂y - Σ c²_i ∂f_i/∂x)  (Eq. 19)
+fn j_s_y_row(precomputed: &PrecomputedData, pt_idx: usize, n_basis: usize) -> Vec<(usize, f64)> {
+    let mut row = Vec::new();
+    for i in 0..n_basis {
+        let gx = precomputed.grad_phi_x[(pt_idx, i)];
+        let gy = precomputed.grad_phi_y[(pt_idx, i)];
+        if gy.abs() > 1e-15 { row.push((i, 0.5 * gy)); }
+        if gx.abs() > 1e-15 { row.push((n_basis + i, -0.5 * gx)); }
+    }
+    row
+}
+
+/// J_A_x(z) = (1/2)(Σ c¹_i ∂f_i/∂x - Σ c²_i ∂f_i/∂y)  (Eq. 19)
+fn j_a_x_row(precomputed: &PrecomputedData, pt_idx: usize, n_basis: usize) -> Vec<(usize, f64)> {
+    let mut row = Vec::new();
+    for i in 0..n_basis {
+        let gx = precomputed.grad_phi_x[(pt_idx, i)];
+        let gy = precomputed.grad_phi_y[(pt_idx, i)];
+        if gx.abs() > 1e-15 { row.push((i, 0.5 * gx)); }
+        if gy.abs() > 1e-15 { row.push((n_basis + i, -0.5 * gy)); }
+    }
+    row
+}
+
+/// J_A_y(z) = (1/2)(Σ c¹_i ∂f_i/∂y + Σ c²_i ∂f_i/∂x)  (Eq. 19)
+fn j_a_y_row(precomputed: &PrecomputedData, pt_idx: usize, n_basis: usize) -> Vec<(usize, f64)> {
+    let mut row = Vec::new();
+    for i in 0..n_basis {
+        let gx = precomputed.grad_phi_x[(pt_idx, i)];
+        let gy = precomputed.grad_phi_y[(pt_idx, i)];
+        if gy.abs() > 1e-15 { row.push((i, 0.5 * gy)); }
+        if gx.abs() > 1e-15 { row.push((n_basis + i, 0.5 * gx)); }
+    }
+    row
+}
+
+/// Negated J_S·d row for constraint matrix (Eq. 25-26).
+///
+/// J_S·d = J_S_x · d_x + J_S_y · d_y
+/// Returns the negated coefficients: -(J_S·d) as A-matrix entries.
+fn neg_j_s_dot_d_row(
+    precomputed: &PrecomputedData,
+    pt_idx: usize,
+    n_basis: usize,
+    d: Vector2<f64>,
+) -> Vec<(usize, f64)> {
+    let mut row = Vec::new();
+    for i in 0..n_basis {
+        let gx = precomputed.grad_phi_x[(pt_idx, i)];
+        let gy = precomputed.grad_phi_y[(pt_idx, i)];
+        // -(J_S·d) = -(1/2)(c¹(gx·d_x + gy·d_y) + c²(gy·d_x - gx·d_y))
+        let coeff_c1 = -0.5 * (gx * d.x + gy * d.y);
+        let coeff_c2 = -0.5 * (gy * d.x - gx * d.y);
+        if coeff_c1.abs() > 1e-15 { row.push((i, coeff_c1)); }
+        if coeff_c2.abs() > 1e-15 { row.push((n_basis + i, coeff_c2)); }
+    }
+    row
+}
+
+// ─────────────────────────────────────────────
+// Solver assembly and execution
+// ─────────────────────────────────────────────
+
+/// Assemble the SOCP from components and solve with Clarabel.
+///
+/// Applies P matrix diagonal regularization (not part of paper, for
+/// numerical stability), converts to Clarabel sparse format, and
+/// extracts the coefficient matrix from the solution.
+fn assemble_and_solve(
+    mut p_mat: DMatrix<f64>,
+    q: &[f64],
+    rows: &[Vec<(usize, f64)>],
+    b_vec: &[f64],
+    cones: &[clarabel::solver::SupportedConeT<f64>],
+    n_vars: usize,
+    n_basis: usize,
+    solver_config: &SolverConfig,
+) -> Result<CoefficientMatrix, SolverError> {
+    let (a_csc, b_arr) = sparse_rows_to_csc(rows, b_vec, n_vars);
+
+    check_problem_data(q, &a_csc, &b_arr, &p_mat)?;
+
+    // Diagonal regularization for numerical stability (not from the paper).
+    // Prevents near-singular KKT systems when λ_reg is very small.
+    for i in 0..n_vars {
+        if i < 2 * n_basis {
+            p_mat[(i, i)] += solver_config.p_reg_coefficient;
+        } else {
+            p_mat[(i, i)] += solver_config.p_reg_auxiliary;
+        }
+    }
+
+    let p_csc = dense_to_csc_upper_tri(&p_mat);
+    let settings = make_solver_settings();
+
+    let mut solver = DefaultSolver::new(&p_csc, q, &a_csc, &b_arr, cones, settings);
+    solver.solve();
+
+    match solver.solution.status {
+        SolverStatus::Solved | SolverStatus::AlmostSolved => {
+            let x = &solver.solution.x;
+            let mut c = CoefficientMatrix::zeros(2, n_basis);
+            for i in 0..n_basis {
+                c[(0, i)] = x[i];
+                c[(1, i)] = x[n_basis + i];
+            }
+            Ok(c)
+        }
+        SolverStatus::PrimalInfeasible | SolverStatus::DualInfeasible => {
+            Err(SolverError::Infeasible(format!(
+                "SOCP infeasible: {:?}",
+                solver.solution.status
+            )))
+        }
+        status => Err(SolverError::SolverFailed(format!(
+            "Solver returned status: {:?}",
+            status
+        ))),
+    }
+}
+
+// ─────────────────────────────────────────────
+// Solver settings
+// ─────────────────────────────────────────────
 
 /// Build Clarabel solver settings with relaxed tolerances.
 ///
@@ -128,6 +427,10 @@ fn make_solver_settings() -> DefaultSettings<f64> {
     }
 }
 
+// ─────────────────────────────────────────────
+// Active index collection
+// ─────────────────────────────────────────────
+
 /// Collect unique active point indices from Z' ∪ Z''.
 fn collect_active_indices(state: &AlgorithmState) -> Vec<usize> {
     let mut indices: Vec<usize> = state.active_set.clone();
@@ -140,567 +443,9 @@ fn collect_active_indices(state: &AlgorithmState) -> Vec<usize> {
     indices
 }
 
-/// Build and solve the isometric distortion SOCP.
-///
-/// Decision variables: [c¹ (n), c² (n), r (L), t (n_active), s (n_active)]
-/// Total: 2n + L + 2*n_active
-///
-/// Objective (Eq. 18, 30, 31, 33):
-///   min  Σ_l r_l  +  λ · E_reg(c)
-///   = min q'x + ½ x'Px
-///
-/// Isometric constraints per active point i (Eq. 23, 26):
-///   ||J_S f(z_i)|| ≤ t_i          SOC(3)     (Eq. 23a)
-///   ||J_A f(z_i)|| ≤ s_i          SOC(3)     (Eq. 23b)
-///   t_i + s_i ≤ K                  NN         (Eq. 23c)
-///   J_S f(z_i)·d_i - s_i ≥ 1/K    NN         (Eq. 26)
-///
-/// Position constraints per handle l (Eq. 30):
-///   ||Σ c_i f_i(p_l) - q_l|| ≤ r_l   SOC(3)
-fn build_and_solve_isometric(
-    source_handles: &[Vector2<f64>],
-    target_handles: &[Vector2<f64>],
-    basis: &dyn BasisFunction,
-    state: &AlgorithmState,
-    params: &AlgorithmParams,
-    precomputed: &PrecomputedData,
-    n_basis: usize,
-    n_handles: usize,
-    active_indices: &[usize],
-    n_active: usize,
-) -> Result<CoefficientMatrix, SolverError> {
-    let k = params.k_bound;
-    let n_vars = 2 * n_basis + n_handles + 2 * n_active;
-
-    // === Build objective ===
-    // q: linear objective
-    let mut q = vec![0.0; n_vars];
-    // Position energy: min Σ r_l → coefficients of r_l = 1
-    for l in 0..n_handles {
-        q[2 * n_basis + l] = 1.0;
-    }
-
-    // P: quadratic objective (regularization energy)
-    // q_reg: linear objective from ARAP regularization
-    let (mut p_mat, q_reg) = build_regularization(
-        basis, state, params, precomputed, n_basis, n_vars,
-    );
-
-    // Add ARAP linear term to q
-    for i in 0..q_reg.len().min(n_vars) {
-        q[i] += q_reg[i];
-    }
-
-    // === Build constraints ===
-    // We'll collect constraint rows, then stack them.
-    let mut constraint_rows: Vec<Vec<(usize, f64)>> = Vec::new(); // sparse rows of A
-    let mut b_vec: Vec<f64> = Vec::new();
-    let mut cones: Vec<clarabel::solver::SupportedConeT<f64>> = Vec::new();
-
-    // --- Position constraints (Eq. 30): ||f(p_l) - q_l|| ≤ r_l ---
-    // SOC(3): [r_l; f_u(p_l) - q_l_x; f_v(p_l) - q_l_y]
-    // In clarabel form: ||s_{2..}|| ≤ s_1 where Ax + s = b
-    // We need: s = b - Ax ∈ SOC(3)
-    // s_1 = r_l  →  -r_l + s_1 = 0  →  A row has -1 at r_l col
-    // s_2 = q_l_x - f_u(p_l) = q_l_x - Σ c¹_i f_i(p_l)
-    //   → A row has f_i(p_l) at c¹_i cols, b = q_l_x
-    // s_3 = q_l_y - f_v(p_l) = q_l_y - Σ c²_i f_i(p_l)
-    //   → A row has f_i(p_l) at c²_i cols, b = q_l_y
-    for l in 0..n_handles {
-        let phi_l = basis.evaluate(source_handles[l]);
-        let r_col = 2 * n_basis + l;
-
-        // Row for s_1 = r_l: A has -1 at r_col, b = 0
-        let mut row = Vec::new();
-        row.push((r_col, -1.0));
-        constraint_rows.push(row);
-        b_vec.push(0.0);
-
-        // Row for s_2 = q_l_x - Σ c¹_i f_i(p_l)
-        let mut row = Vec::new();
-        for i in 0..n_basis {
-            if phi_l[i].abs() > 1e-15 {
-                row.push((i, phi_l[i])); // c¹_i column
-            }
-        }
-        constraint_rows.push(row);
-        b_vec.push(target_handles[l].x);
-
-        // Row for s_3 = q_l_y - Σ c²_i f_i(p_l)
-        let mut row = Vec::new();
-        for i in 0..n_basis {
-            if phi_l[i].abs() > 1e-15 {
-                row.push((n_basis + i, phi_l[i])); // c²_i column
-            }
-        }
-        constraint_rows.push(row);
-        b_vec.push(target_handles[l].y);
-
-        cones.push(SecondOrderConeT(3));
-    }
-
-    // --- Isometric constraints per active point ---
-    for (ai, &pt_idx) in active_indices.iter().enumerate() {
-        let t_col = 2 * n_basis + n_handles + ai;
-        let s_col = 2 * n_basis + n_handles + n_active + ai;
-        let d = state.frames[pt_idx]; // frame vector d_i (Eq. 27)
-
-        // J_S f(z) and J_A f(z) are linear in c (I = CW π/2 rotation):
-        // J_S f = (1/2)[ Σ c¹_i ∂f_i/∂x + Σ c²_i ∂f_i/∂y,
-        //                Σ c¹_i ∂f_i/∂y - Σ c²_i ∂f_i/∂x ]
-        // J_A f = (1/2)[ Σ c¹_i ∂f_i/∂x - Σ c²_i ∂f_i/∂y,
-        //                Σ c¹_i ∂f_i/∂y + Σ c²_i ∂f_i/∂x ]
-
-        // (a) ||J_S f(z_i)|| ≤ t_i — SOC(3)
-        // s = [t_i; -J_S_x; -J_S_y] ∈ SOC(3)
-        // Row for t_i
-        {
-            let mut row = Vec::new();
-            row.push((t_col, -1.0));
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-        }
-        // Row for J_S_x
-        {
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                // J_S_x = (1/2)(Σ c¹_i gx_i + Σ c²_i gy_i)
-                if gx.abs() > 1e-15 {
-                    row.push((i, 0.5 * gx));           // c¹_i
-                }
-                if gy.abs() > 1e-15 {
-                    row.push((n_basis + i, 0.5 * gy)); // c²_i
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-        }
-        // Row for J_S_y
-        {
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                // J_S_y = (1/2)(Σ c¹_i gy_i - Σ c²_i gx_i)
-                if gy.abs() > 1e-15 {
-                    row.push((i, 0.5 * gy));           // c¹_i
-                }
-                if gx.abs() > 1e-15 {
-                    row.push((n_basis + i, -0.5 * gx)); // c²_i
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-        }
-        cones.push(SecondOrderConeT(3));
-
-        // (b) ||J_A f(z_i)|| ≤ s_i — SOC(3)
-        {
-            let mut row = Vec::new();
-            row.push((s_col, -1.0));
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-        }
-        // Row for J_A_x
-        {
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                // J_A_x = (1/2)(Σ c¹_i gx_i - Σ c²_i gy_i)
-                if gx.abs() > 1e-15 {
-                    row.push((i, 0.5 * gx));           // c¹_i
-                }
-                if gy.abs() > 1e-15 {
-                    row.push((n_basis + i, -0.5 * gy)); // c²_i
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-        }
-        // Row for J_A_y
-        {
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                // J_A_y = (1/2)(Σ c¹_i gy_i + Σ c²_i gx_i)
-                if gy.abs() > 1e-15 {
-                    row.push((i, 0.5 * gy));          // c¹_i
-                }
-                if gx.abs() > 1e-15 {
-                    row.push((n_basis + i, 0.5 * gx)); // c²_i
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-        }
-        cones.push(SecondOrderConeT(3));
-
-        // (c) t_i + s_i ≤ K — Nonnegative constraint: K - t_i - s_i ≥ 0
-        {
-            let mut row = Vec::new();
-            row.push((t_col, 1.0));
-            row.push((s_col, 1.0));
-            constraint_rows.push(row);
-            b_vec.push(k);
-        }
-        // (d) J_S f(z_i)·d_i - s_i ≥ 1/K — Nonnegative: J_S·d - s - 1/K ≥ 0
-        {
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                // J_S·d = J_S_x * d_x + J_S_y * d_y
-                // J_S_x = (1/2)(c¹ gx + c² gy)
-                // J_S_y = (1/2)(c¹ gy - c² gx)
-                // J_S·d = (1/2)(c¹_i gx d_x + c¹_i gy d_y) + (1/2)(c²_i gy d_x - c²_i gx d_y)
-                let coeff_c1 = -0.5 * (gx * d.x + gy * d.y);
-                let coeff_c2 = -0.5 * (gy * d.x - gx * d.y);
-                if coeff_c1.abs() > 1e-15 {
-                    row.push((i, coeff_c1));
-                }
-                if coeff_c2.abs() > 1e-15 {
-                    row.push((n_basis + i, coeff_c2));
-                }
-            }
-            row.push((s_col, 1.0)); // -(-s_i) = +s_i on A side; we want J_S·d - s ≥ 1/K
-            // In clarabel: Ax + s_slack = b, s_slack ∈ NN
-            // We want J_S·d - s_i ≥ 1/K → -J_S·d + s_i + s_slack = -1/K ... no
-            // Let me redo this carefully:
-            // Clarabel: Ax + s = b, s ≥ 0 (NonnegativeCone)
-            // We want: J_S f·d - s_i - 1/K ≥ 0
-            // Let slack = J_S f·d - s_i - 1/K ≥ 0
-            // → slack = -A_row · x + b_val where b_val comes from constant terms
-            // A_row · x = -(coefficients of J_S·d) + s_i
-            // b_val = 1/K
-            // → A: negate the J_S·d coefficients, +1 at s_col
-            // → b: 1/K
-            // Since we already put negative of J_S·d coefficients above (coeff_c1, coeff_c2),
-            // and +1 at s_col, this is:
-            // Ax = (-J_S·d coefficients for c) + s_i
-            // s_slack = b - Ax = 1/K - (-J_S·d + s_i) = 1/K + J_S·d - s_i
-            // We need s_slack ≥ 0, so J_S·d - s_i ≥ -1/K... that's not right.
-
-            // Let me reconsider. We want: J_S·d - s_i ≥ 1/K
-            // → -(−J_S·d + s_i) ≥ 1/K
-            // → -J_S·d + s_i ≤ -1/K
-            // → -J_S·d + s_i + s_slack = -1/K with s_slack ≤ 0... no.
-            //
-            // Clarabel NonnegativeCone: s ≥ 0
-            // Ax + s = b → s = b - Ax ≥ 0 → Ax ≤ b
-            //
-            // We want: J_S f·d - s_i ≥ 1/K
-            // Negate: -(J_S f·d - s_i) ≤ -(1/K)
-            // → -J_S f·d + s_i ≤ -1/K
-            // But -1/K < 0, and Ax ≤ b with b < 0... this is fine for clarabel.
-            // A row: (-coeff of J_S·d for c¹_i, -coeff of J_S·d for c²_i, +1 at s_col)
-            // b = -1/K
-            // Then s = b - Ax = -1/K - A·x ≥ 0
-            // → A·x ≤ -1/K
-            // → -J_S·d + s_i ≤ -1/K
-            // → J_S·d - s_i ≥ 1/K  ✓
-            constraint_rows.push(row);
-            b_vec.push(-1.0 / k);
-        }
-        // Two NN constraints (Eq. 23c and Eq. 26)
-        cones.push(NonnegativeConeT(2));
-    }
-
-    // Convert to clarabel format and solve
-    let (a_csc, b_arr) = sparse_rows_to_csc(&constraint_rows, &b_vec, n_vars);
-
-    // Sanity check: detect NaN/Inf in problem data before solving.
-    // These corrupt the KKT factorization and produce NaN immediately.
-    check_problem_data(&q, &a_csc, &b_arr, &p_mat)?;
-
-    // Add diagonal regularization to P for numerical stability.
-    // This prevents the P matrix from being (near-)zero when lambda_reg
-    // is very small, which causes Clarabel to struggle with the KKT system.
-    // Use a larger value for coefficient variables (first 2*n_basis) to
-    // improve conditioning, and a smaller value for auxiliary variables.
-    let eps_coeff = 1e-6;
-    let eps_aux = 1e-8;
-    for i in 0..n_vars {
-        if i < 2 * n_basis {
-            p_mat[(i, i)] += eps_coeff;
-        } else {
-            p_mat[(i, i)] += eps_aux;
-        }
-    }
-
-    // P matrix (upper triangular)
-    let p_csc = dense_to_csc_upper_tri(&p_mat);
-
-    let settings = make_solver_settings();
-
-    let mut solver = DefaultSolver::new(&p_csc, &q, &a_csc, &b_arr, &cones, settings);
-
-    solver.solve();
-
-    match solver.solution.status {
-        SolverStatus::Solved | SolverStatus::AlmostSolved => {
-            // Extract coefficients
-            let x = &solver.solution.x;
-            let mut c = CoefficientMatrix::zeros(2, n_basis);
-            for i in 0..n_basis {
-                c[(0, i)] = x[i];
-                c[(1, i)] = x[n_basis + i];
-            }
-            Ok(c)
-        }
-        SolverStatus::PrimalInfeasible | SolverStatus::DualInfeasible => {
-            Err(SolverError::Infeasible(format!(
-                "SOCP infeasible: {:?}",
-                solver.solution.status
-            )))
-        }
-        status => Err(SolverError::SolverFailed(format!(
-            "Solver returned status: {:?}",
-            status
-        ))),
-    }
-}
-
-/// Build and solve the conformal distortion SOCP.
-///
-/// Conformal constraints per active point (Eq. 28):
-///   ||J_A f(z_i)|| ≤ ((K-1)/(K+1)) · J_S f(z_i)·d_i    (Eq. 28a)
-///   ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ                 (Eq. 28b)
-fn build_and_solve_conformal(
-    source_handles: &[Vector2<f64>],
-    target_handles: &[Vector2<f64>],
-    basis: &dyn BasisFunction,
-    state: &AlgorithmState,
-    params: &AlgorithmParams,
-    precomputed: &PrecomputedData,
-    n_basis: usize,
-    n_handles: usize,
-    active_indices: &[usize],
-    _n_active: usize,
-    delta: f64,
-) -> Result<CoefficientMatrix, SolverError> {
-    let k = params.k_bound;
-    // No auxiliary t, s variables for conformal (the constraints are directly SOC)
-    let n_vars = 2 * n_basis + n_handles;
-
-    // === Build objective ===
-    let mut q = vec![0.0; n_vars];
-    for l in 0..n_handles {
-        q[2 * n_basis + l] = 1.0;
-    }
-
-    let (mut p_mat, q_reg) = build_regularization(
-        basis, state, params, precomputed, n_basis, n_vars,
-    );
-
-    // Add ARAP linear term to q
-    for i in 0..q_reg.len().min(n_vars) {
-        q[i] += q_reg[i];
-    }
-
-    // === Build constraints ===
-    let mut constraint_rows: Vec<Vec<(usize, f64)>> = Vec::new();
-    let mut b_vec: Vec<f64> = Vec::new();
-    let mut cones: Vec<clarabel::solver::SupportedConeT<f64>> = Vec::new();
-
-    // Position constraints (same as isometric)
-    for l in 0..n_handles {
-        let phi_l = basis.evaluate(source_handles[l]);
-        let r_col = 2 * n_basis + l;
-
-        let mut row = Vec::new();
-        row.push((r_col, -1.0));
-        constraint_rows.push(row);
-        b_vec.push(0.0);
-
-        let mut row = Vec::new();
-        for i in 0..n_basis {
-            if phi_l[i].abs() > 1e-15 {
-                row.push((i, phi_l[i]));
-            }
-        }
-        constraint_rows.push(row);
-        b_vec.push(target_handles[l].x);
-
-        let mut row = Vec::new();
-        for i in 0..n_basis {
-            if phi_l[i].abs() > 1e-15 {
-                row.push((n_basis + i, phi_l[i]));
-            }
-        }
-        constraint_rows.push(row);
-        b_vec.push(target_handles[l].y);
-
-        cones.push(SecondOrderConeT(3));
-    }
-
-    // Conformal constraints per active point
-    let ratio = (k - 1.0) / (k + 1.0);
-
-    for &pt_idx in active_indices {
-        let d = state.frames[pt_idx];
-
-        // Helper: compute J_S f·d coefficient for a given basis function
-        // J_S·d = (1/2)(gx*d_x + gy*d_y) for c¹ component
-        //       + (1/2)(gy*d_x - gx*d_y) for c² component
-
-        // (a) ||J_A f(z_i)|| ≤ ratio · J_S f(z_i)·d_i — SOC(3)
-        // Rewrite: ||J_A|| ≤ ratio * (J_S·d)
-        // SOC form: [ratio*(J_S·d); J_A_x; J_A_y]
-        // s = b - Ax, s ∈ SOC(3), so s_1 = ratio*(J_S·d), s_2,3 = -J_A
-        {
-            // s_1 = ratio * J_S·d
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                let coeff_c1 = -ratio * 0.5 * (gx * d.x + gy * d.y);
-                let coeff_c2 = -ratio * 0.5 * (gy * d.x - gx * d.y);
-                if coeff_c1.abs() > 1e-15 {
-                    row.push((i, coeff_c1));
-                }
-                if coeff_c2.abs() > 1e-15 {
-                    row.push((n_basis + i, coeff_c2));
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-
-            // s_2, s_3 = -J_A (same layout as isometric J_A)
-            // J_A_x = (1/2)(c¹ gx - c² gy)
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                if gx.abs() > 1e-15 {
-                    row.push((i, 0.5 * gx));
-                }
-                if gy.abs() > 1e-15 {
-                    row.push((n_basis + i, -0.5 * gy));
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-
-            // J_A_y = (1/2)(c¹ gy + c² gx)
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                if gy.abs() > 1e-15 {
-                    row.push((i, 0.5 * gy));
-                }
-                if gx.abs() > 1e-15 {
-                    row.push((n_basis + i, 0.5 * gx));
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-
-            cones.push(SecondOrderConeT(3));
-        }
-
-        // (b) ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ — SOC(3)
-        // s_1 = J_S·d - δ
-        {
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                let coeff_c1 = -0.5 * (gx * d.x + gy * d.y);
-                let coeff_c2 = -0.5 * (gy * d.x - gx * d.y);
-                if coeff_c1.abs() > 1e-15 {
-                    row.push((i, coeff_c1));
-                }
-                if coeff_c2.abs() > 1e-15 {
-                    row.push((n_basis + i, coeff_c2));
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(-delta); // b - Ax → s_1 = -delta - (-J_S·d) = J_S·d - delta
-
-            // J_A components (same as above)
-            // J_A_x = (1/2)(c¹ gx - c² gy)
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                if gx.abs() > 1e-15 {
-                    row.push((i, 0.5 * gx));
-                }
-                if gy.abs() > 1e-15 {
-                    row.push((n_basis + i, -0.5 * gy));
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-
-            // J_A_y = (1/2)(c¹ gy + c² gx)
-            let mut row = Vec::new();
-            for i in 0..n_basis {
-                let gx = precomputed.grad_phi_x[(pt_idx, i)];
-                let gy = precomputed.grad_phi_y[(pt_idx, i)];
-                if gy.abs() > 1e-15 {
-                    row.push((i, 0.5 * gy));
-                }
-                if gx.abs() > 1e-15 {
-                    row.push((n_basis + i, 0.5 * gx));
-                }
-            }
-            constraint_rows.push(row);
-            b_vec.push(0.0);
-
-            cones.push(SecondOrderConeT(3));
-        }
-    }
-
-    // Convert and solve
-    let (a_csc, b_arr) = sparse_rows_to_csc(&constraint_rows, &b_vec, n_vars);
-
-    // Add diagonal regularization to P for numerical stability.
-    let eps_coeff = 1e-6;
-    let eps_aux = 1e-8;
-    for i in 0..n_vars {
-        if i < 2 * n_basis {
-            p_mat[(i, i)] += eps_coeff;
-        } else {
-            p_mat[(i, i)] += eps_aux;
-        }
-    }
-
-    let p_csc = dense_to_csc_upper_tri(&p_mat);
-
-    let settings = make_solver_settings();
-
-    let mut solver = DefaultSolver::new(&p_csc, &q, &a_csc, &b_arr, &cones, settings);
-
-    solver.solve();
-
-    match solver.solution.status {
-        SolverStatus::Solved | SolverStatus::AlmostSolved => {
-            let x = &solver.solution.x;
-            let mut c = CoefficientMatrix::zeros(2, n_basis);
-            for i in 0..n_basis {
-                c[(0, i)] = x[i];
-                c[(1, i)] = x[n_basis + i];
-            }
-            Ok(c)
-        }
-        SolverStatus::PrimalInfeasible | SolverStatus::DualInfeasible => {
-            Err(SolverError::Infeasible(format!(
-                "SOCP infeasible: {:?}",
-                solver.solution.status
-            )))
-        }
-        status => Err(SolverError::SolverFailed(format!(
-            "Solver returned status: {:?}",
-            status
-        ))),
-    }
-}
+// ─────────────────────────────────────────────
+// Regularization energy (Eq. 31, 33)
+// ─────────────────────────────────────────────
 
 /// Build the regularization quadratic form P and linear term q_reg.
 ///
@@ -718,7 +463,7 @@ fn build_and_solve_conformal(
 fn build_regularization(
     _basis: &dyn BasisFunction,
     state: &AlgorithmState,
-    params: &AlgorithmParams,
+    params: &MappingParams,
     precomputed: &PrecomputedData,
     n_basis: usize,
     n_vars: usize,

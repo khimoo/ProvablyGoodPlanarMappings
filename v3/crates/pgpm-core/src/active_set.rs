@@ -146,8 +146,8 @@ pub fn initialize_stable_set(
         let best = candidates.iter()
             .copied()
             .filter(|i| !selected.contains(i))
-            .max_by(|&a, &b| min_dists[a].partial_cmp(&min_dists[b]).unwrap())
-            .unwrap();
+            .max_by(|&a, &b| min_dists[a].total_cmp(&min_dists[b]))
+            .expect("FPS: no remaining candidates despite k < candidates.len()");
 
         selected.push(best);
     }

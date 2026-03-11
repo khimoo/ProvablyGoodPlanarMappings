@@ -142,10 +142,6 @@ pub fn omega(h: f64, c_norm: f64, basis: &dyn BasisFunction) -> f64 {
     2.0 * c_norm * basis.gradient_modulus(h)
 }
 
-/// Maximum grid resolution for Strategy 2 re-optimization.
-/// Prevents excessive memory/time usage for very small h values.
-pub const MAX_REFINEMENT_RESOLUTION: usize = 1000;
-
 /// Maximum number of Algorithm 1 steps during re-optimization.
 pub const MAX_REFINEMENT_STEPS: usize = 200;
 

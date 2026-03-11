@@ -7,22 +7,26 @@
 use crate::active_set;
 use crate::basis::BasisFunction;
 use crate::distortion;
+use crate::distortion_policy::DistortionPolicy;
 use crate::domain::Domain;
+use crate::mapping::PlanarMapping;
 use crate::solver;
 use crate::strategy;
 use crate::types::*;
 use log::warn;
 use nalgebra::{DMatrix, Vector2};
 
-/// Algorithm 1: complete implementation.
-pub struct Algorithm {
+/// Algorithm 1: complete implementation, parameterised by distortion policy.
+pub struct Algorithm<D: DistortionPolicy> {
     /// Basis functions (Table 1)
     basis: Box<dyn BasisFunction>,
-    /// Algorithm parameters (K, λ, regularization type)
-    params: AlgorithmParams,
+    /// Algorithm parameters (K, lambda, regularization type)
+    params: MappingParams,
+    /// Distortion policy (isometric or conformal)
+    policy: D,
     /// Algorithm state (coefficients, active set, frames, etc.)
     state: AlgorithmState,
-    /// Source handle positions {p_l} (Eq. 29) — fixed
+    /// Source handle positions {p_l} (Eq. 29) -- fixed
     source_handles: Vec<Vector2<f64>>,
     /// Grid dimensions for local maxima search
     grid_width: usize,
@@ -31,34 +35,39 @@ pub struct Algorithm {
     is_first_step: bool,
     /// Domain bounds for biharmonic energy integration
     domain_bounds: DomainBounds,
-    /// Domain Ω for "x ∈ Ω" test (Paper Section 4).
+    /// Domain Omega for "x in Omega" test (Paper Section 4).
     /// When `None`, all grid points are considered inside the domain.
     domain: Option<Box<dyn Domain>>,
+    /// SOCP solver numerical tuning (not from the paper).
+    solver_config: SolverConfig,
 }
 
-impl Algorithm {
+impl<D: DistortionPolicy> Algorithm<D> {
     /// Create a new Algorithm instance.
     ///
     /// # Arguments
     /// - `basis`: Basis function implementation (Gaussian, B-Spline, TPS)
-    /// - `params`: Algorithm parameters (K, λ, regularization)
-    /// - `domain_bounds`: Bounding box of domain Ω (Eq. 5)
+    /// - `params`: Algorithm parameters (K, lambda, regularization)
+    /// - `policy`: Distortion policy (isometric or conformal)
+    /// - `domain_bounds`: Bounding box of domain Omega (Eq. 5)
     /// - `source_handles`: Fixed handle positions {p_l} (Eq. 29)
     /// - `grid_resolution`: Number of grid points per side (paper Section 6: 200)
     /// - `fps_k`: Number of farthest point samples for Z'' (stable set)
-    /// - `domain`: Abstract domain Ω. When `Some`, only grid points where
+    /// - `domain`: Abstract domain Omega. When `Some`, only grid points where
     ///   `domain.contains(pt)` returns true are eligible for the active/stable
     ///   sets and ARAP regularisation. The rectangular grid structure is
     ///   preserved for local-maxima detection (Section 5). When `None`, all
     ///   grid points are considered inside the domain.
     pub fn new(
         basis: Box<dyn BasisFunction>,
-        params: AlgorithmParams,
+        params: MappingParams,
+        policy: D,
         domain_bounds: DomainBounds,
         source_handles: Vec<Vector2<f64>>,
         grid_resolution: usize,
         fps_k: usize,
         domain: Option<Box<dyn Domain>>,
+        solver_config: SolverConfig,
     ) -> Self {
         // Generate collocation grid
         // Section 4: "consider all the points from a surrounding
@@ -68,7 +77,7 @@ impl Algorithm {
 
         let m = collocation_points.len();
 
-        // Build domain mask: true for points inside Ω.
+        // Build domain mask: true for points inside Omega.
         // Paper Section 4: "consider all the points from a surrounding
         // uniform grid that fall inside the domain"
         let domain_mask = build_domain_mask(&collocation_points, domain.as_deref());
@@ -79,7 +88,7 @@ impl Algorithm {
         let k_high = 0.1 + 0.9 * k;
         let k_low = 0.5 + 0.5 * k;
 
-        // Initialize frames to (1, 0) — Algorithm 1: "Initialize d_i"
+        // Initialize frames to (1, 0) -- Algorithm 1: "Initialize d_i"
         let frames = vec![Vector2::new(1.0, 0.0); m];
 
         // Initialize with identity coefficients
@@ -105,6 +114,7 @@ impl Algorithm {
         Self {
             basis,
             params,
+            policy,
             state,
             source_handles,
             grid_width,
@@ -112,20 +122,21 @@ impl Algorithm {
             is_first_step: true,
             domain_bounds,
             domain,
+            solver_config,
         }
     }
 
     /// Algorithm 1: execute one step.
     ///
     /// Pseudocode correspondence:
-    /// 1. [first step only] Precompute φ(z), ∇φ(z), set d_i=(1,0), Z'=∅, Z''=FPS
-    /// 2. Evaluate D(z) for all z ∈ Z
+    /// 1. [first step only] Precompute phi(z), grad_phi(z), set d_i=(1,0), Z'={}, Z''=FPS
+    /// 2. Evaluate D(z) for all z in Z
     /// 3. Find Z_max (local maxima of D)
-    /// 4. Add z ∈ Z_max with D(z) > K_high to Z'
-    /// 5. Remove z ∈ Z' with D(z) < K_low from Z'
-    /// 6. Solve SOCP (Eq. 18) → update c
+    /// 4. Add z in Z_max with D(z) > K_high to Z'
+    /// 5. Remove z in Z' with D(z) < K_low from Z'
+    /// 6. Solve SOCP (Eq. 18) -> update c
     /// 7. Update d_i (Eq. 27)
-    pub fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
+    fn step_impl(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
         // === Initialization (if first step) ===
         if self.is_first_step {
             self.precompute();
@@ -133,11 +144,13 @@ impl Algorithm {
         }
 
         // === Evaluate distortion at all collocation points ===
-        let precomputed = self.state.precomputed.as_ref().unwrap();
+        let precomputed = self.state.precomputed.as_ref().ok_or_else(|| {
+            AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+        })?;
         let distortions = distortion::evaluate_distortion_all(
             &self.state.coefficients,
             precomputed,
-            &self.params.distortion_type,
+            &self.policy,
         );
 
         // === Update active set (Algorithm 1 lines 5-8) ===
@@ -161,21 +174,27 @@ impl Algorithm {
             self.basis.as_ref(),
             &self.state,
             &self.params,
+            &self.policy,
+            &self.solver_config,
         )?;
 
         self.state.coefficients = new_coefficients;
 
         // === Update frames (Eq. 27) ===
         // d_i = J_S f(z_i) / ||J_S f(z_i)||
-        let precomputed = self.state.precomputed.as_ref().unwrap();
+        //
+        // Frames are updated only for constraint points (Z' union Z''),
+        // consistent with Algorithm 1's postprocessing scope.
+        // Frames at non-constraint points remain at their last value
+        // (initialized to (1,0)).  This does not affect fold-over
+        // guarantees -- see Section 5 "Initialization of the frames".
+        let precomputed = self.state.precomputed.as_ref().ok_or_else(|| {
+            AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+        })?;
         let j_s_values = distortion::evaluate_j_s_all(&self.state.coefficients, precomputed);
 
-        // Update frames for ALL collocation points.
-        // Algorithm 1 specifies updating d_i for active/stable points,
-        // but ARAP regularization (Eq. 33) evaluates at all sample points,
-        // so all frames must be current for the ARAP linear term to be correct.
         let eps = 1e-10;
-        for idx in 0..j_s_values.len() {
+        for &idx in self.state.active_set.iter().chain(self.state.stable_set.iter()) {
             let j_s = j_s_values[idx];
             let norm = j_s.norm();
             if norm > eps {
@@ -247,54 +266,14 @@ impl Algorithm {
         });
     }
 
-    /// Evaluate the mapping f(x) = Σ c_i f_i(x) (Eq. 3).
-    pub fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
-        let phi = self.basis.evaluate(x);
-        let n = self.basis.count();
-
-        let mut u = 0.0;
-        let mut v = 0.0;
-        for i in 0..n {
-            u += self.state.coefficients[(0, i)] * phi[i];
-            v += self.state.coefficients[(1, i)] * phi[i];
-        }
-
-        Vector2::new(u, v)
-    }
-
-    /// Get current coefficients (for rendering).
-    pub fn coefficients(&self) -> &CoefficientMatrix {
-        &self.state.coefficients
-    }
-
-    /// Get current active set size.
-    pub fn active_set_size(&self) -> usize {
-        self.state.active_set.len()
-    }
-
-    /// Get collocation points.
-    pub fn collocation_points(&self) -> &[Vector2<f64>] {
-        &self.state.collocation_points
-    }
-
-    /// Get the basis function reference.
-    pub fn basis(&self) -> &dyn BasisFunction {
-        self.basis.as_ref()
-    }
-
-    /// Get algorithm state (for inspection/testing).
-    pub fn state(&self) -> &AlgorithmState {
-        &self.state
-    }
-
     /// Update algorithm parameters at runtime.
     ///
-    /// This allows changing K, λ, and regularization type while the
+    /// This allows changing K, lambda, and regularization type while the
     /// deformation is running, without re-creating the Algorithm.
     /// K_high and K_low are re-derived from the new K bound.
-    /// The active set is NOT cleared — stale points will be naturally
+    /// The active set is NOT cleared -- stale points will be naturally
     /// removed at the next step when their distortion falls below K_low.
-    pub fn update_params(&mut self, params: AlgorithmParams) {
+    fn update_params_impl(&mut self, params: MappingParams) {
         let k = params.k_bound;
         self.state.k_high = 0.1 + 0.9 * k;
         self.state.k_low = 0.5 + 0.5 * k;
@@ -325,33 +304,22 @@ impl Algorithm {
         self.params = params;
     }
 
-    /// Get current algorithm parameters (for inspection).
-    pub fn params(&self) -> &AlgorithmParams {
-        &self.params
-    }
-
-    /// Get domain bounds.
-    pub fn domain_bounds(&self) -> &DomainBounds {
-        &self.domain_bounds
-    }
-
-    /// Get grid resolution (points per side).
-    pub fn grid_width(&self) -> usize {
-        self.grid_width
-    }
-
-    /// Strategy 2 re-optimization (Section 4, Eq. 14).
+    /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
+    ///
+    /// During interactive manipulation, Algorithm 1 runs on a fixed
+    /// coarse grid for responsiveness. Once manipulation ends, this
+    /// method refines the grid to guarantee K_max everywhere:
     ///
     /// 1. Compute |||c||| from current coefficients (Eq. 8)
-    /// 2. Compute required fill distance h via Eq. 14
+    /// 2. Compute required fill distance h via policy (Eq. 14/15)
     /// 3. Determine grid resolution to achieve h
     /// 4. Rebuild collocation grid and precomputed data at higher resolution
     ///    (coefficients c are preserved as the initial guess)
     /// 5. Run Algorithm 1 steps until convergence or step limit
     ///
-    /// Convergence: max_distortion ≤ K and active set unchanged from previous step.
+    /// Convergence: max_distortion <= K and active set unchanged from previous step.
     /// Step limit: `strategy::MAX_REFINEMENT_STEPS`.
-    pub fn refine_strategy2(
+    fn refine_strategy2_impl(
         &mut self,
         k_max: f64,
         target_handles: &[Vector2<f64>],
@@ -367,8 +335,8 @@ impl Algorithm {
         // Step 1: compute |||c||| (Eq. 8)
         let c_norm = strategy::compute_c_norm(&self.state.coefficients);
 
-        // Step 2: compute required h (Eq. 14, isometric)
-        let required_h = strategy::required_h_isometric(
+        // Step 2: compute required h (delegated to policy)
+        let required_h = self.policy.required_h(
             k, k_max, c_norm, self.basis.as_ref(),
         ).ok_or_else(|| AlgorithmError::InvalidInput(
             "Strategy 2: cannot compute required h (K_max too close to K or c_norm issue)".into(),
@@ -378,10 +346,13 @@ impl Algorithm {
         let current_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
 
         // Step 3: determine required resolution
-        let mut new_resolution = strategy::resolution_for_h(&self.domain_bounds, required_h);
-        // Cap at maximum
-        if new_resolution > strategy::MAX_REFINEMENT_RESOLUTION {
-            new_resolution = strategy::MAX_REFINEMENT_RESOLUTION;
+        let new_resolution = strategy::resolution_for_h(&self.domain_bounds, required_h);
+        // Check against configured maximum
+        if new_resolution > self.solver_config.max_refinement_resolution {
+            return Err(AlgorithmError::ResolutionExceeded {
+                required: new_resolution,
+                max: self.solver_config.max_refinement_resolution,
+            });
         }
 
         // Only rebuild if we need a denser grid
@@ -429,10 +400,10 @@ impl Algorithm {
         let mut prev_active_set: Vec<usize> = Vec::new();
 
         for _ in 0..strategy::MAX_REFINEMENT_STEPS {
-            let info = self.step(target_handles)?;
+            let info = self.step_impl(target_handles)?;
             refinement_steps += 1;
 
-            // Check convergence: max_distortion ≤ K and active set stable
+            // Check convergence: max_distortion <= K and active set stable
             let current_active = self.state.active_set.clone();
             if info.max_distortion <= k && current_active == prev_active_set {
                 break;
@@ -440,10 +411,10 @@ impl Algorithm {
             prev_active_set = current_active;
         }
 
-        // Compute achieved K_max (Eq. 11)
+        // Compute achieved K_max (delegated to policy)
         let final_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
         let final_omega = strategy::omega(final_h, c_norm, self.basis.as_ref());
-        let k_max_achieved = strategy::compute_k_max_isometric(k, final_omega)
+        let k_max_achieved = self.policy.compute_k_max(k, final_omega)
             .unwrap_or_else(|| {
                 warn!(
                     "Strategy 2: cannot guarantee finite K_max \
@@ -462,17 +433,68 @@ impl Algorithm {
             refinement_steps,
         })
     }
+
+    /// Get current active set size.
+    pub fn active_set_size(&self) -> usize {
+        self.state.active_set.len()
+    }
+
+    /// Get collocation points.
+    pub fn collocation_points(&self) -> &[Vector2<f64>] {
+        &self.state.collocation_points
+    }
+
+    /// Get algorithm state (for inspection/testing).
+    pub fn state(&self) -> &AlgorithmState {
+        &self.state
+    }
+
+    /// Get current algorithm parameters (for inspection).
+    pub fn params(&self) -> &MappingParams {
+        &self.params
+    }
+
+    /// Get domain bounds.
+    pub fn domain_bounds(&self) -> &DomainBounds {
+        &self.domain_bounds
+    }
+
+    /// Get grid resolution (points per side).
+    pub fn grid_width(&self) -> usize {
+        self.grid_width
+    }
 }
 
-/// Information returned from each algorithm step.
-#[derive(Debug)]
-pub struct StepInfo {
-    /// Maximum distortion over all collocation points
-    pub max_distortion: f64,
-    /// Number of points in the active set Z'
-    pub active_set_size: usize,
-    /// Number of points in the stable set Z''
-    pub stable_set_size: usize,
+// ─────────────────────────────────────────────
+// PlanarMapping trait implementation
+// ─────────────────────────────────────────────
+
+impl<D: DistortionPolicy> PlanarMapping for Algorithm<D> {
+    fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
+        self.step_impl(target_handles)
+    }
+
+    // evaluate() uses default implementation from PlanarMapping (Eq. 3)
+
+    fn coefficients(&self) -> &CoefficientMatrix {
+        &self.state.coefficients
+    }
+
+    fn basis(&self) -> &dyn BasisFunction {
+        self.basis.as_ref()
+    }
+
+    fn update_params(&mut self, params: MappingParams) {
+        self.update_params_impl(params);
+    }
+
+    fn refine_strategy2(
+        &mut self,
+        k_max: f64,
+        target_handles: &[Vector2<f64>],
+    ) -> Result<strategy::Strategy2Result, AlgorithmError> {
+        self.refine_strategy2_impl(k_max, target_handles)
+    }
 }
 
 /// Generate a uniform collocation grid within the domain bounds.
@@ -490,7 +512,7 @@ fn generate_collocation_grid(
 
     // Use the same resolution for both axes (square grid)
     // For non-square domains, we could use different resolutions,
-    // but the paper uses square grids (200², 3000², etc.)
+    // but the paper uses square grids (200^2, 3000^2, etc.)
     let res_x = resolution;
     let res_y = resolution;
 
@@ -520,9 +542,10 @@ fn build_domain_mask(points: &[Vector2<f64>], domain: Option<&dyn Domain>) -> Ve
 mod tests {
     use super::*;
     use crate::basis::gaussian::GaussianBasis;
+    use crate::distortion_policy::IsometricPolicy;
 
-    fn make_test_algorithm() -> Algorithm {
-        // Simple 4-center Gaussian basis on [0,1]²
+    fn make_test_algorithm() -> Algorithm<IsometricPolicy> {
+        // Simple 4-center Gaussian basis on [0,1]^2
         let centers = vec![
             Vector2::new(0.25, 0.25),
             Vector2::new(0.75, 0.25),
@@ -531,8 +554,7 @@ mod tests {
         ];
         let basis = Box::new(GaussianBasis::new(centers, 0.3));
 
-        let params = AlgorithmParams {
-            distortion_type: DistortionType::Isometric,
+        let params = MappingParams {
             k_bound: 3.0,
             lambda_reg: 0.0, // No regularization for simplicity
             regularization: RegularizationType::Arap,
@@ -549,8 +571,11 @@ mod tests {
             Vector2::new(0.5, 0.5),
         ];
 
-        // Small grid for testing (no domain constraint → full rectangle)
-        Algorithm::new(basis, params, domain, handles, 10, 4, None)
+        // Small grid for testing (no domain constraint -> full rectangle)
+        Algorithm::new(
+            basis, params, IsometricPolicy, domain, handles,
+            10, 4, None, SolverConfig::default(),
+        )
     }
 
     #[test]
@@ -577,10 +602,10 @@ mod tests {
         let distortions = distortion::evaluate_distortion_all(
             &alg.state.coefficients,
             precomputed,
-            &alg.params.distortion_type,
+            &alg.policy,
         );
 
-        // Identity mapping should have D ≈ 1 everywhere
+        // Identity mapping should have D ~ 1 everywhere
         for (i, &d) in distortions.iter().enumerate() {
             assert!(
                 (d - 1.0).abs() < 1e-6,
@@ -596,7 +621,7 @@ mod tests {
 
         // Target = source (identity deformation)
         let target = vec![Vector2::new(0.5, 0.5)];
-        let info = alg.step(&target).expect("Step should succeed");
+        let info = alg.step_impl(&target).expect("Step should succeed");
 
         // After solving with identity target, distortion should be close to 1
         assert!(
@@ -612,7 +637,7 @@ mod tests {
 
         // Move the handle slightly
         let target = vec![Vector2::new(0.6, 0.5)];
-        let info = alg.step(&target).expect("Step should succeed");
+        let info = alg.step_impl(&target).expect("Step should succeed");
 
         // The mapping should still be valid (not infinite distortion)
         assert!(
@@ -654,9 +679,9 @@ mod tests {
         let mut alg = make_test_algorithm();
         let target = vec![Vector2::new(0.6, 0.5)];
 
-        // Run multiple steps — the distortion should converge
+        // Run multiple steps -- the distortion should converge
         for step in 0..5 {
-            let info = alg.step(&target).expect("Step should succeed");
+            let info = alg.step_impl(&target).expect("Step should succeed");
             println!(
                 "Step {}: max_dist={:.4}, active={}",
                 step, info.max_distortion, info.active_set_size
@@ -674,8 +699,7 @@ mod tests {
             Vector2::new(0.5, 0.5),
         ];
         let basis = Box::new(GaussianBasis::new(centers.clone(), 0.3));
-        let params = AlgorithmParams {
-            distortion_type: DistortionType::Isometric,
+        let params = MappingParams {
             k_bound: 3.0,
             lambda_reg: 0.0,
             regularization: RegularizationType::Arap,
@@ -697,11 +721,12 @@ mod tests {
 
         let polygon_domain = PolygonDomain::new(contour, vec![]);
         let alg = Algorithm::new(
-            basis, params, domain, centers, 5, 2,
+            basis, params, IsometricPolicy, domain, centers, 5, 2,
             Some(Box::new(polygon_domain)),
+            SolverConfig::default(),
         );
 
-        // Grid is 5×5 = 25 points, but some should be masked out
+        // Grid is 5x5 = 25 points, but some should be masked out
         let mask = &alg.state().domain_mask;
         assert_eq!(mask.len(), 25);
 

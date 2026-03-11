@@ -17,7 +17,7 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
                 right: Val::Px(0.0),
                 top: Val::Px(0.0),
                 bottom: Val::Px(0.0),
-                width: Val::Px(220.0),
+                width: Val::Px(super::PANEL_WIDTH),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(10.0)),
                 row_gap: Val::Px(6.0),

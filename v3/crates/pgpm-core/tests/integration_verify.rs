@@ -4,7 +4,7 @@
 //! properties described in Poranne & Lipman (2014):
 //!
 //! 1. Identity mapping has distortion exactly 1
-//! 2. SOCP constraints enforce D(z) ≤ K at active points
+//! 2. SOCP constraints enforce D(z) <= K at active points
 //! 3. Handle positions are tracked by the mapping
 //! 4. Iterative refinement converges (active set stabilizes)
 //! 5. Distortion bound is maintained under deformation
@@ -12,17 +12,18 @@
 use pgpm_core::basis::gaussian::GaussianBasis;
 use pgpm_core::distortion;
 use pgpm_core::types::*;
-use pgpm_core::Algorithm;
+use pgpm_core::algorithm::Algorithm;
+use pgpm_core::{IsometricPolicy, PlanarMapping};
 use nalgebra::Vector2;
 
-/// Helper: create a well-conditioned test setup on [0,1]²
+/// Helper: create a well-conditioned test setup on [0,1]^2
 /// with denser RBF centers and appropriate scale.
 fn make_verification_algorithm(
     k_bound: f64,
     handles_src: Vec<Vector2<f64>>,
     grid_res: usize,
-) -> Algorithm {
-    // 4×4 grid of RBF centers for decent coverage
+) -> Algorithm<IsometricPolicy> {
+    // 4x4 grid of RBF centers for decent coverage
     let mut centers = Vec::new();
     for i in 0..4 {
         for j in 0..4 {
@@ -32,11 +33,10 @@ fn make_verification_algorithm(
             ));
         }
     }
-    // Scale: roughly 1/(2*sqrt(n_centers)) ≈ 0.125, but a bit larger for overlap
+    // Scale: roughly 1/(2*sqrt(n_centers)) ~ 0.125, but a bit larger for overlap
     let basis = Box::new(GaussianBasis::new(centers, 0.25));
 
-    let params = AlgorithmParams {
-        distortion_type: DistortionType::Isometric,
+    let params = MappingParams {
         k_bound,
         lambda_reg: 1e-3,
         regularization: RegularizationType::Arap,
@@ -49,7 +49,10 @@ fn make_verification_algorithm(
         y_max: 1.0,
     };
 
-    Algorithm::new(basis, params, domain, handles_src, grid_res, 8, None)
+    Algorithm::new(
+        basis, params, IsometricPolicy, domain, handles_src,
+        grid_res, 8, None, pgpm_core::SolverConfig::default(),
+    )
 }
 
 // ────────────────────────────────────────────────────────────
@@ -82,7 +85,7 @@ fn verify_identity_coefficients_give_distortion_one() {
     );
 }
 
-/// Test 1b: With identity target, iterative algorithm converges to D ≤ K.
+/// Test 1b: With identity target, iterative algorithm converges to D <= K.
 /// After a few steps, the active set stabilizes and max distortion
 /// stays within the bound K.
 #[test]
@@ -103,11 +106,11 @@ fn verify_identity_target_converges() {
         last_info = Some(info);
     }
 
-    // After convergence, max distortion should be ≤ K (with small tolerance)
+    // After convergence, max distortion should be <= K (with small tolerance)
     let info = last_info.unwrap();
     assert!(
         info.max_distortion <= k + 0.1,
-        "After 10 steps with identity target, max_D={:.4} should be ≤ K+ε={}",
+        "After 10 steps with identity target, max_D={:.4} should be <= K+eps={}",
         info.max_distortion,
         k + 0.1
     );
@@ -118,20 +121,20 @@ fn verify_identity_target_converges() {
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        &DistortionType::Isometric,
+        &pgpm_core::IsometricPolicy,
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Post-solve max_D after 10 steps: {:.4}", max_d);
     assert!(
         max_d <= k + 0.1,
-        "Post-solve max_D={:.4} should be ≤ K+ε={}",
+        "Post-solve max_D={:.4} should be <= K+eps={}",
         max_d,
         k + 0.1
     );
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 2: SOCP constraints enforce D ≤ K at active/stable points
+// Test 2: SOCP constraints enforce D <= K at active/stable points
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -154,10 +157,10 @@ fn verify_distortion_bound_at_constrained_points() {
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        &DistortionType::Isometric,
+        &pgpm_core::IsometricPolicy,
     );
 
-    // Check active set points: D(z) ≤ K (with some numerical tolerance)
+    // Check active set points: D(z) <= K (with some numerical tolerance)
     let tol = 0.1; // SOCP solver tolerance
     for &idx in &state.active_set {
         assert!(
@@ -211,7 +214,7 @@ fn verify_handle_tracking() {
     let error = (mapped - target[0]).norm();
 
     println!(
-        "Handle tracking: src=(0.5,0.5) → mapped=({:.4},{:.4}), target=({:.4},{:.4}), error={:.6}",
+        "Handle tracking: src=(0.5,0.5) -> mapped=({:.4},{:.4}), target=({:.4},{:.4}), error={:.6}",
         mapped.x, mapped.y, target[0].x, target[0].y, error
     );
 
@@ -258,7 +261,7 @@ fn verify_active_set_convergence() {
     );
     assert!(
         ratio < 0.5,
-        "Active set ratio {:.2} is too high — local maxima filter may not be working",
+        "Active set ratio {:.2} is too high -- local maxima filter may not be working",
         ratio
     );
 
@@ -299,8 +302,8 @@ fn verify_mapping_continuity() {
         let dx = (f_px - f_p).norm();
         let dy = (f_py - f_p).norm();
 
-        // With K-bounded distortion, the Lipschitz constant should be ≤ K
-        // (roughly: ||f(x)-f(y)|| ≤ K * ||x-y||)
+        // With K-bounded distortion, the Lipschitz constant should be <= K
+        // (roughly: ||f(x)-f(y)|| <= K * ||x-y||)
         let lip_x = dx / eps;
         let lip_y = dy / eps;
 
@@ -345,7 +348,7 @@ fn verify_k_bound_effect() {
         let distortions = distortion::evaluate_distortion_all(
             &state.coefficients,
             precomputed,
-            &DistortionType::Isometric,
+            &pgpm_core::IsometricPolicy,
         );
 
         let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -404,11 +407,11 @@ fn verify_two_handle_deformation() {
     let err_b = (mapped_b - target[1]).norm();
 
     println!(
-        "Handle A: ({:.3},{:.3}) → ({:.3},{:.3}), error={:.4}",
+        "Handle A: ({:.3},{:.3}) -> ({:.3},{:.3}), error={:.4}",
         src[0].x, src[0].y, mapped_a.x, mapped_a.y, err_a
     );
     println!(
-        "Handle B: ({:.3},{:.3}) → ({:.3},{:.3}), error={:.4}",
+        "Handle B: ({:.3},{:.3}) -> ({:.3},{:.3}), error={:.4}",
         src[1].x, src[1].y, mapped_b.x, mapped_b.y, err_b
     );
 
@@ -421,7 +424,7 @@ fn verify_two_handle_deformation() {
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        &DistortionType::Isometric,
+        &pgpm_core::IsometricPolicy,
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Final max distortion: {:.4}", max_d);
@@ -437,7 +440,7 @@ fn verify_singular_value_decomposition() {
     // the actual SVD of random 2x2 Jacobian matrices.
 
     let test_cases: Vec<(Vector2<f64>, Vector2<f64>)> = vec![
-        // (∇u, ∇v)
+        // (grad_u, grad_v)
         (Vector2::new(2.0, 0.5), Vector2::new(-0.3, 1.5)),
         (Vector2::new(1.0, 0.0), Vector2::new(0.0, 1.0)),
         (Vector2::new(3.0, 1.0), Vector2::new(-1.0, 2.0)),
@@ -449,7 +452,7 @@ fn verify_singular_value_decomposition() {
         let (sigma_max, sigma_min) = distortion::singular_values(j_s, j_a);
 
         // Cross-check with actual SVD of the 2x2 Jacobian
-        // J = [[∂u/∂x, ∂u/∂y], [∂v/∂x, ∂v/∂y]]
+        // J = [[du/dx, du/dy], [dv/dx, dv/dy]]
         let j = nalgebra::Matrix2::new(
             grad_u.x, grad_u.y,
             grad_v.x, grad_v.y,
@@ -461,19 +464,19 @@ fn verify_singular_value_decomposition() {
 
         assert!(
             (sigma_max - svd_max).abs() < 1e-10,
-            "Σ mismatch: J_S/J_A gives {:.6}, SVD gives {:.6} for ∇u={:?}, ∇v={:?}",
+            "Sigma mismatch: J_S/J_A gives {:.6}, SVD gives {:.6} for grad_u={:?}, grad_v={:?}",
             sigma_max, svd_max, grad_u, grad_v
         );
         assert!(
             (sigma_min - svd_min).abs() < 1e-10,
-            "σ mismatch: J_S/J_A gives {:.6}, SVD gives {:.6} for ∇u={:?}, ∇v={:?}",
+            "sigma mismatch: J_S/J_A gives {:.6}, SVD gives {:.6} for grad_u={:?}, grad_v={:?}",
             sigma_min, svd_min, grad_u, grad_v
         );
     }
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 9: Post-solve distortion at constrained points ≤ K
+// Test 9: Post-solve distortion at constrained points <= K
 //         (direct constraint satisfaction check)
 // ────────────────────────────────────────────────────────────
 
@@ -489,7 +492,7 @@ fn verify_post_solve_constraint_satisfaction() {
 
     // Now run another step:
     // At the START of step 2, distortion is evaluated on the SOLVED coefficients.
-    // The constrained points from step 1 should satisfy D ≤ K.
+    // The constrained points from step 1 should satisfy D <= K.
     let info2 = alg.step(&target).expect("Step 2 should succeed");
 
     // The max distortion BEFORE solving (i.e., evaluated on step1's solution)

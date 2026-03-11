@@ -53,8 +53,9 @@ impl ShapeAwareGaussianBasis {
     ) -> Self {
         assert!(s > 0.0, "Scale parameter s must be positive");
 
-        // Build domain mask on the FMM grid (excluding holes)
-        let mask = geodesic::build_domain_mask(bounds, fmm_resolution, fmm_resolution, polygon, holes);
+        // Build domain mask on the FMM grid (excluding holes).
+        // 1.5 grid cells of boundary margin for safe bilinear interpolation.
+        let mask = geodesic::build_domain_mask(bounds, fmm_resolution, fmm_resolution, polygon, holes, 1.5);
 
         // Compute geodesic distance field from each center
         let distance_fields: Vec<GeodesicField> = centers

@@ -15,8 +15,12 @@
 
 use bevy::{
     prelude::*,
-    render::camera::OrthographicProjection,
+    render::{
+        camera::{ClearColorConfig, OrthographicProjection, Viewport},
+        view::RenderLayers,
+    },
     sprite::Material2dPlugin,
+    window::WindowResized,
 };
 
 use bevy_pgpm::{
@@ -28,61 +32,30 @@ use bevy_pgpm::{
 };
 
 /// Resolve the default image path.
-/// Looks for texture.png in the crate's own assets/ directory.
+/// Expects texture.png in the crate's own assets/ directory.
 fn default_image_abs_path() -> String {
-    // Try CARGO_MANIFEST_DIR first (available during `cargo run`)
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = std::path::PathBuf::from(&manifest)
-            .join("assets")
-            .join("texture.png");
-        if p.exists() {
-            let path = p.to_string_lossy().into_owned();
-            info!("Using image: {}", path);
-            return path;
-        }
-    }
-    // Fallback: try relative to cwd
-    let candidates = [
-        "crates/bevy-pgpm/assets/texture.png",
-        "assets/texture.png",
-        "texture.png",
-    ];
-    for c in &candidates {
-        if std::path::Path::new(c).exists() {
-            let path = std::fs::canonicalize(c)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| c.to_string());
-            info!("Using image: {}", path);
-            return path;
-        }
-    }
-    // No image found — report all searched paths
-    let manifest_path = std::env::var("CARGO_MANIFEST_DIR")
-        .map(|m| format!("{}/assets/texture.png", m))
-        .unwrap_or_else(|_| "(CARGO_MANIFEST_DIR not set)".into());
-    error!(
-        "No default image found. Searched:\n  - {}\n  - {}\n  - {}\n  - {}\n\
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR not set (run via `cargo run`)");
+    let p = std::path::PathBuf::from(&manifest)
+        .join("assets")
+        .join("texture.png");
+    assert!(
+        p.exists(),
+        "Default image not found: {}\n\
          Place a texture.png in the crates/bevy-pgpm/assets/ directory.",
-        manifest_path, candidates[0], candidates[1], candidates[2],
+        p.display(),
     );
-    // Return the canonical expected path; load_image will handle the missing file
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        std::path::PathBuf::from(manifest)
-            .join("assets")
-            .join("texture.png")
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        candidates[0].to_string()
-    }
+    let path = p.to_string_lossy().into_owned();
+    info!("Using image: {}", path);
+    path
 }
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "PGPM v3 — Provably Good Planar Mappings".into(),
-                resolution: (900.0, 900.0).into(),
+                title: "PGPM - Provably Good Planar Mappings".into(),
+                resolution: bevy::window::WindowResolution::new(1280.0, 800.0),
                 ..default()
             }),
             ..default()
@@ -126,40 +99,76 @@ fn main() {
         .run();
 }
 
-/// Startup: spawn camera only. Image loading is handled by the `load_image` system.
+/// Startup: spawn scene camera and UI camera.
+///
+/// Two cameras are used to tile the window:
+///   - Scene camera (MainCamera): viewport restricted to the left area,
+///     renders Mesh2d entities on default render layer 0.
+///   - UI camera: covers the full window, on render layer 1 (no scene
+///     entities) so it only renders the UI overlay via IsDefaultUiCamera.
 fn setup_camera(mut commands: Commands) {
+    // Scene camera: default render layer 0, viewport set by setup_camera_viewport.
     commands.spawn((Camera2d::default(), MainCamera));
+
+    // UI camera: render layer 1 (empty) prevents Mesh2d double-rendering.
+    // IsDefaultUiCamera directs all UI nodes to this camera.
+    commands.spawn((
+        Camera2d::default(),
+        Camera {
+            order: 1,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        RenderLayers::layer(1),
+        IsDefaultUiCamera,
+    ));
 }
 
-/// System: scale camera to fit the image in the window.
-/// Re-runs whenever ImageInfo is inserted or changed (e.g. after image reload).
+/// System: set scene camera viewport to the area left of the UI panel and
+/// scale the projection to fit the image. Re-runs on ImageInfo change or
+/// window resize.
 fn setup_camera_scale(
     image_info: Option<Res<ImageInfo>>,
     windows: Query<&Window>,
-    mut camera_q: Query<&mut OrthographicProjection, With<MainCamera>>,
+    mut camera_q: Query<(&mut Camera, &mut OrthographicProjection), With<MainCamera>>,
+    mut resize_events: EventReader<WindowResized>,
 ) {
     let Some(image_info) = image_info else { return };
-    if !image_info.is_changed() {
+
+    let resized = resize_events.read().last().is_some();
+    if !image_info.is_changed() && !resized {
         return;
     }
 
     let Ok(window) = windows.get_single() else { return };
-    let Ok(mut projection) = camera_q.get_single_mut() else { return };
+    let Ok((mut camera, mut projection)) = camera_q.get_single_mut() else { return };
 
-    let window_width = window.width();
-    let window_height = window.height();
-    let image_width = image_info.width;
-    let image_height = image_info.height;
+    // Compute viewport in physical pixels (required by Bevy's Viewport).
+    let scale_factor = window.scale_factor();
+    let physical_w = (window.width() * scale_factor) as u32;
+    let physical_h = (window.height() * scale_factor) as u32;
+    let panel_physical = (bevy_pgpm::ui::PANEL_WIDTH * scale_factor) as u32;
+    let viewport_w = physical_w.saturating_sub(panel_physical).max(1);
+
+    camera.viewport = Some(Viewport {
+        physical_position: UVec2::ZERO,
+        physical_size: UVec2::new(viewport_w, physical_h),
+        ..default()
+    });
+
+    // Scale projection to fit the image within the viewport with margin.
+    let logical_w = viewport_w as f32 / scale_factor;
+    let logical_h = physical_h as f32 / scale_factor;
 
     let margin = 0.9;
-    let scale_x = (window_width * margin) / image_width;
-    let scale_y = (window_height * margin) / image_height;
+    let scale_x = (logical_w * margin) / image_info.width;
+    let scale_y = (logical_h * margin) / image_info.height;
     let scale = scale_x.min(scale_y);
 
     projection.scale = 1.0 / scale;
 
     info!(
-        "Camera scale adjusted: window={}x{}, image={}x{}, scale={}",
-        window_width, window_height, image_width, image_height, projection.scale
+        "Camera viewport: {}x{} physical, image: {}x{}, scale: {}",
+        viewport_w, physical_h, image_info.width, image_info.height, projection.scale
     );
 }
