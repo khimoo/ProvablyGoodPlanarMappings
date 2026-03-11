@@ -7,14 +7,13 @@ use bevy::prelude::*;
 use bevy::sprite::MeshMaterial2d;
 
 use crate::rendering::material::{DeformMaterial, DeformUniform, RBFCenter, RBFCoeff, MAX_RBF_COUNT};
-use crate::state::{AlgorithmState, AppState, DeformedImage, ImageInfo};
+use crate::state::{AlgorithmState, DeformedImage, ImageInfo};
 use crate::domain::rbf::compute_rbf_scale;
 
 /// System: push pgpm-core coefficients into the GPU material uniform.
 ///
-/// Run condition: `not(is_shape_aware_basis)`
+/// Run conditions: `DeformingSet` + `not(needs_cpu_deform)`
 pub fn update_deform_material(
-    _state: Res<State<AppState>>,
     algo_state: Res<AlgorithmState>,
     image_info: Option<Res<ImageInfo>>,
     mut materials: ResMut<Assets<DeformMaterial>>,

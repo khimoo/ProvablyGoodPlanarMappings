@@ -28,6 +28,16 @@ impl BasisType {
             BasisType::ShapeAwareGaussian => "Shape-Aware",
         }
     }
+
+    /// Whether the GPU shader can evaluate this basis directly.
+    pub fn supports_gpu_eval(self) -> bool {
+        match self {
+            BasisType::Gaussian => true,
+            BasisType::ShapeAwareGaussian => false,
+            // Phase 3: BasisType::BSpline => ...,
+            // Phase 3: BasisType::TPS => ...,
+        }
+    }
 }
 
 impl std::fmt::Display for BasisType {

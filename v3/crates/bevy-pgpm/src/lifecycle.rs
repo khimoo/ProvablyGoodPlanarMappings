@@ -99,16 +99,13 @@ pub fn load_image(
     ));
 }
 
-/// System: run one Algorithm step if needed (Deforming state only).
+/// System: run one Algorithm step if needed.
+///
+/// Run condition: `in_state(AppState::Deforming)` via DeformingSet.
 pub fn update_deformation(
-    state: Res<State<AppState>>,
     mut algo_state: ResMut<AlgorithmState>,
     mut deform_info: ResMut<DeformationInfo>,
 ) {
-    if *state.get() != AppState::Deforming {
-        return;
-    }
-
     // Keep iterating while dragging OR while distortion exceeds the bound.
     let needs_more = algo_state.needs_solve
         || (deform_info.max_distortion > deform_info.k_bound

@@ -8,7 +8,7 @@ use bevy::sprite::MeshMaterial2d;
 
 use crate::domain::coords::ImageCoords;
 use crate::rendering::material::{DeformMaterial, DeformUniform};
-use crate::state::{AlgorithmState, AppState, DeformedImage, ImageInfo};
+use crate::state::{AlgorithmState, DeformedImage, ImageInfo};
 
 /// Resource storing original pixel-coordinate positions of mesh vertices.
 /// Needed for CPU displacement: we evaluate f(original_pixel_pos) each frame.
@@ -18,9 +18,9 @@ pub struct OriginalVertexPositions {
     pub positions: Vec<[f32; 2]>,
 }
 
-/// Run condition: true when shape-aware basis is active.
-pub fn is_shape_aware_basis(params: Option<Res<crate::state::AlgoParams>>) -> bool {
-    params.map_or(false, |p| p.basis_type == crate::state::params::BasisType::ShapeAwareGaussian)
+/// Run condition: true when the active basis cannot be evaluated on GPU.
+pub fn needs_cpu_deform(params: Option<Res<crate::state::AlgoParams>>) -> bool {
+    params.map_or(false, |p| !p.basis_type.supports_gpu_eval())
 }
 
 /// System: compute deformed positions on CPU and update mesh vertices.
@@ -28,9 +28,8 @@ pub fn is_shape_aware_basis(params: Option<Res<crate::state::AlgoParams>>) -> bo
 /// The shader uniform is set to identity (n_rbf=0, affine=identity)
 /// so the vertex shader is effectively a pass-through.
 ///
-/// Run condition: `is_shape_aware_basis`
+/// Run conditions: `DeformingSet` + `needs_cpu_deform`
 pub fn cpu_update_mesh_positions(
-    _state: Res<State<AppState>>,
     algo_state: Res<AlgorithmState>,
     image_info: Option<Res<ImageInfo>>,
     original_verts: Option<Res<OriginalVertexPositions>>,

@@ -28,7 +28,7 @@ use bevy_pgpm::{
     lifecycle::{load_image, update_deformation},
     rendering::{
         update_deform_material, cpu_update_mesh_positions,
-        is_shape_aware_basis, DeformMaterial,
+        needs_cpu_deform, DeformMaterial,
     },
     state::*,
     ui,
@@ -53,6 +53,10 @@ fn default_image_abs_path() -> String {
     path
 }
 
+/// Systems that only run during Deforming mode.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct DeformingSet;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -70,14 +74,23 @@ fn main() {
         .init_resource::<DeformationInfo>()
         .init_resource::<AlgoParams>()
         .insert_resource(ImagePathConfig::new(default_image_abs_path()))
+        .configure_sets(Update, DeformingSet.run_if(in_state(AppState::Deforming)))
         .add_systems(Startup, (setup_camera, ui::spawn_control_panel))
         .add_systems(Update, (
             load_image,
             setup_camera_scale,
             handle_input,
-            update_deformation.before(update_deform_material),
-            update_deform_material.run_if(not(is_shape_aware_basis)),
-            cpu_update_mesh_positions.run_if(is_shape_aware_basis),
+        ))
+        .add_systems(Update, (
+            update_deformation
+                .in_set(DeformingSet)
+                .before(update_deform_material),
+            update_deform_material
+                .in_set(DeformingSet)
+                .run_if(not(needs_cpu_deform)),
+            cpu_update_mesh_positions
+                .in_set(DeformingSet)
+                .run_if(needs_cpu_deform),
         ))
         .add_systems(Update, (
             ui::draw_handles,
