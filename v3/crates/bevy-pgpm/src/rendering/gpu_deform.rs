@@ -8,23 +8,18 @@ use bevy::sprite::MeshMaterial2d;
 
 use crate::rendering::material::{DeformMaterial, DeformUniform, RBFCenter, RBFCoeff, MAX_RBF_COUNT};
 use crate::state::{AlgorithmState, AppState, DeformedImage, ImageInfo};
-use crate::rendering::cpu_deform::UseShapeAwareBasis;
 use crate::domain::rbf::compute_rbf_scale;
 
 /// System: push pgpm-core coefficients into the GPU material uniform.
+///
+/// Run condition: `not(is_shape_aware_basis)`
 pub fn update_deform_material(
     _state: Res<State<AppState>>,
     algo_state: Res<AlgorithmState>,
     image_info: Option<Res<ImageInfo>>,
-    shape_aware: Option<Res<UseShapeAwareBasis>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
     query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
 ) {
-    // Skip GPU path when using shape-aware basis (CPU path handles it)
-    if shape_aware.map_or(false, |s| s.0) {
-        return;
-    }
-
     let Some(image_info) = image_info else { return };
     let Some(ref algo) = algo_state.algorithm else { return };
 

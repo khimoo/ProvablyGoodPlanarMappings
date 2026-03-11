@@ -26,7 +26,10 @@ use bevy::{
 use bevy_pgpm::{
     input::handle_input,
     lifecycle::{load_image, update_deformation},
-    rendering::{update_deform_material, cpu_update_mesh_positions, DeformMaterial},
+    rendering::{
+        update_deform_material, cpu_update_mesh_positions,
+        is_shape_aware_basis, DeformMaterial,
+    },
     state::*,
     ui,
 };
@@ -73,8 +76,8 @@ fn main() {
             setup_camera_scale,
             handle_input,
             update_deformation.before(update_deform_material),
-            update_deform_material,
-            cpu_update_mesh_positions,
+            update_deform_material.run_if(not(is_shape_aware_basis)),
+            cpu_update_mesh_positions.run_if(is_shape_aware_basis),
         ))
         .add_systems(Update, (
             ui::draw_handles,

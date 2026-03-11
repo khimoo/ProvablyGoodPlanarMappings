@@ -44,7 +44,6 @@ impl AlgorithmState {
     ///
     /// `contour` is the image's alpha-channel outer contour in pixel coordinates.
     /// `holes` are interior hole contours in pixel coordinates.
-    /// Returns `true` if shape-aware basis was selected.
     pub fn build_mapping(
         &mut self,
         image_width: f64,
@@ -52,7 +51,7 @@ impl AlgorithmState {
         algo_params: &AlgoParams,
         contour: &[(f32, f32)],
         holes: &[Vec<(f32, f32)>],
-    ) -> bool {
+    ) {
         let epsilon = algo_params.epsilon;
         let domain = DomainBounds {
             x_min: -epsilon,
@@ -63,8 +62,6 @@ impl AlgorithmState {
 
         // Determine RBF scale s from the average distance between centers.
         let s = compute_rbf_scale(&self.source_handles, image_width, image_height);
-
-        let is_shape_aware = algo_params.basis_type == BasisType::ShapeAwareGaussian;
 
         // Convert contours from (f32, f32) to Vector2<f64> for pgpm-core
         let contour_v2: Vec<Vector2<f64>> = contour
@@ -135,6 +132,5 @@ impl AlgorithmState {
 
         self.target_handles = self.source_handles.clone();
         self.algorithm = Some(algorithm);
-        is_shape_aware
     }
 }

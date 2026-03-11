@@ -18,29 +18,26 @@ pub struct OriginalVertexPositions {
     pub positions: Vec<[f32; 2]>,
 }
 
-/// Whether to use CPU-side or GPU-side deformation for the current algorithm.
-#[derive(Resource, Default)]
-pub struct UseShapeAwareBasis(pub bool);
+/// Run condition: true when shape-aware basis is active.
+pub fn is_shape_aware_basis(params: Option<Res<crate::state::AlgoParams>>) -> bool {
+    params.map_or(false, |p| p.basis_type == crate::state::params::BasisType::ShapeAwareGaussian)
+}
 
 /// System: compute deformed positions on CPU and update mesh vertices.
 ///
 /// The shader uniform is set to identity (n_rbf=0, affine=identity)
 /// so the vertex shader is effectively a pass-through.
+///
+/// Run condition: `is_shape_aware_basis`
 pub fn cpu_update_mesh_positions(
     _state: Res<State<AppState>>,
     algo_state: Res<AlgorithmState>,
     image_info: Option<Res<ImageInfo>>,
-    shape_aware: Option<Res<UseShapeAwareBasis>>,
     original_verts: Option<Res<OriginalVertexPositions>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
     query: Query<(&Mesh2d, &MeshMaterial2d<DeformMaterial>), With<DeformedImage>>,
 ) {
-    // Only run for shape-aware basis
-    if !shape_aware.map_or(false, |s| s.0) {
-        return;
-    }
-
     let Some(image_info) = image_info else { return };
     let Some(ref algo) = algo_state.algorithm else { return };
     let Some(original_verts) = original_verts else { return };

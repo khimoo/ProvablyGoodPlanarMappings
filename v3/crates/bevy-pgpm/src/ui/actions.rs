@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy::sprite::MeshMaterial2d;
 
-use crate::rendering::{DeformMaterial, DeformUniform, UseShapeAwareBasis};
+use crate::rendering::{DeformMaterial, DeformUniform};
 use crate::state::{
     AlgoParams, AlgorithmState, AppState, DeformationInfo, DeformedImage, DragState,
     ImageInfo, ImagePathConfig,
@@ -15,7 +15,6 @@ pub fn on_toggle_mode(
     query: Query<&Interaction, (Changed<Interaction>, With<ToggleModeButton>)>,
     state: Res<State<AppState>>,
     mut next_state: ResMut<NextState<AppState>>,
-    mut commands: Commands,
     mut algo_state: ResMut<AlgorithmState>,
     mut drag_state: ResMut<DragState>,
     mut deform_info: ResMut<DeformationInfo>,
@@ -31,14 +30,13 @@ pub fn on_toggle_mode(
                     info!("No handles added yet!");
                     return;
                 }
-                let is_shape_aware = algo_state.build_mapping(
+                algo_state.build_mapping(
                     image_info.width as f64,
                     image_info.height as f64,
                     &algo_params,
                     &image_info.contour,
                     &image_info.holes,
                 );
-                commands.insert_resource(UseShapeAwareBasis(is_shape_aware));
                 deform_info.k_bound = algo_params.k_bound;
                 deform_info.lambda_reg = algo_params.lambda_reg;
                 deform_info.reg_mode_label = algo_params.reg_mode.label();
