@@ -324,7 +324,7 @@ fn build_mapping(
     algo_params: &AlgoParams,
     contour: &[(f32, f32)],
     holes: &[Vec<(f32, f32)>],
-) -> Box<dyn pgpm_core::PlanarMapping> {
+) -> Box<dyn pgpm_core::MappingBridge> {
     let epsilon = algo_params.epsilon;
     let domain = DomainBounds {
         x_min: -epsilon,

@@ -1,14 +1,14 @@
-//! Core algorithm state: wraps pgpm-core's PlanarMapping for Bevy resource use.
+//! Core algorithm state: wraps pgpm-core's MappingBridge for Bevy resource use.
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
-use pgpm_core::PlanarMapping;
+use pgpm_core::MappingBridge;
 
 /// Core algorithm state, used by the solver and rendering systems.
 #[derive(Resource)]
 pub struct AlgorithmState {
     /// The pgpm-core mapping instance. Created on finalization.
-    pub algorithm: Option<Box<dyn PlanarMapping>>,
+    pub algorithm: Option<Box<dyn MappingBridge>>,
     /// Source handle positions in domain (pixel) coordinates.
     pub source_handles: Vec<Vector2<f64>>,
     /// Current target handle positions in domain (pixel) coordinates.
@@ -38,7 +38,7 @@ impl AlgorithmState {
     }
 
     /// Set the mapping instance, initializing targets to source positions.
-    pub fn set_mapping(&mut self, algorithm: Box<dyn PlanarMapping>) {
+    pub fn set_mapping(&mut self, algorithm: Box<dyn MappingBridge>) {
         self.target_handles = self.source_handles.clone();
         self.algorithm = Some(algorithm);
     }

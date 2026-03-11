@@ -19,7 +19,7 @@ pub mod distortion_policy;
 
 // Algorithm module is #[doc(hidden)] pub so that integration tests
 // (external crate scope) can access Algorithm<D> directly for testing,
-// while the primary public API is the PlanarMapping trait + factories.
+// while the primary public API is the MappingBridge trait + factories.
 #[doc(hidden)]
 pub mod algorithm;
 pub mod geodesic;
@@ -27,7 +27,7 @@ pub mod geodesic;
 pub use types::*;
 pub use domain::{Domain, PolygonDomain};
 pub use basis::BasisFunction;
-pub use mapping::PlanarMapping;
+pub use mapping::{PlanarMapping, MappingBridge};
 pub use strategy::Strategy2Result;
 
 // Re-export distortion_policy types under #[doc(hidden)] for integration tests.
@@ -44,7 +44,7 @@ use nalgebra::Vector2;
 /// Create an isometric planar mapping (D_iso = max{Sigma, 1/sigma}).
 ///
 /// This is the main entry point for consumers of pgpm-core.
-/// Returns a `Box<dyn PlanarMapping>` that hides the concrete
+/// Returns a `Box<dyn MappingBridge>` that hides the concrete
 /// `Algorithm<IsometricPolicy>` type.
 pub fn create_isometric_mapping(
     basis: Box<dyn BasisFunction>,
@@ -55,7 +55,7 @@ pub fn create_isometric_mapping(
     fps_k: usize,
     domain: Option<Box<dyn Domain>>,
     solver_config: SolverConfig,
-) -> Box<dyn PlanarMapping> {
+) -> Box<dyn MappingBridge> {
     Box::new(Algorithm::new(
         basis,
         params,
@@ -82,7 +82,7 @@ pub fn create_conformal_mapping(
     fps_k: usize,
     domain: Option<Box<dyn Domain>>,
     solver_config: SolverConfig,
-) -> Box<dyn PlanarMapping> {
+) -> Box<dyn MappingBridge> {
     Box::new(Algorithm::new(
         basis,
         params,

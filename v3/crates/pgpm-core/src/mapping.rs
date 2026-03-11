@@ -1,9 +1,17 @@
-//! Public trait for planar mappings.
+//! Planar mapping traits.
 //!
-//! `PlanarMapping` is the primary public interface for consumers of pgpm-core.
-//! It abstracts over the concrete `Algorithm<D>` generic, allowing callers
-//! (e.g. bevy-pgpm) to hold `Box<dyn PlanarMapping>` without knowing the
-//! distortion policy type parameter.
+//! Two traits define the boundary between pgpm-core and its consumers:
+//!
+//! - [`PlanarMapping`]: Abstract definition of the full algorithm
+//!   (Algorithm 1, Section 5). Includes both the mathematical evaluation
+//!   (Eq. 3, Section 3) and the optimization procedure (SOCP, active set,
+//!   Strategy 2). This is the "what is a provably good planar mapping"
+//!   trait — analogous to v2's `ProvablyGoodPlanarMapping` abstract class.
+//!
+//! - [`MappingBridge`]: Subset of `PlanarMapping` exposed to frontend
+//!   consumers (e.g. bevy-pgpm). Hides internal methods like `grad_uv_at`,
+//!   `j_s_j_a_at`, `singular_values_at` that are used only by the algorithm
+//!   internals. A blanket impl provides `MappingBridge` for any `PlanarMapping`.
 
 use crate::basis::BasisFunction;
 use crate::distortion;
@@ -11,14 +19,19 @@ use crate::strategy::Strategy2Result;
 use crate::types::{AlgorithmError, CoefficientMatrix, MappingParams, StepInfo};
 use nalgebra::Vector2;
 
-/// Object-safe trait for a provably good planar mapping.
+/// Abstract definition of a provably good planar mapping (Algorithm 1, Section 5).
 ///
-/// Corresponds to the full Algorithm 1 interface (Section 5) with
-/// distortion policy erased.
+/// This trait captures the full algorithm: initialization, SOCP optimization,
+/// active set management, frame updates, and Strategy 2 refinement.
+/// Concrete implementations (e.g. `Algorithm<IsometricPolicy>`) inject
+/// a basis function and distortion policy.
 ///
 /// Default methods implement the mathematical properties of the
 /// mapping f = Σ c_i φ_i (Eq. 3, Section 3) that are determined
 /// solely by `coefficients()` and `basis()`.
+///
+/// Frontend consumers should depend on [`MappingBridge`] instead,
+/// which exposes only the subset needed for UI interaction and rendering.
 pub trait PlanarMapping: Send + Sync {
     // ─────────────────────────────────────────
     // Required methods (Algorithm-specific)
@@ -105,5 +118,69 @@ pub trait PlanarMapping: Send + Sync {
     fn singular_values_at(&self, x: Vector2<f64>) -> (f64, f64) {
         let (j_s, j_a) = self.j_s_j_a_at(x);
         distortion::singular_values(j_s, j_a)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MappingBridge: frontend communication trait
+// ─────────────────────────────────────────────────────────────
+
+/// Frontend bridge: subset of [`PlanarMapping`] exposed to UI consumers.
+///
+/// `bevy-pgpm` depends only on this trait, not on `PlanarMapping` directly.
+/// Internal methods (`grad_uv_at`, `j_s_j_a_at`, `singular_values_at`) are
+/// used by the algorithm internals and are not part of this interface.
+pub trait MappingBridge: Send + Sync {
+    /// Algorithm 1: execute one step (Section 5).
+    fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError>;
+
+    /// Get current coefficient matrix c (Eq. 3). Used by GPU rendering path.
+    fn coefficients(&self) -> &CoefficientMatrix;
+
+    /// Get basis function reference (Table 1). Used by GPU rendering path.
+    fn basis(&self) -> &dyn BasisFunction;
+
+    /// Evaluate the mapping f(x) (Eq. 3). Used by CPU rendering path.
+    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64>;
+
+    /// Update algorithm parameters at runtime (K, lambda, regularization).
+    fn update_params(&mut self, params: MappingParams);
+
+    /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
+    fn refine_strategy2(
+        &mut self,
+        k_max: f64,
+        target_handles: &[Vector2<f64>],
+    ) -> Result<Strategy2Result, AlgorithmError>;
+}
+
+/// Blanket impl: any `PlanarMapping` automatically satisfies `MappingBridge`.
+impl<T: PlanarMapping + ?Sized> MappingBridge for T {
+    fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
+        PlanarMapping::step(self, target_handles)
+    }
+
+    fn coefficients(&self) -> &CoefficientMatrix {
+        PlanarMapping::coefficients(self)
+    }
+
+    fn basis(&self) -> &dyn BasisFunction {
+        PlanarMapping::basis(self)
+    }
+
+    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
+        PlanarMapping::evaluate(self, x)
+    }
+
+    fn update_params(&mut self, params: MappingParams) {
+        PlanarMapping::update_params(self, params)
+    }
+
+    fn refine_strategy2(
+        &mut self,
+        k_max: f64,
+        target_handles: &[Vector2<f64>],
+    ) -> Result<Strategy2Result, AlgorithmError> {
+        PlanarMapping::refine_strategy2(self, k_max, target_handles)
     }
 }
