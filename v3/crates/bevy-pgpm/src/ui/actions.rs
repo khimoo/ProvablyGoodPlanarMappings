@@ -3,9 +3,13 @@
 use bevy::prelude::*;
 use bevy::sprite::MeshMaterial2d;
 
+use nalgebra::Vector2;
+use pgpm_core::{DomainBounds, MappingParams, PolygonDomain};
+
+use crate::domain::rbf::compute_rbf_scale;
 use crate::rendering::{DeformMaterial, DeformUniform};
 use crate::state::{
-    AlgoParams, AlgorithmState, AppState, DeformationInfo, DeformedImage, DragState,
+    AlgoParams, AlgorithmState, AppState, BasisType, DeformationInfo, DeformedImage, DragState,
     ImageInfo, ImagePathConfig,
 };
 use crate::ui::markers::*;
@@ -30,13 +34,15 @@ pub fn on_toggle_mode(
                     info!("No handles added yet!");
                     return;
                 }
-                algo_state.build_mapping(
+                let mapping = build_mapping(
+                    &algo_state.source_handles,
                     image_info.width as f64,
                     image_info.height as f64,
                     &algo_params,
                     &image_info.contour,
                     &image_info.holes,
                 );
+                algo_state.set_mapping(mapping);
                 deform_info.k_bound = algo_params.k_bound;
                 deform_info.lambda_reg = algo_params.lambda_reg;
                 deform_info.reg_mode_label = algo_params.reg_mode.label();
@@ -297,7 +303,7 @@ fn enforce_k_max_invariant(params: &mut AlgoParams) {
 /// Push updated parameters to the algorithm instance and flag for re-solve.
 fn push_params(params: &AlgoParams, algo_state: &mut AlgorithmState) {
     if let Some(ref mut algo) = algo_state.algorithm {
-        let core_params = pgpm_core::MappingParams {
+        let core_params = MappingParams {
             k_bound: params.k_bound,
             lambda_reg: params.reg_mode.effective_lambda(params.lambda_reg),
             regularization: params.reg_mode.to_core(params.lambda_arap, params.lambda_bh),
@@ -305,4 +311,91 @@ fn push_params(params: &AlgoParams, algo_state: &mut AlgorithmState) {
         algo.update_params(core_params);
         algo_state.needs_solve = true;
     }
+}
+
+/// Construct a pgpm-core mapping from UI parameters and handle positions.
+///
+/// This is the bridge between bevy-pgpm's UI types (`AlgoParams`, `BasisType`)
+/// and pgpm-core's algorithm types (`MappingParams`, `BasisFunction`, `Domain`).
+fn build_mapping(
+    source_handles: &[Vector2<f64>],
+    image_width: f64,
+    image_height: f64,
+    algo_params: &AlgoParams,
+    contour: &[(f32, f32)],
+    holes: &[Vec<(f32, f32)>],
+) -> Box<dyn pgpm_core::PlanarMapping> {
+    let epsilon = algo_params.epsilon;
+    let domain = DomainBounds {
+        x_min: -epsilon,
+        x_max: image_width + epsilon,
+        y_min: -epsilon,
+        y_max: image_height + epsilon,
+    };
+
+    let s = compute_rbf_scale(source_handles, image_width, image_height);
+
+    let contour_v2: Vec<Vector2<f64>> = contour
+        .iter()
+        .map(|&(x, y)| Vector2::new(x as f64, y as f64))
+        .collect();
+
+    let holes_v2: Vec<Vec<Vector2<f64>>> = holes
+        .iter()
+        .map(|hole| {
+            hole.iter()
+                .map(|&(x, y)| Vector2::new(x as f64, y as f64))
+                .collect()
+        })
+        .collect();
+
+    let basis: Box<dyn pgpm_core::basis::BasisFunction> = match algo_params.basis_type {
+        BasisType::Gaussian => {
+            Box::new(pgpm_core::basis::gaussian::GaussianBasis::new(
+                source_handles.to_vec(),
+                s,
+            ))
+        }
+        BasisType::ShapeAwareGaussian => {
+            let fmm_resolution = 256;
+            let holes_refs: Vec<&[Vector2<f64>]> =
+                holes_v2.iter().map(|h| h.as_slice()).collect();
+            Box::new(
+                pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis::new(
+                    source_handles.to_vec(),
+                    s,
+                    &contour_v2,
+                    &holes_refs,
+                    &domain,
+                    fmm_resolution,
+                ),
+            )
+        }
+    };
+
+    let params = MappingParams {
+        k_bound: algo_params.k_bound,
+        lambda_reg: algo_params.reg_mode.effective_lambda(algo_params.lambda_reg),
+        regularization: algo_params.reg_mode.to_core(
+            algo_params.lambda_arap,
+            algo_params.lambda_bh,
+        ),
+    };
+
+    let algo_domain: Option<Box<dyn pgpm_core::Domain>> = if contour_v2.is_empty() {
+        None
+    } else {
+        Some(Box::new(PolygonDomain::new(contour_v2, holes_v2)))
+    };
+
+    pgpm_core::create_isometric_mapping(
+        basis,
+        params,
+        domain,
+        source_handles.to_vec(),
+        algo_params.grid_resolution,
+        algo_params.fps_k,
+        algo_domain,
+        pgpm_core::SolverConfig::default(),
+    )
 }

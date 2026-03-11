@@ -12,6 +12,8 @@ pub struct DeformationInfo {
     pub k_bound: f64,
     pub lambda_reg: f64,
     pub reg_mode_label: &'static str,
+    /// Algorithm 1 convergence flag from pgpm-core.
+    pub converged: bool,
     /// Strategy 2 result status message (None = not yet run)
     pub strategy2_status: Option<String>,
 }
@@ -26,6 +28,7 @@ impl Default for DeformationInfo {
             k_bound: 3.0,
             lambda_reg: 1e-2,
             reg_mode_label: "ARAP",
+            converged: false,
             strategy2_status: None,
         }
     }

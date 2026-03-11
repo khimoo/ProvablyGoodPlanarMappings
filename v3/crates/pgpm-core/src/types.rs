@@ -197,10 +197,16 @@ pub struct MappingParams {
 /// Information returned from each algorithm step.
 #[derive(Debug)]
 pub struct StepInfo {
-    /// Maximum distortion over all collocation points
+    /// Maximum distortion over all collocation points (evaluated before SOCP solve)
     pub max_distortion: f64,
     /// Number of points in the active set Z'
     pub active_set_size: usize,
     /// Number of points in the stable set Z''
     pub stable_set_size: usize,
+    /// Algorithm 1 convergence: max_distortion ≤ K and active set unchanged.
+    ///
+    /// When `true`, the pre-solve distortion was already within the bound
+    /// and no new constraint points were needed, meaning the previous
+    /// SOCP solution satisfies the distortion bound at all collocation points.
+    pub converged: bool,
 }

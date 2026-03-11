@@ -106,10 +106,11 @@ pub fn update_deformation(
     mut algo_state: ResMut<AlgorithmState>,
     mut deform_info: ResMut<DeformationInfo>,
 ) {
-    // Keep iterating while dragging OR while distortion exceeds the bound.
+    // Keep iterating while dragging OR while the algorithm hasn't converged.
+    // Convergence is determined by pgpm-core (Algorithm 1: max_distortion ≤ K
+    // and active set stable).
     let needs_more = algo_state.needs_solve
-        || (deform_info.max_distortion > deform_info.k_bound
-            && deform_info.step_count > 0);
+        || (deform_info.step_count > 0 && !deform_info.converged);
 
     if !needs_more {
         return;
@@ -124,6 +125,7 @@ pub fn update_deformation(
                 deform_info.max_distortion = step_info.max_distortion;
                 deform_info.active_set_size = step_info.active_set_size;
                 deform_info.stable_set_size = step_info.stable_set_size;
+                deform_info.converged = step_info.converged;
                 deform_info.step_count += 1;
             }
             Err(e) => {

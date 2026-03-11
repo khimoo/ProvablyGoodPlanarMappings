@@ -40,6 +40,10 @@ pub struct Algorithm<D: DistortionPolicy> {
     domain: Option<Box<dyn Domain>>,
     /// SOCP solver numerical tuning (not from the paper).
     solver_config: SolverConfig,
+    /// Target handles from the previous step, used to detect target changes.
+    /// When targets change, the SOCP output is untested and convergence
+    /// cannot be claimed until the next step verifies it.
+    prev_target_handles: Option<Vec<Vector2<f64>>>,
 }
 
 impl<D: DistortionPolicy> Algorithm<D> {
@@ -123,6 +127,7 @@ impl<D: DistortionPolicy> Algorithm<D> {
             domain_bounds,
             domain,
             solver_config,
+            prev_target_handles: None,
         }
     }
 
@@ -154,6 +159,7 @@ impl<D: DistortionPolicy> Algorithm<D> {
         );
 
         // === Update active set (Algorithm 1 lines 5-8) ===
+        let prev_active_set = self.state.active_set.clone();
         active_set::update_active_set(
             &mut self.state,
             &distortions,
@@ -166,6 +172,15 @@ impl<D: DistortionPolicy> Algorithm<D> {
             .cloned()
             .fold(f64::NEG_INFINITY, f64::max);
         let n_active = self.state.active_set.len();
+
+        // Algorithm 1 convergence: distortion within bound, active set stable,
+        // and targets unchanged since last step (so the SOCP output from the
+        // previous step has been verified by this step's distortion evaluation).
+        let targets_changed = self.prev_target_handles.as_deref() != Some(target_handles);
+        let converged = !targets_changed
+            && max_distortion <= self.params.k_bound
+            && self.state.active_set == prev_active_set;
+        self.prev_target_handles = Some(target_handles.to_vec());
 
         // === Solve SOCP (Eq. 18) ===
         let new_coefficients = solver::solve_socp(
@@ -207,6 +222,7 @@ impl<D: DistortionPolicy> Algorithm<D> {
             max_distortion,
             active_set_size: n_active,
             stable_set_size: self.state.stable_set.len(),
+            converged,
         })
     }
 
@@ -397,18 +413,14 @@ impl<D: DistortionPolicy> Algorithm<D> {
 
         // Step 5: run Algorithm 1 steps until convergence
         let mut refinement_steps = 0;
-        let mut prev_active_set: Vec<usize> = Vec::new();
 
         for _ in 0..strategy::MAX_REFINEMENT_STEPS {
             let info = self.step_impl(target_handles)?;
             refinement_steps += 1;
 
-            // Check convergence: max_distortion <= K and active set stable
-            let current_active = self.state.active_set.clone();
-            if info.max_distortion <= k && current_active == prev_active_set {
+            if info.converged {
                 break;
             }
-            prev_active_set = current_active;
         }
 
         // Compute achieved K_max (delegated to policy)
