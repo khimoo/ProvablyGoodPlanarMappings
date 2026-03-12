@@ -10,7 +10,6 @@
 //! This gives the shortest interior-path distance from a source point
 //! to every grid cell.
 
-use crate::domain::point_in_polygon;
 use crate::types::DomainBounds;
 use nalgebra::Vector2;
 use std::collections::BinaryHeap;
@@ -62,11 +61,6 @@ impl PartialOrd for FmmEntry {
 impl Ord for FmmEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap (BinaryHeap is max-heap by default)
-        debug_assert!(
-            !self.dist.is_nan() && !other.dist.is_nan(),
-            "NaN distance in FMM priority queue (indices: {}, {})",
-            self.idx, other.idx,
-        );
         other.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
     }
 }
@@ -392,35 +386,23 @@ fn solve_eikonal_2d(
 ///
 /// Returns a Vec<bool> of length width*height (row-major).
 /// `true` if the grid cell at (col, row) is inside the polygon
-/// **or within a margin of the polygon boundary**.
-///
-/// # Why a boundary margin is needed
+/// **or within one grid cell of the polygon boundary**.
 ///
 /// The standard ray-casting point-in-polygon test returns `false` for
-/// points exactly on the boundary.  Since the FMM marks non-interior
-/// cells as walls (distance = Inf), bilinear interpolation near the
-/// boundary would sample wall cells and produce Inf.  Including
-/// boundary-adjacent cells ensures the distance field is well-defined
-/// everywhere inside the contour.
-///
-/// # Parameters
-///
-/// * `boundary_margin_cells` — margin expressed as a multiple of the
-///   grid spacing `max(dx, dy)`.  A value of 1.0 includes cells within
-///   one grid spacing of the boundary.  Slightly larger values (e.g.
-///   1.5) provide extra safety against floating-point edge cases in the
-///   ray-casting test.
+/// points exactly on the boundary. Since the FMM marks non-interior
+/// cells as walls (distance = Inf), this causes bilinear interpolation
+/// to produce Inf near the boundary. Including boundary-adjacent cells
+/// ensures the distance field is well-defined everywhere inside the
+/// contour.
 pub fn build_domain_mask(
     bounds: &DomainBounds,
     width: usize,
     height: usize,
     polygon: &[Vector2<f64>],
-    holes: &[&[Vector2<f64>]],
-    boundary_margin_cells: f64,
 ) -> Vec<bool> {
     let dx = (bounds.x_max - bounds.x_min) / (width as f64 - 1.0);
     let dy = (bounds.y_max - bounds.y_min) / (height as f64 - 1.0);
-    let margin = dx.max(dy) * boundary_margin_cells;
+    let margin = dx.max(dy) * 1.5; // include cells within 1.5 grid spacings of boundary
 
     let mut mask = vec![false; width * height];
 
@@ -428,19 +410,9 @@ pub fn build_domain_mask(
         for col in 0..width {
             let x = bounds.x_min + col as f64 * dx;
             let y = bounds.y_min + row as f64 * dy;
-            let pt = Vector2::new(x, y);
-
-            let in_outer = point_in_polygon(&pt, polygon)
+            mask[row * width + col] =
+                point_in_polygon_f64(x, y, polygon)
                 || point_near_polygon_edge(x, y, polygon, margin);
-
-            // Exclude points inside hole interiors (but keep those near hole edges
-            // for smooth distance field transition)
-            let in_hole = holes.iter().any(|hole| {
-                point_in_polygon(&pt, hole)
-                    && !point_near_polygon_edge(x, y, hole, margin)
-            });
-
-            mask[row * width + col] = in_outer && !in_hole;
         }
     }
 
@@ -482,6 +454,25 @@ fn point_near_polygon_edge(x: f64, y: f64, polygon: &[Vector2<f64>], margin: f64
         }
     }
     false
+}
+
+/// Ray-casting point-in-polygon test.
+fn point_in_polygon_f64(x: f64, y: f64, polygon: &[Vector2<f64>]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (polygon[i].x, polygon[i].y);
+        let (xj, yj) = (polygon[j].x, polygon[j].y);
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 #[cfg(test)]

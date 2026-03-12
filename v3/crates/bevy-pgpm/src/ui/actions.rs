@@ -358,14 +358,11 @@ fn build_mapping(
         }
         BasisType::ShapeAwareGaussian => {
             let fmm_resolution = 256;
-            let holes_refs: Vec<&[Vector2<f64>]> =
-                holes_v2.iter().map(|h| h.as_slice()).collect();
             Box::new(
                 pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis::new(
                     source_handles.to_vec(),
                     s,
                     &contour_v2,
-                    &holes_refs,
                     &domain,
                     fmm_resolution,
                 ),

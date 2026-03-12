@@ -102,6 +102,10 @@ pub struct AlgorithmState {
 
     /// Precomputed basis function evaluations at collocation points
     pub precomputed: Option<PrecomputedData>,
+
+    /// Grid dimensions for local maxima search (Section 5)
+    pub grid_width: usize,
+    pub grid_height: usize,
 }
 
 /// Precomputed data for efficiency (computed once in Algorithm 1 "if first step").

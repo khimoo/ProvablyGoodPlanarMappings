@@ -11,10 +11,8 @@ use crate::distortion_policy::DistortionPolicy;
 use crate::domain::Domain;
 use crate::mapping::PlanarMapping;
 use crate::solver;
-use crate::strategy;
 use crate::types::*;
-use log::warn;
-use nalgebra::{DMatrix, Vector2};
+use nalgebra::Vector2;
 
 /// Algorithm 1: complete implementation, parameterised by distortion policy.
 pub struct Algorithm<D: DistortionPolicy> {
@@ -28,11 +26,6 @@ pub struct Algorithm<D: DistortionPolicy> {
     state: AlgorithmState,
     /// Source handle positions {p_l} (Eq. 29) -- fixed
     source_handles: Vec<Vector2<f64>>,
-    /// Grid dimensions for local maxima search
-    grid_width: usize,
-    grid_height: usize,
-    /// Whether this is the first step (triggers initialization)
-    is_first_step: bool,
     /// Domain bounds for biharmonic energy integration
     domain_bounds: DomainBounds,
     /// Domain Omega for "x in Omega" test (Paper Section 4).
@@ -113,6 +106,8 @@ impl<D: DistortionPolicy> Algorithm<D> {
             k_low,
             domain_mask,
             precomputed: None,
+            grid_width,
+            grid_height,
         };
 
         Self {
@@ -121,9 +116,6 @@ impl<D: DistortionPolicy> Algorithm<D> {
             policy,
             state,
             source_handles,
-            grid_width,
-            grid_height,
-            is_first_step: true,
             domain_bounds,
             domain,
             solver_config,
@@ -131,320 +123,9 @@ impl<D: DistortionPolicy> Algorithm<D> {
         }
     }
 
-    /// Algorithm 1: execute one step.
-    ///
-    /// Pseudocode correspondence:
-    /// 1. [first step only] Precompute phi(z), grad_phi(z), set d_i=(1,0), Z'={}, Z''=FPS
-    /// 2. Evaluate D(z) for all z in Z
-    /// 3. Find Z_max (local maxima of D)
-    /// 4. Add z in Z_max with D(z) > K_high to Z'
-    /// 5. Remove z in Z' with D(z) < K_low from Z'
-    /// 6. Solve SOCP (Eq. 18) -> update c
-    /// 7. Update d_i (Eq. 27)
-    fn step_impl(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
-        // === Initialization (if first step) ===
-        if self.is_first_step {
-            self.precompute();
-            self.is_first_step = false;
-        }
-
-        // === Evaluate distortion at all collocation points ===
-        let precomputed = self.state.precomputed.as_ref().ok_or_else(|| {
-            AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
-        })?;
-        let distortions = distortion::evaluate_distortion_all(
-            &self.state.coefficients,
-            precomputed,
-            &self.policy,
-        );
-
-        // === Update active set (Algorithm 1 lines 5-8) ===
-        let prev_active_set = self.state.active_set.clone();
-        active_set::update_active_set(
-            &mut self.state,
-            &distortions,
-            self.grid_width,
-            self.grid_height,
-        );
-
-        let max_distortion = distortions
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let n_active = self.state.active_set.len();
-
-        // Algorithm 1 convergence: distortion within bound, active set stable,
-        // and targets unchanged since last step (so the SOCP output from the
-        // previous step has been verified by this step's distortion evaluation).
-        let targets_changed = self.prev_target_handles.as_deref() != Some(target_handles);
-        let converged = !targets_changed
-            && max_distortion <= self.params.k_bound
-            && self.state.active_set == prev_active_set;
-        self.prev_target_handles = Some(target_handles.to_vec());
-
-        // === Solve SOCP (Eq. 18) ===
-        let new_coefficients = solver::solve_socp(
-            &self.source_handles,
-            target_handles,
-            self.basis.as_ref(),
-            &self.state,
-            &self.params,
-            &self.policy,
-            &self.solver_config,
-        )?;
-
-        self.state.coefficients = new_coefficients;
-
-        // === Update frames (Eq. 27) ===
-        // d_i = J_S f(z_i) / ||J_S f(z_i)||
-        //
-        // Frames are updated only for constraint points (Z' union Z''),
-        // consistent with Algorithm 1's postprocessing scope.
-        // Frames at non-constraint points remain at their last value
-        // (initialized to (1,0)).  This does not affect fold-over
-        // guarantees -- see Section 5 "Initialization of the frames".
-        let precomputed = self.state.precomputed.as_ref().ok_or_else(|| {
-            AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
-        })?;
-        let j_s_values = distortion::evaluate_j_s_all(&self.state.coefficients, precomputed);
-
-        let eps = 1e-10;
-        for &idx in self.state.active_set.iter().chain(self.state.stable_set.iter()) {
-            let j_s = j_s_values[idx];
-            let norm = j_s.norm();
-            if norm > eps {
-                // Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||
-                self.state.frames[idx] = j_s / norm;
-            }
-        }
-
-        Ok(StepInfo {
-            max_distortion,
-            active_set_size: n_active,
-            stable_set_size: self.state.stable_set.len(),
-            converged,
-        })
-    }
-
-    /// Precompute basis function values and gradients at all collocation points.
-    /// Algorithm 1: "if first step then" block.
-    fn precompute(&mut self) {
-        let m = self.state.collocation_points.len();
-        let n = self.basis.count();
-
-        let mut phi = DMatrix::zeros(m, n);
-        let mut grad_phi_x = DMatrix::zeros(m, n);
-        let mut grad_phi_y = DMatrix::zeros(m, n);
-
-        let mut nan_inf_count = 0usize;
-        for (idx, pt) in self.state.collocation_points.iter().enumerate() {
-            let val = self.basis.evaluate(*pt);
-            let (gx, gy) = self.basis.gradient(*pt);
-
-            for i in 0..n {
-                // Guard against NaN/Inf from basis functions (can happen
-                // with shape-aware bases near domain boundaries where
-                // geodesic distances are infinite).
-                if !val[i].is_finite() || !gx[i].is_finite() || !gy[i].is_finite() {
-                    nan_inf_count += 1;
-                }
-                phi[(idx, i)] = if val[i].is_finite() { val[i] } else { 0.0 };
-                grad_phi_x[(idx, i)] = if gx[i].is_finite() { gx[i] } else { 0.0 };
-                grad_phi_y[(idx, i)] = if gy[i].is_finite() { gy[i] } else { 0.0 };
-            }
-        }
-        if nan_inf_count > 0 {
-            warn!(
-                "Precompute: {} NaN/Inf basis values replaced with 0.0 \
-                 (expected near domain boundaries with shape-aware bases)",
-                nan_inf_count,
-            );
-        }
-
-        // Build biharmonic matrix if needed
-        let biharmonic_matrix = match &self.params.regularization {
-            RegularizationType::Biharmonic | RegularizationType::Mixed { .. } => {
-                Some(solver::build_biharmonic_matrix(
-                    self.basis.as_ref(),
-                    &self.state.collocation_points,
-                    &self.domain_bounds,
-                    n,
-                ))
-            }
-            _ => None,
-        };
-
-        self.state.precomputed = Some(PrecomputedData {
-            phi,
-            grad_phi_x,
-            grad_phi_y,
-            biharmonic_matrix,
-        });
-    }
-
-    /// Update algorithm parameters at runtime.
-    ///
-    /// This allows changing K, lambda, and regularization type while the
-    /// deformation is running, without re-creating the Algorithm.
-    /// K_high and K_low are re-derived from the new K bound.
-    /// The active set is NOT cleared -- stale points will be naturally
-    /// removed at the next step when their distortion falls below K_low.
-    fn update_params_impl(&mut self, params: MappingParams) {
-        let k = params.k_bound;
-        self.state.k_high = 0.1 + 0.9 * k;
-        self.state.k_low = 0.5 + 0.5 * k;
-
-        // If switching to a regularization that needs biharmonic matrix,
-        // ensure it's computed.
-        let needs_bh = matches!(
-            params.regularization,
-            RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
-        );
-        let has_bh = self.state.precomputed.as_ref()
-            .map_or(false, |p| p.biharmonic_matrix.is_some());
-
-        if needs_bh && !has_bh {
-            if let Some(ref mut precomputed) = self.state.precomputed {
-                let n = self.basis.count();
-                precomputed.biharmonic_matrix = Some(
-                    solver::build_biharmonic_matrix(
-                        self.basis.as_ref(),
-                        &self.state.collocation_points,
-                        &self.domain_bounds,
-                        n,
-                    )
-                );
-            }
-        }
-
-        self.params = params;
-    }
-
-    /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
-    ///
-    /// During interactive manipulation, Algorithm 1 runs on a fixed
-    /// coarse grid for responsiveness. Once manipulation ends, this
-    /// method refines the grid to guarantee K_max everywhere:
-    ///
-    /// 1. Compute |||c||| from current coefficients (Eq. 8)
-    /// 2. Compute required fill distance h via policy (Eq. 14/15)
-    /// 3. Determine grid resolution to achieve h
-    /// 4. Rebuild collocation grid and precomputed data at higher resolution
-    ///    (coefficients c are preserved as the initial guess)
-    /// 5. Run Algorithm 1 steps until convergence or step limit
-    ///
-    /// Convergence: max_distortion <= K and active set unchanged from previous step.
-    /// Step limit: `strategy::MAX_REFINEMENT_STEPS`.
-    fn refine_strategy2_impl(
-        &mut self,
-        k_max: f64,
-        target_handles: &[Vector2<f64>],
-    ) -> Result<strategy::Strategy2Result, AlgorithmError> {
-        let k = self.params.k_bound;
-        if k_max <= k {
-            return Err(AlgorithmError::InvalidInput(format!(
-                "Strategy 2 requires K_max ({}) > K ({})",
-                k_max, k
-            )));
-        }
-
-        // Step 1: compute |||c||| (Eq. 8)
-        let c_norm = strategy::compute_c_norm(&self.state.coefficients);
-
-        // Step 2: compute required h (delegated to policy)
-        let required_h = self.policy.required_h(
-            k, k_max, c_norm, self.basis.as_ref(),
-        ).ok_or_else(|| AlgorithmError::InvalidInput(
-            "Strategy 2: cannot compute required h (K_max too close to K or c_norm issue)".into(),
-        ))?;
-
-        // Current fill distance
-        let current_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
-
-        // Step 3: determine required resolution
-        let new_resolution = strategy::resolution_for_h(&self.domain_bounds, required_h);
-        // Check against configured maximum
-        if new_resolution > self.solver_config.max_refinement_resolution {
-            return Err(AlgorithmError::ResolutionExceeded {
-                required: new_resolution,
-                max: self.solver_config.max_refinement_resolution,
-            });
-        }
-
-        // Only rebuild if we need a denser grid
-        if new_resolution > self.grid_width {
-            // Step 4: rebuild collocation grid at higher resolution
-            let (new_points, new_gw, new_gh) =
-                generate_collocation_grid(&self.domain_bounds, new_resolution);
-
-            let m = new_points.len();
-
-            // Rebuild domain mask on the refined grid using the stored domain.
-            let new_mask = build_domain_mask(&new_points, self.domain.as_deref());
-
-            // Reinitialize frames to (1,0) for new points
-            let new_frames = vec![Vector2::new(1.0, 0.0); m];
-
-            // Reinitialize stable set with FPS on the new grid
-            let fps_k = self.state.stable_set.len().max(4);
-            let new_stable_set = active_set::initialize_stable_set(
-                &new_points, fps_k, &new_mask,
-            );
-
-            // Preserve current coefficients as initial guess
-            let coefficients = self.state.coefficients.clone();
-
-            self.state = AlgorithmState {
-                coefficients,
-                collocation_points: new_points,
-                active_set: Vec::new(),
-                stable_set: new_stable_set,
-                frames: new_frames,
-                k_high: self.state.k_high,
-                k_low: self.state.k_low,
-                domain_mask: new_mask,
-                precomputed: None,
-            };
-
-            self.grid_width = new_gw;
-            self.grid_height = new_gh;
-            self.is_first_step = true;
-        }
-
-        // Step 5: run Algorithm 1 steps until convergence
-        let mut refinement_steps = 0;
-
-        for _ in 0..strategy::MAX_REFINEMENT_STEPS {
-            let info = self.step_impl(target_handles)?;
-            refinement_steps += 1;
-
-            if info.converged {
-                break;
-            }
-        }
-
-        // Compute achieved K_max (delegated to policy)
-        let final_h = strategy::fill_distance(&self.domain_bounds, self.grid_width);
-        let final_omega = strategy::omega(final_h, c_norm, self.basis.as_ref());
-        let k_max_achieved = self.policy.compute_k_max(k, final_omega)
-            .unwrap_or_else(|| {
-                warn!(
-                    "Strategy 2: cannot guarantee finite K_max \
-                     (omega(h)={:.4} >= 1/K={:.4})",
-                    final_omega, 1.0 / k,
-                );
-                f64::INFINITY
-            });
-
-        Ok(strategy::Strategy2Result {
-            required_h,
-            required_resolution: new_resolution,
-            current_h,
-            k_max_achieved,
-            c_norm,
-            refinement_steps,
-        })
-    }
+    // ─────────────────────────────────────────
+    // Inherent convenience methods (not in trait)
+    // ─────────────────────────────────────────
 
     /// Get current active set size.
     pub fn active_set_size(&self) -> usize {
@@ -456,25 +137,6 @@ impl<D: DistortionPolicy> Algorithm<D> {
         &self.state.collocation_points
     }
 
-    /// Get algorithm state (for inspection/testing).
-    pub fn state(&self) -> &AlgorithmState {
-        &self.state
-    }
-
-    /// Get current algorithm parameters (for inspection).
-    pub fn params(&self) -> &MappingParams {
-        &self.params
-    }
-
-    /// Get domain bounds.
-    pub fn domain_bounds(&self) -> &DomainBounds {
-        &self.domain_bounds
-    }
-
-    /// Get grid resolution (points per side).
-    pub fn grid_width(&self) -> usize {
-        self.grid_width
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -482,30 +144,141 @@ impl<D: DistortionPolicy> Algorithm<D> {
 // ─────────────────────────────────────────────
 
 impl<D: DistortionPolicy> PlanarMapping for Algorithm<D> {
-    fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
-        self.step_impl(target_handles)
+    // step(), coefficients(), update_params(), refine_strategy2()
+    // use default implementations from PlanarMapping.
+    // evaluate() also uses default implementation (Eq. 3).
+
+    fn params(&self) -> &MappingParams {
+        &self.params
     }
 
-    // evaluate() uses default implementation from PlanarMapping (Eq. 3)
+    fn state(&self) -> &AlgorithmState {
+        &self.state
+    }
 
-    fn coefficients(&self) -> &CoefficientMatrix {
-        &self.state.coefficients
+    fn state_mut(&mut self) -> &mut AlgorithmState {
+        &mut self.state
+    }
+
+    fn domain_bounds(&self) -> &DomainBounds {
+        &self.domain_bounds
+    }
+
+    fn max_refinement_resolution(&self) -> usize {
+        self.solver_config.max_refinement_resolution
     }
 
     fn basis(&self) -> &dyn BasisFunction {
         self.basis.as_ref()
     }
 
-    fn update_params(&mut self, params: MappingParams) {
-        self.update_params_impl(params);
+    fn evaluate_all_distortions(&self) -> Result<Vec<f64>, AlgorithmError> {
+        let precomputed = self.state.precomputed.as_ref().ok_or_else(|| {
+            AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+        })?;
+        Ok(distortion::evaluate_distortion_all(
+            &self.state.coefficients,
+            precomputed,
+            &self.policy,
+        ))
     }
 
-    fn refine_strategy2(
-        &mut self,
+    fn solve_socp_step(
+        &self,
+        targets: &[Vector2<f64>],
+    ) -> Result<CoefficientMatrix, AlgorithmError> {
+        Ok(solver::solve_socp(
+            &self.source_handles,
+            targets,
+            self.basis.as_ref(),
+            &self.state,
+            &self.params,
+            &self.policy,
+            &self.solver_config,
+        )?)
+    }
+
+    fn evaluate_j_s_all_points(&self) -> Result<Vec<Vector2<f64>>, AlgorithmError> {
+        let precomputed = self.state.precomputed.as_ref().ok_or_else(|| {
+            AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+        })?;
+        Ok(distortion::evaluate_j_s_all(
+            &self.state.coefficients,
+            precomputed,
+        ))
+    }
+
+    fn targets_changed_and_record(&mut self, targets: &[Vector2<f64>]) -> bool {
+        let changed = self.prev_target_handles.as_deref() != Some(targets);
+        self.prev_target_handles = Some(targets.to_vec());
+        changed
+    }
+
+    fn ensure_biharmonic_matrix(&mut self) {
+        if let Some(ref mut precomputed) = self.state.precomputed {
+            if precomputed.biharmonic_matrix.is_none() {
+                let n = self.basis.count();
+                precomputed.biharmonic_matrix = Some(solver::build_biharmonic_matrix(
+                    self.basis.as_ref(),
+                    &self.state.collocation_points,
+                    &self.domain_bounds,
+                    n,
+                ));
+            }
+        }
+    }
+
+    fn set_params(&mut self, params: MappingParams) {
+        self.params = params;
+    }
+
+    fn required_h_for_strategy2(
+        &self,
+        k: f64,
         k_max: f64,
-        target_handles: &[Vector2<f64>],
-    ) -> Result<strategy::Strategy2Result, AlgorithmError> {
-        self.refine_strategy2_impl(k_max, target_handles)
+        c_norm: f64,
+    ) -> Option<f64> {
+        self.policy.required_h(k, k_max, c_norm, self.basis.as_ref())
+    }
+
+    fn compute_k_max_from_omega(&self, k: f64, omega_h: f64) -> Option<f64> {
+        self.policy.compute_k_max(k, omega_h)
+    }
+
+    fn rebuild_grid(&mut self, new_resolution: usize) {
+        let (new_points, new_gw, new_gh) =
+            generate_collocation_grid(&self.domain_bounds, new_resolution);
+
+        let m = new_points.len();
+
+        // Rebuild domain mask on the refined grid using the stored domain.
+        let new_mask = build_domain_mask(&new_points, self.domain.as_deref());
+
+        // Reinitialize frames to (1,0) for new points
+        let new_frames = vec![Vector2::new(1.0, 0.0); m];
+
+        // Reinitialize stable set with FPS on the new grid
+        let fps_k = self.state.stable_set.len().max(4);
+        let new_stable_set = active_set::initialize_stable_set(
+            &new_points, fps_k, &new_mask,
+        );
+
+        // Preserve current coefficients as initial guess
+        let coefficients = self.state.coefficients.clone();
+
+        self.state = AlgorithmState {
+            coefficients,
+            collocation_points: new_points,
+            active_set: Vec::new(),
+            stable_set: new_stable_set,
+            frames: new_frames,
+            k_high: self.state.k_high,
+            k_low: self.state.k_low,
+            domain_mask: new_mask,
+            precomputed: None,
+            grid_width: new_gw,
+            grid_height: new_gh,
+        };
     }
 }
 
@@ -608,7 +381,7 @@ mod tests {
     #[test]
     fn test_identity_distortion_is_one() {
         let mut alg = make_test_algorithm();
-        alg.precompute();
+        alg.ensure_precomputed();
 
         let precomputed = alg.state.precomputed.as_ref().unwrap();
         let distortions = distortion::evaluate_distortion_all(
@@ -633,7 +406,7 @@ mod tests {
 
         // Target = source (identity deformation)
         let target = vec![Vector2::new(0.5, 0.5)];
-        let info = alg.step_impl(&target).expect("Step should succeed");
+        let info = alg.step(&target).expect("Step should succeed");
 
         // After solving with identity target, distortion should be close to 1
         assert!(
@@ -649,7 +422,7 @@ mod tests {
 
         // Move the handle slightly
         let target = vec![Vector2::new(0.6, 0.5)];
-        let info = alg.step_impl(&target).expect("Step should succeed");
+        let info = alg.step(&target).expect("Step should succeed");
 
         // The mapping should still be valid (not infinite distortion)
         assert!(
@@ -693,7 +466,7 @@ mod tests {
 
         // Run multiple steps -- the distortion should converge
         for step in 0..5 {
-            let info = alg.step_impl(&target).expect("Step should succeed");
+            let info = alg.step(&target).expect("Step should succeed");
             println!(
                 "Step {}: max_dist={:.4}, active={}",
                 step, info.max_distortion, info.active_set_size

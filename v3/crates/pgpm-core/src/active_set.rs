@@ -22,11 +22,9 @@ use nalgebra::Vector2;
 pub fn update_active_set(
     state: &mut AlgorithmState,
     distortions: &[f64],
-    grid_width: usize,
-    grid_height: usize,
 ) {
     // Step 1: Find local maxima on the grid
-    let local_maxima = find_local_maxima(distortions, grid_width, grid_height);
+    let local_maxima = find_local_maxima(distortions, state.grid_width, state.grid_height);
 
     // Step 2: Add local maxima exceeding K_high
     // "foreach z ∈ Z_max such that D(z) > K_high do insert z to Z'"
@@ -212,6 +210,8 @@ mod tests {
             k_low: 2.0,   // 0.5 + 0.5*3
             domain_mask: vec![true; 9],
             precomputed: None,
+            grid_width: 3,
+            grid_height: 3,
         };
 
         // 3x3 grid, center has high distortion
@@ -222,7 +222,7 @@ mod tests {
             1.0, 1.0, 1.0,
         ];
 
-        update_active_set(&mut state, &distortions, 3, 3);
+        update_active_set(&mut state, &distortions);
         // Center (idx=4) is a local max and D=3.5 > K_high=2.8
         assert!(state.active_set.contains(&4));
     }
@@ -239,6 +239,8 @@ mod tests {
             k_low: 2.0,
             domain_mask: vec![true; 9],
             precomputed: None,
+            grid_width: 3,
+            grid_height: 3,
         };
 
         // Now distortion at 4 drops below K_low
@@ -249,7 +251,7 @@ mod tests {
             1.0, 1.0, 1.0,
         ];
 
-        update_active_set(&mut state, &distortions, 3, 3);
+        update_active_set(&mut state, &distortions);
         // Point 4 has D=1.5 < K_low=2.0, should be removed
         assert!(!state.active_set.contains(&4));
     }
@@ -301,6 +303,8 @@ mod tests {
             k_low: 2.0,
             domain_mask: vec![true, true, true, true, false, true, true, true, true],
             precomputed: None,
+            grid_width: 3,
+            grid_height: 3,
         };
 
         // Center has high distortion but is outside domain
@@ -311,7 +315,7 @@ mod tests {
             1.0, 1.0, 1.0,
         ];
 
-        update_active_set(&mut state, &distortions, 3, 3);
+        update_active_set(&mut state, &distortions);
         // Center (idx=4) is a local max and D=5.0 > K_high, but domain_mask[4]=false
         assert!(!state.active_set.contains(&4),
             "Exterior point should not be added to active set");
