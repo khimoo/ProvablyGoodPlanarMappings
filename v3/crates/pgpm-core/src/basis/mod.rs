@@ -6,7 +6,7 @@
 pub mod gaussian;
 pub mod shape_aware_gaussian;
 
-use crate::types::CoefficientMatrix;
+use crate::model::types::CoefficientMatrix;
 use nalgebra::{DVector, Vector2};
 
 /// Abstraction over basis functions from Table 1.

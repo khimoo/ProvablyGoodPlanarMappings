@@ -6,39 +6,30 @@
 //! This crate contains **only** the algorithm described in the paper.
 //! No Bevy, no UI, no image processing dependencies.
 
-pub mod types;
-pub mod domain;
+pub mod model;
 pub mod basis;
 pub mod distortion;
-pub mod active_set;
-pub mod solver;
-pub mod strategy;
+pub mod numerics;
 pub mod mapping;
 #[doc(hidden)]
-pub mod distortion_policy;
+pub mod policy;
 
 // Algorithm module is #[doc(hidden)] pub so that integration tests
 // (external crate scope) can access Algorithm<D> directly for testing,
 // while the primary public API is the MappingBridge trait + factories.
 #[doc(hidden)]
 pub mod algorithm;
-pub mod geodesic;
-
-pub use types::*;
-pub use domain::{Domain, PolygonDomain};
-pub use basis::BasisFunction;
-pub use mapping::{PlanarMapping, MappingBridge};
-pub use strategy::Strategy2Result;
-
-// Re-export distortion_policy types under #[doc(hidden)] for integration tests.
-#[doc(hidden)]
-pub use distortion_policy::{IsometricPolicy, ConformalPolicy, DistortionPolicy};
 
 // ─────────────────────────────────────────────
 // Factory functions: primary public API
 // ─────────────────────────────────────────────
 
 use crate::algorithm::Algorithm;
+use crate::basis::BasisFunction;
+use crate::mapping::MappingBridge;
+use crate::model::domain::Domain;
+use crate::model::types::{DomainBounds, MappingParams, SolverConfig};
+use crate::policy::{ConformalPolicy, IsometricPolicy};
 use nalgebra::Vector2;
 
 /// Create an isometric planar mapping (D_iso = max{Sigma, 1/sigma}).

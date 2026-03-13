@@ -11,9 +11,9 @@
 
 use crate::basis::BasisFunction;
 use crate::distortion;
-use crate::solver;
-use crate::strategy;
-use crate::types::{AlgorithmState, PrecomputedData};
+use crate::algorithm::strategy;
+use crate::model::types::{AlgorithmState, PrecomputedData};
+use crate::numerics::solver;
 
 /// Distortion-type-specific behaviour for the SOCP formulation.
 pub trait DistortionPolicy: Send + Sync {

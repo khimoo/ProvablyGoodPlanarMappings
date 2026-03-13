@@ -5,8 +5,8 @@
 //! - Eq. 20: Singular values Σ, σ from J_S, J_A
 //! - D_iso = max{Σ, 1/σ}, D_conf = Σ/σ
 
-use crate::distortion_policy::DistortionPolicy;
-use crate::types::{CoefficientMatrix, PrecomputedData};
+use crate::model::types::{CoefficientMatrix, PrecomputedData};
+use crate::policy::DistortionPolicy;
 use nalgebra::Vector2;
 
 /// Eq. 19: Compute J_S f(x) and J_A f(x) from gradients of u and v.

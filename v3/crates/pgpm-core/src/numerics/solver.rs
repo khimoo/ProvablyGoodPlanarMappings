@@ -15,8 +15,8 @@
 //! where K is a product of cones.
 
 use crate::basis::BasisFunction;
-use crate::distortion_policy::DistortionPolicy;
-use crate::types::*;
+use crate::model::types::*;
+use crate::policy::DistortionPolicy;
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{
     DefaultSettings, DefaultSolver, IPSolver, NonnegativeConeT, SecondOrderConeT, SolverStatus,

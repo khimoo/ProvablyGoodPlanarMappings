@@ -4,14 +4,14 @@
 //! This module implements the complete iterative algorithm for
 //! provably good planar mappings.
 
-use crate::active_set;
+use crate::algorithm::active_set;
 use crate::basis::BasisFunction;
 use crate::distortion;
-use crate::distortion_policy::DistortionPolicy;
-use crate::domain::Domain;
+use crate::model::domain::Domain;
+use crate::model::types::*;
 use crate::mapping::PlanarMapping;
-use crate::solver;
-use crate::types::*;
+use crate::numerics::solver;
+use crate::policy::DistortionPolicy;
 use nalgebra::Vector2;
 
 /// Algorithm 1: complete implementation, parameterised by distortion policy.
@@ -327,7 +327,7 @@ fn build_domain_mask(points: &[Vector2<f64>], domain: Option<&dyn Domain>) -> Ve
 mod tests {
     use super::*;
     use crate::basis::gaussian::GaussianBasis;
-    use crate::distortion_policy::IsometricPolicy;
+    use crate::policy::IsometricPolicy;
 
     fn make_test_algorithm() -> Algorithm<IsometricPolicy> {
         // Simple 4-center Gaussian basis on [0,1]^2
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_domain_mask_with_polygon_domain() {
-        use crate::domain::PolygonDomain;
+        use crate::model::domain::PolygonDomain;
 
         let centers = vec![
             Vector2::new(0.5, 0.5),

@@ -4,7 +4,9 @@ use bevy::prelude::*;
 use bevy::sprite::MeshMaterial2d;
 
 use nalgebra::Vector2;
-use pgpm_core::{DomainBounds, MappingParams, PolygonDomain};
+use pgpm_core::mapping::MappingBridge;
+use pgpm_core::model::domain::{Domain, PolygonDomain};
+use pgpm_core::model::types::{DomainBounds, MappingParams, SolverConfig};
 
 use crate::domain::rbf::compute_rbf_scale;
 use crate::rendering::{DeformMaterial, DeformUniform};
@@ -324,7 +326,7 @@ fn build_mapping(
     algo_params: &AlgoParams,
     contour: &[(f32, f32)],
     holes: &[Vec<(f32, f32)>],
-) -> Box<dyn pgpm_core::MappingBridge> {
+) -> Box<dyn MappingBridge> {
     let epsilon = algo_params.epsilon;
     let domain = DomainBounds {
         x_min: -epsilon,
@@ -379,7 +381,7 @@ fn build_mapping(
         ),
     };
 
-    let algo_domain: Option<Box<dyn pgpm_core::Domain>> = if contour_v2.is_empty() {
+    let algo_domain: Option<Box<dyn Domain>> = if contour_v2.is_empty() {
         None
     } else {
         Some(Box::new(PolygonDomain::new(contour_v2, holes_v2)))
@@ -393,6 +395,6 @@ fn build_mapping(
         algo_params.grid_resolution,
         algo_params.fps_k,
         algo_domain,
-        pgpm_core::SolverConfig::default(),
+        SolverConfig::default(),
     )
 }

@@ -11,8 +11,8 @@
 //! When no polygon is provided, falls back to Euclidean distance.
 
 use super::BasisFunction;
-use crate::geodesic::{self, GeodesicField};
-use crate::types::{CoefficientMatrix, DomainBounds};
+use crate::model::types::{CoefficientMatrix, DomainBounds};
+use crate::numerics::geodesic::{self, GeodesicField};
 use nalgebra::{DMatrix, DVector, Vector2};
 
 /// Shape-aware Gaussian RBF basis with geodesic distance.

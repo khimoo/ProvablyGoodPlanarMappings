@@ -10,7 +10,7 @@
 //! affect ω_{∇F} in Eq. 8.
 
 use super::BasisFunction;
-use crate::types::CoefficientMatrix;
+use crate::model::types::CoefficientMatrix;
 use nalgebra::{DMatrix, DVector, Vector2};
 
 /// Gaussian RBF basis with affine augmentation.

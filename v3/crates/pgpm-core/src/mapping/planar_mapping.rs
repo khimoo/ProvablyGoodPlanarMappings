@@ -1,23 +1,15 @@
-//! Planar mapping traits.
+//! Planar mapping trait.
 //!
-//! Two traits define the boundary between pgpm-core and its consumers:
-//!
-//! - [`PlanarMapping`]: Abstract definition of the full algorithm
-//!   (Algorithm 1, Section 5). Includes both the mathematical evaluation
-//!   (Eq. 3, Section 3) and the optimization procedure (SOCP, active set,
-//!   Strategy 2). This is the "what is a provably good planar mapping"
-//!   trait — analogous to v2's `ProvablyGoodPlanarMapping` abstract class.
-//!
-//! - [`MappingBridge`]: Subset of `PlanarMapping` exposed to frontend
-//!   consumers (e.g. bevy-pgpm). Hides internal methods like `grad_uv_at`,
-//!   `j_s_j_a_at`, `singular_values_at` that are used only by the algorithm
-//!   internals. A blanket impl provides `MappingBridge` for any `PlanarMapping`.
+//! [`PlanarMapping`] is the abstract definition of the full algorithm
+//! (Algorithm 1, Section 5). It includes both the mathematical evaluation
+//! (Eq. 3, Section 3) and the optimization procedure (SOCP, active set,
+//! Strategy 2).
 
-use crate::active_set;
+use crate::algorithm::active_set;
 use crate::basis::BasisFunction;
 use crate::distortion;
-use crate::strategy;
-use crate::types::{
+use crate::algorithm::strategy;
+use crate::model::types::{
     AlgorithmError, AlgorithmState, CoefficientMatrix, DomainBounds, MappingParams,
     PrecomputedData, RegularizationType, StepInfo,
 };
@@ -36,9 +28,6 @@ use nalgebra::{DMatrix, Vector2};
 ///   (basis/policy-dependent operations that need borrow splitting).
 /// - *Default methods*: the algorithm skeleton (Algorithm 1, Section 5)
 ///   and mathematical properties of f = Σ c_i φ_i (Eq. 3, Section 3).
-///
-/// Frontend consumers should depend on [`MappingBridge`] instead,
-/// which exposes only the subset needed for UI interaction and rendering.
 pub trait PlanarMapping: Send + Sync {
     // ─────────────────────────────────────────
     // Required: state accessors
@@ -209,13 +198,9 @@ pub trait PlanarMapping: Send + Sync {
     /// 6. Solve SOCP (Eq. 18) -> update c
     /// 7. Update d_i (Eq. 27)
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
-        // === Initialization (if first step) ===
         self.ensure_precomputed();
 
-        // === Evaluate distortion at all collocation points ===
         let distortions = self.evaluate_all_distortions()?;
-
-        // === Update active set (Algorithm 1 lines 5-8) ===
         let prev_active_set = self.state().active_set.clone();
         active_set::update_active_set(self.state_mut(), &distortions);
 
@@ -225,31 +210,18 @@ pub trait PlanarMapping: Send + Sync {
             .fold(f64::NEG_INFINITY, f64::max);
         let n_active = self.state().active_set.len();
 
-        // Algorithm 1 convergence: distortion within bound, active set stable,
-        // and targets unchanged since last step (so the SOCP output from the
-        // previous step has been verified by this step's distortion evaluation).
         let targets_changed = self.targets_changed_and_record(target_handles);
         let converged = !targets_changed
             && max_distortion <= self.params().k_bound
             && self.state().active_set == prev_active_set;
 
-        // === Solve SOCP (Eq. 18) ===
         let new_coefficients = self.solve_socp_step(target_handles)?;
         self.state_mut().coefficients = new_coefficients;
 
-        // === Update frames (Eq. 27) ===
-        // d_i = J_S f(z_i) / ||J_S f(z_i)||
-        //
-        // Frames are updated only for constraint points (Z' union Z''),
-        // consistent with Algorithm 1's postprocessing scope.
-        // Frames at non-constraint points remain at their last value
-        // (initialized to (1,0)).  This does not affect fold-over
-        // guarantees -- see Section 5 "Initialization of the frames".
         let j_s_values = self.evaluate_j_s_all_points()?;
         {
             let state = self.state_mut();
             let eps = 1e-10;
-            // Collect indices to avoid borrow conflict on state
             let indices: Vec<usize> = state
                 .active_set
                 .iter()
@@ -260,7 +232,6 @@ pub trait PlanarMapping: Send + Sync {
                 let j_s = j_s_values[idx];
                 let norm = j_s.norm();
                 if norm > eps {
-                    // Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||
                     state.frames[idx] = j_s / norm;
                 }
             }
@@ -275,13 +246,7 @@ pub trait PlanarMapping: Send + Sync {
     }
 
     /// Update algorithm parameters at runtime (K, lambda, regularization).
-    ///
-    /// K_high and K_low are re-derived from the new K bound.
-    /// The active set is NOT cleared -- stale points will be naturally
-    /// removed at the next step when their distortion falls below K_low.
     fn update_params(&mut self, params: MappingParams) {
-        // Section 5 "Activation of constraints":
-        // K_high = 0.1 + 0.9*K, K_low = 0.5 + 0.5*K
         let k = params.k_bound;
         {
             let state = self.state_mut();
@@ -289,8 +254,6 @@ pub trait PlanarMapping: Send + Sync {
             state.k_low = 0.5 + 0.5 * k;
         }
 
-        // If switching to a regularization that needs biharmonic matrix,
-        // ensure it's computed.
         let needs_bh = matches!(
             params.regularization,
             RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
@@ -309,20 +272,6 @@ pub trait PlanarMapping: Send + Sync {
     }
 
     /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
-    ///
-    /// During interactive manipulation, Algorithm 1 runs on a fixed
-    /// coarse grid for responsiveness. Once manipulation ends, this
-    /// method refines the grid to guarantee K_max everywhere:
-    ///
-    /// 1. Compute |||c||| from current coefficients (Eq. 8)
-    /// 2. Compute required fill distance h via policy (Eq. 14/15)
-    /// 3. Determine grid resolution to achieve h
-    /// 4. Rebuild collocation grid and precomputed data at higher resolution
-    ///    (coefficients c are preserved as the initial guess)
-    /// 5. Run Algorithm 1 steps until convergence or step limit
-    ///
-    /// Convergence: max_distortion <= K and active set unchanged from previous step.
-    /// Step limit: `strategy::MAX_REFINEMENT_STEPS`.
     fn refine_strategy2(
         &mut self,
         k_max: f64,
@@ -336,10 +285,7 @@ pub trait PlanarMapping: Send + Sync {
             )));
         }
 
-        // Step 1: compute |||c||| (Eq. 8)
         let c_norm = strategy::compute_c_norm(self.coefficients());
-
-        // Step 2: compute required h (delegated to policy)
         let required_h = self
             .required_h_for_strategy2(k, k_max, c_norm)
             .ok_or_else(|| {
@@ -349,15 +295,8 @@ pub trait PlanarMapping: Send + Sync {
                 )
             })?;
 
-        // Current fill distance
-        let current_h = strategy::fill_distance(
-            self.domain_bounds(),
-            self.state().grid_width,
-        );
-
-        // Step 3: determine required resolution
+        let current_h = strategy::fill_distance(self.domain_bounds(), self.state().grid_width);
         let new_resolution = strategy::resolution_for_h(self.domain_bounds(), required_h);
-        // Check against configured maximum
         let max_res = self.max_refinement_resolution();
         if new_resolution > max_res {
             return Err(AlgorithmError::ResolutionExceeded {
@@ -366,29 +305,20 @@ pub trait PlanarMapping: Send + Sync {
             });
         }
 
-        // Only rebuild if we need a denser grid
         if new_resolution > self.state().grid_width {
-            // Step 4: rebuild collocation grid at higher resolution
             self.rebuild_grid(new_resolution);
         }
 
-        // Step 5: run Algorithm 1 steps until convergence
         let mut refinement_steps = 0;
-
         for _ in 0..strategy::MAX_REFINEMENT_STEPS {
             let info = self.step(target_handles)?;
             refinement_steps += 1;
-
             if info.converged {
                 break;
             }
         }
 
-        // Compute achieved K_max (delegated to policy)
-        let final_h = strategy::fill_distance(
-            self.domain_bounds(),
-            self.state().grid_width,
-        );
+        let final_h = strategy::fill_distance(self.domain_bounds(), self.state().grid_width);
         let final_omega = strategy::omega(final_h, c_norm, self.basis());
         let k_max_achieved = self.compute_k_max_from_omega(k, final_omega).unwrap_or_else(|| {
             warn!(
@@ -410,13 +340,6 @@ pub trait PlanarMapping: Send + Sync {
         })
     }
 
-    // ─────────────────────────────────────────
-    // Default methods (Eq. 3 / Section 3)
-    //
-    // These are pure mathematical properties of the mapping f,
-    // fully determined by coefficients and basis.
-    // ─────────────────────────────────────────
-
     /// Evaluate the mapping f(x) = Σ c_i φ_i(x) (Eq. 3).
     fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
         let phi = self.basis().evaluate(x);
@@ -432,8 +355,6 @@ pub trait PlanarMapping: Send + Sync {
     }
 
     /// Compute the Jacobian gradients (∇u, ∇v) at point x (Eq. 3 differentiated).
-    ///
-    /// ∇u(x) = Σ c¹_i ∇φ_i(x),  ∇v(x) = Σ c²_i ∇φ_i(x)
     fn grad_uv_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
         let (gx, gy) = self.basis().gradient(x);
         let c = self.coefficients();
@@ -451,84 +372,14 @@ pub trait PlanarMapping: Send + Sync {
     }
 
     /// Compute J_S f(x) and J_A f(x) at point x (Eq. 19-20).
-    ///
-    /// J_S f = (∇u + I∇v) / 2  (similarity part)
-    /// J_A f = (∇u - I∇v) / 2  (anti-similarity part)
     fn j_s_j_a_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
         let (grad_u, grad_v) = self.grad_uv_at(x);
         distortion::compute_j_s_j_a(grad_u, grad_v)
     }
 
     /// Compute singular values (Σ, σ) at point x (Eq. 20).
-    ///
-    /// Σ(x) = ||J_S f(x)|| + ||J_A f(x)||
-    /// σ(x) = | ||J_S f(x)|| - ||J_A f(x)|| |
     fn singular_values_at(&self, x: Vector2<f64>) -> (f64, f64) {
         let (j_s, j_a) = self.j_s_j_a_at(x);
         distortion::singular_values(j_s, j_a)
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-// MappingBridge: frontend communication trait
-// ─────────────────────────────────────────────────────────────
-
-/// Frontend bridge: subset of [`PlanarMapping`] exposed to UI consumers.
-///
-/// `bevy-pgpm` depends only on this trait, not on `PlanarMapping` directly.
-/// Internal methods (`grad_uv_at`, `j_s_j_a_at`, `singular_values_at`) are
-/// used by the algorithm internals and are not part of this interface.
-pub trait MappingBridge: Send + Sync {
-    /// Algorithm 1: execute one step (Section 5).
-    fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError>;
-
-    /// Get current coefficient matrix c (Eq. 3). Used by GPU rendering path.
-    fn coefficients(&self) -> &CoefficientMatrix;
-
-    /// Get basis function reference (Table 1). Used by GPU rendering path.
-    fn basis(&self) -> &dyn BasisFunction;
-
-    /// Evaluate the mapping f(x) (Eq. 3). Used by CPU rendering path.
-    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64>;
-
-    /// Update algorithm parameters at runtime (K, lambda, regularization).
-    fn update_params(&mut self, params: MappingParams);
-
-    /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
-    fn refine_strategy2(
-        &mut self,
-        k_max: f64,
-        target_handles: &[Vector2<f64>],
-    ) -> Result<strategy::Strategy2Result, AlgorithmError>;
-}
-
-/// Blanket impl: any `PlanarMapping` automatically satisfies `MappingBridge`.
-impl<T: PlanarMapping + ?Sized> MappingBridge for T {
-    fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
-        PlanarMapping::step(self, target_handles)
-    }
-
-    fn coefficients(&self) -> &CoefficientMatrix {
-        PlanarMapping::coefficients(self)
-    }
-
-    fn basis(&self) -> &dyn BasisFunction {
-        PlanarMapping::basis(self)
-    }
-
-    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
-        PlanarMapping::evaluate(self, x)
-    }
-
-    fn update_params(&mut self, params: MappingParams) {
-        PlanarMapping::update_params(self, params)
-    }
-
-    fn refine_strategy2(
-        &mut self,
-        k_max: f64,
-        target_handles: &[Vector2<f64>],
-    ) -> Result<strategy::Strategy2Result, AlgorithmError> {
-        PlanarMapping::refine_strategy2(self, k_max, target_handles)
     }
 }

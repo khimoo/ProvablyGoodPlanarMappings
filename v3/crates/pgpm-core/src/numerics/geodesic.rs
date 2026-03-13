@@ -10,7 +10,7 @@
 //! This gives the shortest interior-path distance from a source point
 //! to every grid cell.
 
-use crate::types::DomainBounds;
+use crate::model::types::DomainBounds;
 use nalgebra::Vector2;
 use std::collections::BinaryHeap;
 use std::cmp::Ordering;

@@ -7,7 +7,7 @@
 //!   "only points where D(z) > K_high are added"
 //!   "points where D(z) < K_low are removed"
 
-use crate::types::AlgorithmState;
+use crate::model::types::AlgorithmState;
 use nalgebra::Vector2;
 
 /// Algorithm 1: Update the active set Z'.
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_active_set_update() {
-        let mut state = crate::types::AlgorithmState {
+        let mut state = crate::model::types::AlgorithmState {
             coefficients: nalgebra::DMatrix::zeros(2, 1),
             collocation_points: Vec::new(),
             active_set: Vec::new(),
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_active_set_removal() {
-        let mut state = crate::types::AlgorithmState {
+        let mut state = crate::model::types::AlgorithmState {
             coefficients: nalgebra::DMatrix::zeros(2, 1),
             collocation_points: Vec::new(),
             active_set: vec![4],
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn test_active_set_skips_exterior_points() {
         // 3x3 grid: center is outside domain (mask = false)
-        let mut state = crate::types::AlgorithmState {
+        let mut state = crate::model::types::AlgorithmState {
             coefficients: nalgebra::DMatrix::zeros(2, 1),
             collocation_points: Vec::new(),
             active_set: Vec::new(),

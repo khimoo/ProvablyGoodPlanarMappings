@@ -13,7 +13,7 @@
 //! - Eq. 14: h ≤ ω⁻¹(min{K_max - K, 1/K - 1/K_max}) (Strategy 2, isometric)
 
 use crate::basis::BasisFunction;
-use crate::types::{CoefficientMatrix, DomainBounds};
+use crate::model::types::{CoefficientMatrix, DomainBounds};
 
 /// Result of a Strategy 2 re-optimization.
 pub struct Strategy2Result {

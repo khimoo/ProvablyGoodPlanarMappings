@@ -2,14 +2,14 @@
 //! Reproduces the bevy-pgpm setup to find why deformation doesn't occur.
 
 use nalgebra::Vector2;
-use pgpm_core::{
-    DomainBounds, MappingParams, RegularizationType,
-    PolygonDomain, IsometricPolicy, PlanarMapping,
-    algorithm::Algorithm,
-    basis::shape_aware_gaussian::ShapeAwareGaussianBasis,
-    basis::BasisFunction,
-    geodesic::{GeodesicField, build_domain_mask},
-};
+use pgpm_core::algorithm::Algorithm;
+use pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis;
+use pgpm_core::basis::BasisFunction;
+use pgpm_core::mapping::PlanarMapping;
+use pgpm_core::model::domain::PolygonDomain;
+use pgpm_core::model::types::{DomainBounds, MappingParams, RegularizationType};
+use pgpm_core::numerics::geodesic::{GeodesicField, build_domain_mask};
+use pgpm_core::policy::IsometricPolicy;
 
 /// Create a simple square polygon (like an image with no alpha cutout).
 fn square_contour(w: f64, h: f64) -> Vec<Vector2<f64>> {
@@ -175,7 +175,7 @@ fn test_shape_aware_algorithm_step() {
     let mut algo = Algorithm::new(
         basis, params, IsometricPolicy, bounds, source_handles.clone(),
         50, 8, Some(Box::new(domain)),
-        pgpm_core::SolverConfig::default(),
+        pgpm_core::model::types::SolverConfig::default(),
     );
 
     // Step with the handle moved
