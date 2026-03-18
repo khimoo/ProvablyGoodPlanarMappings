@@ -383,9 +383,9 @@ mod tests {
         let mut alg = make_test_algorithm();
         alg.ensure_precomputed();
 
-        let precomputed = alg.state.precomputed.as_ref().unwrap();
+        let precomputed = alg.state().precomputed.as_ref().unwrap();
         let distortions = distortion::evaluate_distortion_all(
-            &alg.state.coefficients,
+            &alg.state().coefficients,
             precomputed,
             &alg.policy,
         );
