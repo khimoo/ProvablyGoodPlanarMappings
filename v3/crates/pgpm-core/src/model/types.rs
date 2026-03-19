@@ -5,6 +5,9 @@
 //! - Section 3: distortion types
 //! - Algorithm 1: algorithm state
 
+use crate::basis::BasisFunction;
+use crate::model::domain::Domain;
+use crate::policy::DistortionPolicy;
 use nalgebra::{DMatrix, Vector2};
 
 // ───────────────────────────────────────────────────────────────
@@ -67,6 +70,30 @@ impl Default for SolverConfig {
     }
 }
 
+/// Immutable context for Algorithm 1 (Section 5).
+///
+/// Bundles references to all data that does not change within a single
+/// algorithm step.  Returned together with `&mut AlgorithmState` by
+/// [`PlanarMapping::parts_mut`] to enable borrow-splitting in trait
+/// default methods.
+pub struct MappingContext<'a> {
+    /// Basis functions φ_i (Table 1)
+    pub basis: &'a dyn BasisFunction,
+    /// Distortion policy (isometric Eq. 23/26 or conformal Eq. 28)
+    pub policy: &'a dyn DistortionPolicy,
+    /// Algorithm parameters (K, λ, regularization type)
+    pub params: &'a MappingParams,
+    /// Source handle positions {p_l} (Eq. 29) — fixed
+    pub source_handles: &'a [Vector2<f64>],
+    /// Bounding box of domain Ω (Eq. 5)
+    pub domain_bounds: &'a DomainBounds,
+    /// Domain Ω for "x ∈ Ω" test (Section 4).
+    /// `None` means the full bounding box is the domain.
+    pub domain: Option<&'a dyn Domain>,
+    /// SOCP solver numerical tuning (not from the paper)
+    pub solver_config: &'a SolverConfig,
+}
+
 /// Algorithm 1 internal state.
 pub struct AlgorithmState {
     /// Eq. 3: coefficient matrix c ∈ R^{2×n}
@@ -106,6 +133,11 @@ pub struct AlgorithmState {
     /// Grid dimensions for local maxima search (Section 5)
     pub grid_width: usize,
     pub grid_height: usize,
+
+    /// Target handles from the previous step, used to detect target changes.
+    /// When targets change, the SOCP output is untested and convergence
+    /// cannot be claimed until the next step verifies it.
+    pub prev_target_handles: Option<Vec<Vector2<f64>>>,
 }
 
 /// Precomputed data for efficiency (computed once in Algorithm 1 "if first step").

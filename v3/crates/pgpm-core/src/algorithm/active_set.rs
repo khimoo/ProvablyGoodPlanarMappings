@@ -212,6 +212,7 @@ mod tests {
             precomputed: None,
             grid_width: 3,
             grid_height: 3,
+            prev_target_handles: None,
         };
 
         // 3x3 grid, center has high distortion
@@ -241,6 +242,7 @@ mod tests {
             precomputed: None,
             grid_width: 3,
             grid_height: 3,
+            prev_target_handles: None,
         };
 
         // Now distortion at 4 drops below K_low
@@ -305,6 +307,7 @@ mod tests {
             precomputed: None,
             grid_width: 3,
             grid_height: 3,
+            prev_target_handles: None,
         };
 
         // Center has high distortion but is outside domain

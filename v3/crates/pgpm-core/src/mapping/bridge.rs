@@ -1,7 +1,7 @@
 //! Frontend bridge trait.
 
-use crate::basis::BasisFunction;
 use crate::algorithm::strategy;
+use crate::basis::BasisFunction;
 use crate::mapping::PlanarMapping;
 use crate::model::types::{AlgorithmError, CoefficientMatrix, MappingParams, StepInfo};
 use nalgebra::Vector2;

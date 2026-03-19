@@ -117,12 +117,12 @@ fn verify_identity_target_converges() {
     );
 
     // Also verify post-solve distortion is bounded
-    let state = alg.state();
+    let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        &pgpm_core::policy::IsometricPolicy,
+        ctx.policy,
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Post-solve max_D after 10 steps: {:.4}", max_d);
@@ -153,12 +153,12 @@ fn verify_distortion_bound_at_constrained_points() {
     }
 
     // After the SOCP solve, check distortion at constrained points
-    let state = alg.state();
+    let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        &pgpm_core::policy::IsometricPolicy,
+        ctx.policy,
     );
 
     // Check active set points: D(z) <= K (with some numerical tolerance)
@@ -344,12 +344,12 @@ fn verify_k_bound_effect() {
         }
 
         // Measure post-solve distortion
-        let state = alg.state();
+        let (ctx, state) = alg.parts();
         let precomputed = state.precomputed.as_ref().unwrap();
         let distortions = distortion::evaluate_distortion_all(
             &state.coefficients,
             precomputed,
-            &pgpm_core::policy::IsometricPolicy,
+            ctx.policy,
         );
 
         let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -420,12 +420,12 @@ fn verify_two_handle_deformation() {
     assert!(err_b < 0.2, "Handle B error {:.4} too large", err_b);
 
     // Verify distortion constraint
-    let state = alg.state();
+    let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        &pgpm_core::policy::IsometricPolicy,
+        ctx.policy,
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Final max distortion: {:.4}", max_d);

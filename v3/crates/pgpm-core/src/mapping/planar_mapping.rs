@@ -4,15 +4,22 @@
 //! (Algorithm 1, Section 5). It includes both the mathematical evaluation
 //! (Eq. 3, Section 3) and the optimization procedure (SOCP, active set,
 //! Strategy 2).
+//!
+//! **Design**: The trait uses a `parts()`/`parts_mut()` pattern to split
+//! borrows between immutable context ([`MappingContext`]) and mutable state
+//! ([`AlgorithmState`]).  This allows *all* Algorithm 1 logic to live in
+//! default methods while concrete types only provide the borrow-splitting
+//! accessors and `set_params`.
 
 use crate::algorithm::active_set;
+use crate::algorithm::strategy;
 use crate::basis::BasisFunction;
 use crate::distortion;
-use crate::algorithm::strategy;
 use crate::model::types::{
-    AlgorithmError, AlgorithmState, CoefficientMatrix, DomainBounds, MappingParams,
+    AlgorithmError, AlgorithmState, CoefficientMatrix, MappingContext, MappingParams,
     PrecomputedData, RegularizationType, StepInfo,
 };
+use crate::numerics::solver;
 use log::warn;
 use nalgebra::{DMatrix, Vector2};
 
@@ -20,85 +27,29 @@ use nalgebra::{DMatrix, Vector2};
 ///
 /// This trait captures the full algorithm: initialization, SOCP optimization,
 /// active set management, frame updates, and Strategy 2 refinement.
-/// Concrete implementations (e.g. `Algorithm<IsometricPolicy>`) inject
-/// a basis function and distortion policy.
 ///
-/// **Design**:
-/// - *Required methods*: state accessors + implementation-specific hooks
-///   (basis/policy-dependent operations that need borrow splitting).
-/// - *Default methods*: the algorithm skeleton (Algorithm 1, Section 5)
-///   and mathematical properties of f = Σ c_i φ_i (Eq. 3, Section 3).
+/// **Required methods** (3 only):
+/// - [`parts`](PlanarMapping::parts) / [`parts_mut`](PlanarMapping::parts_mut) —
+///   borrow-splitting accessors that return `(MappingContext, &AlgorithmState)`
+///   or `(MappingContext, &mut AlgorithmState)`.
+/// - [`set_params`](PlanarMapping::set_params) — update algorithm parameters.
+///
+/// **Default methods**: the complete Algorithm 1 skeleton and
+/// mathematical evaluation (Eq. 3).
 pub trait PlanarMapping: Send + Sync {
     // ─────────────────────────────────────────
-    // Required: state accessors
+    // Required: borrow-splitting accessors
     // ─────────────────────────────────────────
 
-    /// Get current algorithm parameters.
-    fn params(&self) -> &MappingParams;
+    /// Split self into immutable context and immutable state.
+    fn parts(&self) -> (MappingContext<'_>, &AlgorithmState);
 
-    /// Get algorithm state (immutable).
-    fn state(&self) -> &AlgorithmState;
-
-    /// Get algorithm state (mutable).
-    fn state_mut(&mut self) -> &mut AlgorithmState;
-
-    /// Get domain bounds (Eq. 5).
-    fn domain_bounds(&self) -> &DomainBounds;
-
-    /// Maximum grid resolution for Strategy 2 refinement.
-    fn max_refinement_resolution(&self) -> usize;
-
-    /// Get basis function reference (Table 1).
-    fn basis(&self) -> &dyn BasisFunction;
-
-    // ─────────────────────────────────────────
-    // Required: implementation-specific hooks
-    // ─────────────────────────────────────────
-
-    /// Evaluate distortion at all collocation points (policy-dependent).
-    fn evaluate_all_distortions(&self) -> Result<Vec<f64>, AlgorithmError>;
-
-    /// Solve the SOCP problem (Eq. 18) and return new coefficients.
-    fn solve_socp_step(
-        &self,
-        targets: &[Vector2<f64>],
-    ) -> Result<CoefficientMatrix, AlgorithmError>;
-
-    /// Evaluate J_S f at all collocation points (Eq. 27 frame update).
-    fn evaluate_j_s_all_points(&self) -> Result<Vec<Vector2<f64>>, AlgorithmError>;
-
-    /// Check if targets changed since the last step, and record the new targets.
-    /// Returns `true` if targets differ from the previous step.
-    fn targets_changed_and_record(&mut self, targets: &[Vector2<f64>]) -> bool;
-
-    /// Ensure the biharmonic matrix is built in `state.precomputed`.
-    /// Called when the regularization type requires it (Eq. 31).
-    /// No-op if already present or if precomputed data is not yet initialized.
-    fn ensure_biharmonic_matrix(&mut self);
+    /// Split self into immutable context and mutable state.
+    fn parts_mut(&mut self) -> (MappingContext<'_>, &mut AlgorithmState);
 
     /// Store new algorithm parameters (K, lambda, regularization).
+    /// This mutates the params field which lives outside AlgorithmState.
     fn set_params(&mut self, params: MappingParams);
-
-    // ─────────────────────────────────────────
-    // Required: Strategy 2 hooks (policy-dependent)
-    // ─────────────────────────────────────────
-
-    /// Strategy 2: compute required fill distance h (Eq. 14 or 15).
-    /// Returns `None` if the computation is not possible.
-    fn required_h_for_strategy2(
-        &self,
-        k: f64,
-        k_max: f64,
-        c_norm: f64,
-    ) -> Option<f64>;
-
-    /// Strategy 1: compute K_max from K and omega(h) (Eq. 11 or 13).
-    /// Returns `None` if injectivity cannot be guaranteed.
-    fn compute_k_max_from_omega(&self, k: f64, omega_h: f64) -> Option<f64>;
-
-    /// Rebuild the collocation grid at a new resolution (for Strategy 2).
-    /// Preserves current coefficients. Resets active set, frames, precomputed data.
-    fn rebuild_grid(&mut self, new_resolution: usize);
 
     // ─────────────────────────────────────────
     // Default methods: Algorithm 1 skeleton
@@ -106,7 +57,32 @@ pub trait PlanarMapping: Send + Sync {
 
     /// Get current coefficient matrix c (Eq. 3).
     fn coefficients(&self) -> &CoefficientMatrix {
-        &self.state().coefficients
+        let (_, state) = self.parts();
+        &state.coefficients
+    }
+
+    /// Get basis function reference (Table 1).
+    fn basis(&self) -> &dyn BasisFunction {
+        let (ctx, _) = self.parts();
+        ctx.basis
+    }
+
+    /// Get current algorithm parameters.
+    fn params(&self) -> MappingParams {
+        let (ctx, _) = self.parts();
+        ctx.params.clone()
+    }
+
+    /// Get algorithm state (immutable) for external inspection.
+    fn state(&self) -> &AlgorithmState {
+        let (_, state) = self.parts();
+        state
+    }
+
+    /// Maximum grid resolution for Strategy 2 refinement.
+    fn max_refinement_resolution(&self) -> usize {
+        let (ctx, _) = self.parts();
+        ctx.solver_config.max_refinement_resolution
     }
 
     /// Precompute basis function values and gradients at all collocation points.
@@ -117,15 +93,19 @@ pub trait PlanarMapping: Send + Sync {
     /// Procedural decomposition:
     /// 1. [`Self::compute_basis_matrices`] — evaluate φ_i(z), ∇φ_i(z)
     /// 2. Store as [`PrecomputedData`]
-    /// 3. [`Self::ensure_biharmonic_matrix`] — build Eq. 31 matrix if needed
+    /// 3. Build Eq. 31 biharmonic matrix if needed
     fn ensure_precomputed(&mut self) {
-        if self.state().precomputed.is_some() {
-            return;
+        {
+            let (_, state) = self.parts();
+            if state.precomputed.is_some() {
+                return;
+            }
         }
 
         let (phi, grad_phi_x, grad_phi_y) = self.compute_basis_matrices();
 
-        self.state_mut().precomputed = Some(PrecomputedData {
+        let (ctx, state) = self.parts_mut();
+        state.precomputed = Some(PrecomputedData {
             phi,
             grad_phi_x,
             grad_phi_y,
@@ -134,11 +114,11 @@ pub trait PlanarMapping: Send + Sync {
 
         // Build biharmonic matrix if needed by current regularization type
         let needs_bh = matches!(
-            self.params().regularization,
+            ctx.params.regularization,
             RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
         );
         if needs_bh {
-            self.ensure_biharmonic_matrix();
+            ensure_biharmonic_matrix_inner(ctx.basis, ctx.domain_bounds, state);
         }
     }
 
@@ -150,10 +130,9 @@ pub trait PlanarMapping: Send + Sync {
     /// NaN/Inf values (from shape-aware bases near domain boundaries) are
     /// replaced with 0.0 and a warning is logged.
     fn compute_basis_matrices(&self) -> (DMatrix<f64>, DMatrix<f64>, DMatrix<f64>) {
-        let state = self.state();
-        let basis = self.basis();
+        let (ctx, state) = self.parts();
         let m = state.collocation_points.len();
-        let n = basis.count();
+        let n = ctx.basis.count();
 
         let mut phi = DMatrix::zeros(m, n);
         let mut grad_phi_x = DMatrix::zeros(m, n);
@@ -161,8 +140,8 @@ pub trait PlanarMapping: Send + Sync {
 
         let mut nan_inf_count = 0usize;
         for (idx, pt) in state.collocation_points.iter().enumerate() {
-            let val = basis.evaluate(*pt);
-            let (gx, gy) = basis.gradient(*pt);
+            let val = ctx.basis.evaluate(*pt);
+            let (gx, gy) = ctx.basis.gradient(*pt);
 
             for i in 0..n {
                 // Guard against NaN/Inf from basis functions (can happen
@@ -200,27 +179,83 @@ pub trait PlanarMapping: Send + Sync {
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
         self.ensure_precomputed();
 
-        let distortions = self.evaluate_all_distortions()?;
-        let prev_active_set = self.state().active_set.clone();
-        active_set::update_active_set(self.state_mut(), &distortions);
+        // 2. Evaluate distortions (Eq. 19-20)
+        let distortions = {
+            let (ctx, state) = self.parts();
+            let precomputed = state.precomputed.as_ref().ok_or_else(|| {
+                AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+            })?;
+            distortion::evaluate_distortion_all(
+                &state.coefficients,
+                precomputed,
+                ctx.policy,
+            )
+        };
+
+        // 3-5. Update active set
+        let prev_active_set = {
+            let (_, state) = self.parts();
+            state.active_set.clone()
+        };
+        {
+            let (_, state) = self.parts_mut();
+            active_set::update_active_set(state, &distortions);
+        }
 
         let max_distortion = distortions
             .iter()
             .cloned()
             .fold(f64::NEG_INFINITY, f64::max);
-        let n_active = self.state().active_set.len();
 
-        let targets_changed = self.targets_changed_and_record(target_handles);
-        let converged = !targets_changed
-            && max_distortion <= self.params().k_bound
-            && self.state().active_set == prev_active_set;
+        // Check convergence
+        let (n_active, converged) = {
+            let (ctx, state) = self.parts_mut();
+            let n_active = state.active_set.len();
 
-        let new_coefficients = self.solve_socp_step(target_handles)?;
-        self.state_mut().coefficients = new_coefficients;
+            let changed = state.prev_target_handles.as_deref() != Some(target_handles);
+            state.prev_target_handles = Some(target_handles.to_vec());
 
-        let j_s_values = self.evaluate_j_s_all_points()?;
+            let converged = !changed
+                && max_distortion <= ctx.params.k_bound
+                && state.active_set == prev_active_set;
+
+            (n_active, converged)
+        };
+
+        // 6. Solve SOCP (Eq. 18)
+        let new_coefficients = {
+            let (ctx, state) = self.parts();
+            state.precomputed.as_ref().ok_or_else(|| {
+                AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+            })?;
+            solver::solve_socp(
+                ctx.source_handles,
+                target_handles,
+                ctx.basis,
+                state,
+                ctx.params,
+                ctx.policy,
+                ctx.solver_config,
+            )?
+        };
+
+        // 7. Update coefficients and frames (Eq. 27)
         {
-            let state = self.state_mut();
+            let (_, state) = self.parts_mut();
+            state.coefficients = new_coefficients;
+        }
+
+        // Evaluate J_S at all points for frame update (Eq. 27)
+        let j_s_values = {
+            let (_, state) = self.parts();
+            let pre = state.precomputed.as_ref().ok_or_else(|| {
+                AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
+            })?;
+            distortion::evaluate_j_s_all(&state.coefficients, pre)
+        };
+
+        let stable_set_size = {
+            let (_, state) = self.parts_mut();
             let eps = 1e-10;
             let indices: Vec<usize> = state
                 .active_set
@@ -235,12 +270,13 @@ pub trait PlanarMapping: Send + Sync {
                     state.frames[idx] = j_s / norm;
                 }
             }
-        }
+            state.stable_set.len()
+        };
 
         Ok(StepInfo {
             max_distortion,
             active_set_size: n_active,
-            stable_set_size: self.state().stable_set.len(),
+            stable_set_size,
             converged,
         })
     }
@@ -249,23 +285,27 @@ pub trait PlanarMapping: Send + Sync {
     fn update_params(&mut self, params: MappingParams) {
         let k = params.k_bound;
         {
-            let state = self.state_mut();
+            let (_, state) = self.parts_mut();
             state.k_high = 0.1 + 0.9 * k;
             state.k_low = 0.5 + 0.5 * k;
         }
 
-        let needs_bh = matches!(
-            params.regularization,
-            RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
-        );
-        let has_bh = self
-            .state()
-            .precomputed
-            .as_ref()
-            .map_or(false, |p| p.biharmonic_matrix.is_some());
+        let (needs_bh, has_bh) = {
+            let (_, state) = self.parts();
+            let needs_bh = matches!(
+                params.regularization,
+                RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
+            );
+            let has_bh = state
+                .precomputed
+                .as_ref()
+                .map_or(false, |p| p.biharmonic_matrix.is_some());
+            (needs_bh, has_bh)
+        };
 
         if needs_bh && !has_bh {
-            self.ensure_biharmonic_matrix();
+            let (ctx, state) = self.parts_mut();
+            ensure_biharmonic_matrix_inner(ctx.basis, ctx.domain_bounds, state);
         }
 
         self.set_params(params);
@@ -277,35 +317,48 @@ pub trait PlanarMapping: Send + Sync {
         k_max: f64,
         target_handles: &[Vector2<f64>],
     ) -> Result<strategy::Strategy2Result, AlgorithmError> {
-        let k = self.params().k_bound;
-        if k_max <= k {
-            return Err(AlgorithmError::InvalidInput(format!(
-                "Strategy 2 requires K_max ({}) > K ({})",
-                k_max, k
-            )));
-        }
+        let (k, c_norm, required_h, current_h) = {
+            let (ctx, state) = self.parts();
+            let k = ctx.params.k_bound;
+            if k_max <= k {
+                return Err(AlgorithmError::InvalidInput(format!(
+                    "Strategy 2 requires K_max ({}) > K ({})",
+                    k_max, k
+                )));
+            }
 
-        let c_norm = strategy::compute_c_norm(self.coefficients());
-        let required_h = self
-            .required_h_for_strategy2(k, k_max, c_norm)
-            .ok_or_else(|| {
-                AlgorithmError::InvalidInput(
-                    "Strategy 2: cannot compute required h (K_max too close to K or c_norm issue)"
-                        .into(),
-                )
-            })?;
+            let c_norm = strategy::compute_c_norm(&state.coefficients);
+            let required_h = ctx.policy
+                .required_h(k, k_max, c_norm, ctx.basis)
+                .ok_or_else(|| {
+                    AlgorithmError::InvalidInput(
+                        "Strategy 2: cannot compute required h (K_max too close to K or c_norm issue)"
+                            .into(),
+                    )
+                })?;
+            let current_h = strategy::fill_distance(ctx.domain_bounds, state.grid_width);
+            (k, c_norm, required_h, current_h)
+        };
 
-        let current_h = strategy::fill_distance(self.domain_bounds(), self.state().grid_width);
-        let new_resolution = strategy::resolution_for_h(self.domain_bounds(), required_h);
-        let max_res = self.max_refinement_resolution();
-        if new_resolution > max_res {
-            return Err(AlgorithmError::ResolutionExceeded {
-                required: new_resolution,
-                max: max_res,
-            });
-        }
+        let new_resolution = {
+            let (ctx, _state) = self.parts();
+            let new_resolution = strategy::resolution_for_h(ctx.domain_bounds, required_h);
+            let max_res = ctx.solver_config.max_refinement_resolution;
+            if new_resolution > max_res {
+                return Err(AlgorithmError::ResolutionExceeded {
+                    required: new_resolution,
+                    max: max_res,
+                });
+            }
+            new_resolution
+        };
 
-        if new_resolution > self.state().grid_width {
+        // Rebuild grid if needed
+        let needs_rebuild = {
+            let (_, state) = self.parts();
+            new_resolution > state.grid_width
+        };
+        if needs_rebuild {
             self.rebuild_grid(new_resolution);
         }
 
@@ -318,17 +371,20 @@ pub trait PlanarMapping: Send + Sync {
             }
         }
 
-        let final_h = strategy::fill_distance(self.domain_bounds(), self.state().grid_width);
-        let final_omega = strategy::omega(final_h, c_norm, self.basis());
-        let k_max_achieved = self.compute_k_max_from_omega(k, final_omega).unwrap_or_else(|| {
-            warn!(
-                "Strategy 2: cannot guarantee finite K_max \
-                 (omega(h)={:.4} >= 1/K={:.4})",
-                final_omega,
-                1.0 / k,
-            );
-            f64::INFINITY
-        });
+        let k_max_achieved = {
+            let (ctx, state) = self.parts();
+            let final_h = strategy::fill_distance(ctx.domain_bounds, state.grid_width);
+            let final_omega = strategy::omega(final_h, c_norm, ctx.basis);
+            ctx.policy.compute_k_max(k, final_omega).unwrap_or_else(|| {
+                warn!(
+                    "Strategy 2: cannot guarantee finite K_max \
+                     (omega(h)={:.4} >= 1/K={:.4})",
+                    final_omega,
+                    1.0 / k,
+                );
+                f64::INFINITY
+            })
+        };
 
         Ok(strategy::Strategy2Result {
             required_h,
@@ -342,9 +398,10 @@ pub trait PlanarMapping: Send + Sync {
 
     /// Evaluate the mapping f(x) = Σ c_i φ_i(x) (Eq. 3).
     fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
-        let phi = self.basis().evaluate(x);
-        let c = self.coefficients();
-        let n = self.basis().count();
+        let (ctx, state) = self.parts();
+        let phi = ctx.basis.evaluate(x);
+        let c = &state.coefficients;
+        let n = ctx.basis.count();
         let mut u = 0.0;
         let mut v = 0.0;
         for i in 0..n {
@@ -356,9 +413,10 @@ pub trait PlanarMapping: Send + Sync {
 
     /// Compute the Jacobian gradients (∇u, ∇v) at point x (Eq. 3 differentiated).
     fn grad_uv_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
-        let (gx, gy) = self.basis().gradient(x);
-        let c = self.coefficients();
-        let n = self.basis().count();
+        let (ctx, state) = self.parts();
+        let (gx, gy) = ctx.basis.gradient(x);
+        let c = &state.coefficients;
+        let n = ctx.basis.count();
 
         let mut grad_u = Vector2::new(0.0, 0.0);
         let mut grad_v = Vector2::new(0.0, 0.0);
@@ -381,5 +439,103 @@ pub trait PlanarMapping: Send + Sync {
     fn singular_values_at(&self, x: Vector2<f64>) -> (f64, f64) {
         let (j_s, j_a) = self.j_s_j_a_at(x);
         distortion::singular_values(j_s, j_a)
+    }
+
+    /// Rebuild the collocation grid at a new resolution (for Strategy 2).
+    /// Preserves current coefficients. Resets active set, frames, precomputed data.
+    fn rebuild_grid(&mut self, new_resolution: usize) {
+        let (ctx, state) = self.parts_mut();
+
+        let (new_points, new_gw, new_gh) =
+            generate_collocation_grid(ctx.domain_bounds, new_resolution);
+        let m = new_points.len();
+        let new_mask = build_domain_mask(&new_points, ctx.domain);
+        let new_frames = vec![Vector2::new(1.0, 0.0); m];
+
+        let fps_k = state.stable_set.len().max(4);
+        let new_stable_set =
+            active_set::initialize_stable_set(&new_points, fps_k, &new_mask);
+
+        let coefficients = state.coefficients.clone();
+
+        *state = AlgorithmState {
+            coefficients,
+            collocation_points: new_points,
+            active_set: Vec::new(),
+            stable_set: new_stable_set,
+            frames: new_frames,
+            k_high: state.k_high,
+            k_low: state.k_low,
+            domain_mask: new_mask,
+            precomputed: None,
+            grid_width: new_gw,
+            grid_height: new_gh,
+            prev_target_handles: None,
+        };
+    }
+}
+
+// ─────────────────────────────────────────────
+// Private helpers (used by default methods)
+// ─────────────────────────────────────────────
+
+/// Build biharmonic matrix (Eq. 31) into precomputed data.
+/// Free function to avoid &mut self borrow conflicts in trait default methods.
+fn ensure_biharmonic_matrix_inner(
+    basis: &dyn BasisFunction,
+    domain_bounds: &crate::model::types::DomainBounds,
+    state: &mut AlgorithmState,
+) {
+    if let Some(ref mut precomputed) = state.precomputed {
+        if precomputed.biharmonic_matrix.is_none() {
+            let n = basis.count();
+            precomputed.biharmonic_matrix = Some(solver::build_biharmonic_matrix(
+                basis,
+                &state.collocation_points,
+                domain_bounds,
+                n,
+            ));
+        }
+    }
+}
+
+/// Generate a uniform collocation grid within the domain bounds.
+///
+/// Section 4: "consider all the points from a surrounding uniform grid
+/// that fall inside the domain"
+pub(crate) fn generate_collocation_grid(
+    bounds: &crate::model::types::DomainBounds,
+    resolution: usize,
+) -> (Vec<Vector2<f64>>, usize, usize) {
+    let dx = (bounds.x_max - bounds.x_min) / (resolution as f64 - 1.0);
+    let dy = (bounds.y_max - bounds.y_min) / (resolution as f64 - 1.0);
+
+    let mut points = Vec::with_capacity(resolution * resolution);
+
+    let res_x = resolution;
+    let res_y = resolution;
+
+    for row in 0..res_y {
+        for col in 0..res_x {
+            let x = bounds.x_min + col as f64 * dx;
+            let y = bounds.y_min + row as f64 * dy;
+            points.push(Vector2::new(x, y));
+        }
+    }
+
+    (points, res_x, res_y)
+}
+
+/// Build domain mask from collocation points and an optional domain.
+///
+/// Paper Section 4: "consider all the points from a surrounding uniform
+/// grid that fall inside the domain"
+pub(crate) fn build_domain_mask(
+    points: &[Vector2<f64>],
+    domain: Option<&dyn crate::model::domain::Domain>,
+) -> Vec<bool> {
+    match domain {
+        Some(d) => points.iter().map(|pt| d.contains(pt)).collect(),
+        None => vec![true; points.len()],
     }
 }
