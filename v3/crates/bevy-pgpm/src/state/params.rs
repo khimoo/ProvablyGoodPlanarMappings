@@ -1,7 +1,7 @@
 //! Adjustable algorithm parameters and enum types.
 
 use bevy::prelude::*;
-use pgpm_core::model::types::RegularizationType;
+use pgpm_core::RegularizationType;
 
 /// Which basis function type to use (Table 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

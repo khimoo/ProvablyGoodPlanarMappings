@@ -25,10 +25,9 @@ pub fn update_deform_material(
     let Ok(material_2d) = query.get_single() else { return };
     let Some(material) = materials.get_mut(&material_2d.0) else { return };
 
-    let coefficients = algo.coefficients();
-    let basis = algo.basis();
+    let coefficients = algo.get_coefficients();
 
-    let n_total = basis.count();
+    let n_total = coefficients.len();
     let n_rbf = n_total.saturating_sub(3);
     let n_rbf_clamped = n_rbf.min(MAX_RBF_COUNT - 3);
 
@@ -54,8 +53,8 @@ pub fn update_deform_material(
     let n_copy = (n_rbf_clamped + 3).min(MAX_RBF_COUNT).min(n_total);
     for i in 0..n_copy {
         params.coeffs[i] = RBFCoeff {
-            x: coefficients[(0, i)] as f32,
-            y: coefficients[(1, i)] as f32,
+            x: coefficients[i].x as f32,
+            y: coefficients[i].y as f32,
             _padding: Vec2::ZERO,
         };
     }

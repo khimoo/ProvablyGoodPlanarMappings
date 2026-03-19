@@ -13,7 +13,7 @@
 
 ### 局所単射性 vs 大域単射性 — LLMが必ず間違える点
 
-**Claude (opus-4-6) は論文の単射性の保証範囲を理解できない。**
+**Claude は論文の単射性の保証範囲を理解できない。**
 以下を何度説明しても「蛸の足が重なっている＝fold-over＝バグ」と誤判断し、
 勝手に修正しようとするので、ここに明記する。
 
@@ -39,7 +39,7 @@ LLMへ: 変形結果で像が重なっているという報告を受けたとき
 - メッシュ依存の処理 (本手法はメッシュレス)
 - 大域単射性を強制するための独自制約追加 (論文のアルゴリズムは局所単射性のみ保証)
 
-### 論文の参照先マッピング (ProvablyGoodPlanarMappings.md)
+### 論文の参照先マッピング
 
 | 概念 | 論文箇所 |
 |------|----------|
@@ -64,138 +64,403 @@ LLMへ: 変形結果で像が重なっているという報告を受けたとき
 | 実験パラメータ | Section 6 |
 | 基底関数と勾配モジュラス | Table 1, Appendix A |
 
+### 恒等写像とアフィン項 — 実装上の必須要件
+
+**論文 Algorithm 1 は初期状態で恒等写像 f(x) = x を要求する。**
+
+しかし、Eq. 3 の純粋な RBF 線形結合だけでは恒等写像を表現できない：
+```
+f(x) = Σ c_i φ(||x - x_i||) = x  ← 有限個の RBF では不可能
+```
+
+RBF（放射状基底関数）は放射対称であり、線形関数を正確に表現するには無限個の RBF が必要。
+
+**したがって、恒等写像を実現するためにアフィン項（多項式項）を追加する：**
+
+```
+f(x) = Σ c_i φ(||x - x_i||) + a + b·x + d·y
+
+初期状態（恒等写像）:
+  c_i = 0 (all i)
+  a = [0, 0]   (定数項)
+  b = [1, 0]   (x係数: f_x に x を追加)
+  d = [0, 1]   (y係数: f_y に y を追加)
+
+→ f(x) = 0 + [0,0] + [1,0]·x + [0,1]·y = [x, y] = x ✓
+```
+
+**これは「論文に書かれていないヒューリスティクス」ではなく、論文の要件（恒等写像からの開始）を満たすための必須の実装詳細である。**
+
+#### 実装ガイドライン
+
+1. **係数ベクトルの構造**: `[c_1, c_2, ..., c_n, a, b, d]`
+   - `c_i`: RBF 係数（n 個）
+   - `a`: 定数項
+   - `b`: x 係数
+   - `d`: y 係数
+
+2. **BasisFunction trait**: 各基底関数実装は恒等写像を構成できる必要がある
+
+3. **初期化**: `reset()` や `add_handle()` の後、係数は恒等写像で初期化される
+
+4. **evaluate_mapping()**: RBF 項 + アフィン項を両方計算
+
+5. **mapping_gradient()**: RBF 勾配 + アフィン項の Jacobian（定数行列）を両方計算
+
+---
+
+## アーキテクチャ設計方針
+
+### 核心: Trait デフォルト実装による Algorithm 1 の一元管理
+
+**`ProvablyGoodPlanarMapping` trait には Algorithm 1 の完全な実装をデフォルトメソッドとして定義する。**
+具象実装は getter メソッドのみ提供し、データ構造の差異を吸収する。
+このアプローチにより：
+
+- **Algorithm 1 は一度きり実装** -複数の具象型・Strategy 組み合わせでも同じロジック
+- **Strategy の完全な独立** - BasisFunction, DistortionStrategy 等の実装を切り替えても Algorithm 1 は変わらない
+- **テスト性の最大化** - trait のデフォルト実装をテストすれば全ての組み合わせが検証される
+- **保守性の向上** - バグ修正は trait に一度。全ての具象型に自動反映
+
+### Trait と Strategy の全体構成
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ProvablyGoodPlanarMapping (trait)                              │
+│  ───────────────────────────────────────────────────────────────│
+│                                                                 │
+│  必須メソッド (各実装で定義)                                   │
+│  ├─ get_coefficients() / get_coefficients_mut()                │
+│  ├─ get_domain() / get_domain_mut()                            │
+│  ├─ get_active_set() / get_active_set_mut()                   │
+│  ├─ get_handles()                                              │
+│  ├─ get_basis_function()          ← Strategy 注入点           │
+│  ├─ get_distortion_strategy()     ← Strategy 注入点           │
+│  ├─ get_regularization()          ← Strategy 注入点           │
+│  ├─ get_solver()                  ← Strategy 注入点           │
+│  └─ get_algorithm_state() / get_algorithm_state_mut()         │
+│                                                                 │
+│  デフォルト実装 (Algorithm 1)                                 │
+│  ├─ algorithm_step()                    Eq. 14-20             │
+│  ├─ evaluate_mapping()                  Eq. 3                 │
+│  ├─ mapping_gradient()                  Eq. 3 の微分          │
+│  ├─ mapping_jacobian_determinant()                            │
+│  ├─ verify_local_injectivity()          局所単射性確認       │
+│  ├─ update_active_set_internal()        Eq. 14-17            │
+│  ├─ compute_distortion_internal()       Eq. 10-13 計算       │
+│  ├─ build_socp_problem_internal()       Eq. 18 定式化         │
+│  └─ check_convergence_internal()        収束判定              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+         △           △           △           △
+         │impl       │impl       │impl       │impl
+         │           │           │           │
+    ┌────┴─────┐ ┌──┴────────┐ ┌──┴─────────┐ ┌──┴──────────────┐
+    │ BasisFn  │ │ Distortion│ │Regularization │ SOCPSolver      │
+    │ (trait)  │ │(trait)    │ │ (trait)      │ (trait)         │
+    └──────────┘ └───────────┘ └──────────────┘ └─────────────────┘
+         △           △           △           △
+         │impl       │impl       │impl       │impl
+         │           │           │           │
+    ┌────┴────┐ ┌────┴──────┐ ┌──┴──────┐ ┌──┴───────────┐
+    │Gaussian │ │Isometric  │ │Biharmonic │ MosekSolver  │
+    │B-Spline │ │Conformal  │ │ARAP       │ CvxpySolver  │
+    │TPS      │ └───────────┘ └───────────┘ └──────────────┘
+    └─────────┘
+         △
+         │impl
+         │
+    ┌────────────┐
+    │ PGPMv2     │  ← 具象実装。getter のみ。
+    │ (struct)   │     デフォルト実装は全て trait から
+    └────────────┘
+```
+
+---
+
 ## プロジェクト構成
 
 ```
 v3/
-├── CLAUDE.md                    # このファイル
-├── DESIGN.md                    # 設計書
-├── Cargo.toml                   # ワークスペースルート
-├── crates/
-│   ├── pgpm-core/               # 論文アルゴリズムの純粋実装
-│   │   ├── Cargo.toml
-│   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── types.rs
-│   │   │   ├── basis/           # 基底関数 (Table 1)
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── gaussian.rs  # ✅ Phase 1: ユークリッド距離Gaussian
-│   │   │   │   ├── shape_aware_gaussian.rs # ✅ Phase 3: 測地距離Gaussian
-│   │   │   │   ├── bspline.rs   # ⬜ Phase 3
-│   │   │   │   └── tps.rs       # ⬜ Phase 3
-│   │   │   ├── geodesic.rs      # ✅ FMM測地距離計算 (Section "Shape aware bases")
-│   │   │   ├── distortion.rs    # ✅ 歪み計算 (Eq. 19-20)
-│   │   │   ├── active_set.rs    # ✅ Active set管理 (Algorithm 1)
-│   │   │   ├── solver.rs        # ✅ SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
-│   │   │   ├── strategy.rs      # ✅ Strategy 2 (Eq. 11, 14); ⬜ Phase 3: Strategy 1/3 (Eq. 15-17)
-│   │   │   └── algorithm.rs     # ✅ Algorithm 1 統合
-│   │   └── tests/
-│   │       └── integration_verify.rs
-│   └── bevy-pgpm/               # Phase 2: Bevy統合 (レンダリング・UI)
-│       ├── Cargo.toml
-│       ├── src/
-│       │   ├── main.rs          # Bevy app setup, カメラ
-│       │   ├── lib.rs           # モジュール宣言
-│       │   ├── lifecycle.rs     # 画像ロード・アルゴリズムステップ
-│       │   ├── input.rs         # マウス入力 (ハンドル配置・ドラッグ)
-│       │   ├── domain/          # ドメインユーティリティ (Bevy非依存部分)
-│       │   │   ├── coords.rs    # 座標変換 (pixel <-> world) 一元管理
-│       │   │   ├── rbf.rs       # RBFスケール計算
-│       │   │   └── image_loader.rs # 画像読み込み・輪郭抽出
-│       │   ├── state/           # Bevy Resource定義 (責務分割)
-│       │   │   ├── algorithm.rs # AlgorithmState (アルゴリズム・ハンドル)
-│       │   │   ├── interaction.rs # DragState (ドラッグUI状態)
-│       │   │   ├── params.rs    # AlgoParams, BasisType, RegMode
-│       │   │   ├── image_info.rs # ImageInfo, ImagePathConfig
-│       │   │   └── display_info.rs # DeformationInfo (表示用)
-│       │   ├── rendering/
-│       │   │   ├── mesh.rs      # メッシュ生成
-│       │   │   ├── material.rs  # カスタムマテリアル + identity()
-│       │   │   ├── gpu_deform.rs # GPU変形パス (シェーダuniform更新)
-│       │   │   └── cpu_deform.rs # CPU変形パス (頂点位置更新)
-│       │   └── ui/              # UI (責務分割)
-│       │       ├── markers.rs   # マーカーコンポーネント定義
-│       │       ├── panel.rs     # パネル構築
-│       │       ├── actions.rs   # ボタンアクション
-│       │       ├── display.rs   # テキスト更新・ボタン視覚フィードバック
-│       │       └── gizmos.rs    # ハンドル描画
-│       └── assets/
-└── assets/
+├── CLAUDE.md                          # このファイル
+├── Cargo.toml                         # ワークスペースルート
+└── crates/
+    ├── pgpm-core/                     # 論文アルゴリズムの純粋実装
+    │   ├── Cargo.toml
+    │   ├── src/
+    │   │   ├── lib.rs                 # モジュール宣言
+    │   │   ├── types.rs               # 共通データ型定義
+    │   │   │
+    │   │   ├── mapping/
+    │   │   │   ├── mod.rs             # ProvablyGoodPlanarMapping trait
+    │   │   │   ├── concrete.rs        # PGPMv2 具象実装
+    │   │   │   └── state.rs           # AlgorithmState, DomainInfo など
+    │   │   │
+    │   │   ├── strategy/
+    │   │   │   ├── mod.rs             # Strategy trait 群
+    │   │   │   ├── basis/
+    │   │   │   │   ├── mod.rs         # BasisFunction trait (Table 1)
+    │   │   │   │   ├── gaussian.rs    # Gaussian φ(r) = exp(-(r/s)²)
+    │   │   │   │   ├── bspline.rs     # B-Spline (Phase 3)
+    │   │   │   │   └── tps.rs         # TPS (Phase 3)
+    │   │   │   ├── distortion/
+    │   │   │   │   ├── mod.rs         # DistortionStrategy trait
+    │   │   │   │   ├── isometric.rs   # Isometric (Eq. 10-11)
+    │   │   │   │   └── conformal.rs   # Conformal (Eq. 12-13, Phase 3)
+    │   │   │   ├── regularization/
+    │   │   │   │   ├── mod.rs         # RegularizationStrategy trait
+    │   │   │   │   ├── biharmonic.rs  # Biharmonic (Eq. 31)
+    │   │   │   │   └── arap.rs        # ARAP (Eq. 32-33, Phase 3)
+    │   │   │   └── solver/
+    │   │   │       ├── mod.rs         # SOCPSolverBackend trait
+    │   │   │       ├── mosek.rs       # Mosek バックエンド
+    │   │   │       └── cvxpy.rs       # cvxpy バックエンド (Phase 3)
+    │   │   │
+    │   │   ├── math/
+    │   │   │   ├── distortion.rs      # Eq. 19-20: σ計算
+    │   │   │   ├── geodesic.rs        # FMM 測地距離 (Phase 3)
+    │   │   │   └── rbf.rs             # RBF スケール計算
+    │   │   │
+    │   │   └── tests/
+    │   │       ├── integration_test.rs # Algorithm 1 統合テスト
+    │   │       └── strategy_test.rs    # Strategy テスト
+    │   │
+    │   └── Cargo.toml
+    │
+    └── bevy-pgpm/                     # UI/レンダリング層 (Phase 2+)
+        ├── Cargo.toml
+        ├── src/
+        │   ├── main.rs                # Bevy app setup
+        │   ├── lib.rs
+        │   ├── bridge.rs              # MappingBridge (core ↔ UI)
+        │   ├── state/                 # Bevy Resource
+        │   │   ├── algorithm.rs       # AlgorithmManager
+        │   │   ├── interaction.rs     # DragState
+        │   │   └── display.rs         # VisualizationState
+        │   ├── systems/               # Bevy System
+        │   │   ├── input.rs           # マウス入力処理
+        │   │   ├── algorithm.rs       # algorithm_step() 呼び出し
+        │   │   └── rendering.rs       # 描画更新
+        │   ├── rendering/
+        │   │   ├── mesh.rs            # メッシュ生成
+        │   │   ├── material.rs        # カスタムシェーダ
+        │   │   └── deform.rs          # GPU/CPU 変形計算
+        │   └── ui/
+        │       ├── panel.rs           # UI パネル構築
+        │       ├── actions.rs         # ボタンアクション
+        │       └── gizmos.rs          # ハンドル可視化
+        │
+        └── Cargo.toml
 ```
+
+---
 
 ## 実装フェーズ
 
 | Phase | 内容 | 状態 |
 |-------|------|------|
-| **Phase 1** | pgpm-core 最小構成 (Gaussian + Isometric + Algorithm 1) | ✅ 完了 |
-| **Phase 2** | bevy-pgpm UI構築 (Gaussian + Isometric のみで動作) | ⬜ 次 |
-| **Phase 3** | pgpm-core 完成 (Strategy, B-Spline, TPS) + bevy-pgpm 拡張 | ⬜ |
+| **Phase 1** | ProvablyGoodPlanarMapping trait + PGPMv2 + Gaussian + Isometric | ✅ **完了** |
+| **Phase 2** | bevy-pgpm UI (Phase 1 成果物を使用) + SOCP ソルバー統合 | ⬜ 次 |
+| **Phase 3** | Strategy 拡張 (B-Spline, TPS, Conformal, ARAP, Strategy 1/3) | ⬜ |
 
-**Phase 2 の方針**: pgpm-core の Phase 1 成果物のみで動作するUIを構築する。
-Phase 3 の未実装機能はスタブ/無効化で対応し、UIレベルで制限を明示する。
-- Strategy 1/2/3 → `verify_and_refine()` は `CannotGuarantee` を返す → UIで「未検証」表示
-- B-Spline / TPS → 基底選択UIでは Gaussian のみ有効
-- Conformal → Isometric モードのみ使用可能
+**Phase 2 への引き継ぎドキュメント:** `/docs/PHASE2_HANDOFF.md`
+
+### Phase 1: 基盤実装 ✅ **完了**
+
+**目標**: ProvablyGoodPlanarMapping trait とその最小実装を完成させる
+
+**完成した実装項目:**
+1. **ProvablyGoodPlanarMapping trait**
+   - 必須メソッド（getter）の定義
+   - Algorithm 1 のデフォルト実装
+   - 写像評価・検証メソッド
+
+2. **PGPMv2 具象実装**
+   - getter のみ実装
+   - Domain, HandleSet, ActiveSet, AlgorithmState の管理
+
+3. **BasisFunction trait + GaussianBasis**
+   - φ(r) = exp(-(r/s)²)
+   - 1階・2階微分の計算
+
+4. **DistortionStrategy trait + IsometricStrategy**
+   - σ_iso 計算 (Eq. 10-11)
+   - K_high, K_low による active set 更新
+
+5. **RegularizationStrategy trait + BiharmonicRegularization**
+   - Eq. 31: ∇²∇² f のエネルギー
+   - Eq. 29-30: ハンドル位置拘束
+
+6. **SOCPSolverBackend trait + MosekSolver**
+   - Eq. 18: SOCP 問題構築
+   - Mosek による求解
+
+7. **テスト**
+   - Algorithm 1 が正しく収束するか
+   - 歪み計算が正確か
+   - 局所単射性が保証されるか
+
+### Phase 2: UI統合
+
+**目標**: bevy-pgpm で Phase 1 を可視化・操作可能にする
+
+実装項目:
+1. **MappingBridge**
+   - pgpm-core と Bevy UI の仲介
+   - trait オブジェクト管理
+
+2. **Bevy 統合**
+   - 画像ロード・輪郭抽出
+   - ハンドル配置・ドラッグ
+   - リアルタイム変形レンダリング
+
+3. **パラメータUI**
+   - 基底関数選択 (Gaussian のみ)
+   - 歪みモード (Isometric のみ)
+   - アルゴリズムステップ実行
+
+### Phase 3: 機能完成
+
+**目標**: 論文の全ての Strategy を実装
+
+実装項目:
+1. **基底関数拡張** (BasisFunction trait の既存実装に追加)
+   - BSplineBasis (Section 4.2)
+   - TPSBasis (Appendix A.3)
+
+2. **歪み戦略拡張** (DistortionStrategy trait に追加)
+   - ConformalStrategy (Eq. 12-13)
+
+3. **正則化拡張** (RegularizationStrategy trait に追加)
+   - ARAPRegularization (Eq. 32-33)
+
+4. **検証ステップ** (Algorithm 1)
+   - Strategy 1: Local maxima filtering
+   - Strategy 2: Isometric constraint tightening
+   - Strategy 3: Mixed objective refinement
+
+5. **測地距離ベース基底関数**
+   - GeodesicGaussian (Shape-aware bases)
+
+---
+
+## トレイト定義の指針
+
+### ProvablyGoodPlanarMapping Trait
+
+```rust
+pub trait ProvablyGoodPlanarMapping: Send + Sync {
+    // 必須メソッド（各実装で定義）
+    fn get_coefficients(&self) -> &[Vec2];
+    fn get_coefficients_mut(&mut self) -> &mut Vec<Vec2>;
+    fn get_domain(&self) -> &DomainInfo;
+    fn get_active_set(&self) -> &ActiveSetInfo;
+    fn get_active_set_mut(&mut self) -> &mut ActiveSet;
+    fn get_handles(&self) -> &[HandleInfo];
+    fn get_basis_function(&self) -> &dyn BasisFunction;
+    fn get_distortion_strategy(&self) -> &dyn DistortionStrategy;
+    fn get_regularization(&self) -> &dyn RegularizationStrategy;
+    fn get_solver(&self) -> &dyn SOCPSolverBackend;
+    fn get_algorithm_state(&self) -> &AlgorithmState;
+    fn get_algorithm_state_mut(&mut self) -> &mut AlgorithmState;
+
+    // デフォルト実装（Algorithm 1）
+    fn algorithm_step(&mut self) -> Result<AlgorithmStepResult> { ... }
+    fn evaluate_mapping(&self, point: Vec2) -> Vec2 { ... }
+    fn verify_local_injectivity(&self) -> Result<VerificationResult> { ... }
+    // ... その他
+}
+```
+
+### Strategy Traits
+
+各 Strategy は **単一の責務**を持つ trait として定義する：
+
+- **BasisFunction** (Table 1)
+  - `evaluate(r)` - φ(r) の計算
+  - `gradient_scaled(r)` - φ'(r)/r
+  - `hessian_scaled(r)` - φ''(r)/r
+
+- **DistortionStrategy** (Eq. 10-13, 14-17)
+  - `compute_distortion(jacobian)` - σ計算
+  - `get_activation_threshold()` - (K_high, K_low)
+
+- **RegularizationStrategy** (Eq. 29-33)
+  - `build_energy_constraints()` - エネルギー項構築
+
+- **SOCPSolverBackend** (Eq. 18)
+  - `solve(problem)` - 最適化問題求解
+
+---
+
+## 開発時の注意
+
+- **ビルド・実行は必ず `nix develop` シェル内で行うこと**
+  - Bevy の依存 (Vulkan, X11 等) が必要
+
+- **コードにコメントを書く際、必ず論文の式番号を付記すること**
+  - 例: `// Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||`
+
+- **trait のデフォルト実装はテスト対象**
+  - pgpm-core のテストで Algorithm 1 全体の正確性を検証すること
+  - Strategy を Mock に置き換えて独立テスト可能にすること
+
+- **パフォーマンスチューニングは論文の範囲内で行うこと**
+  - サンプリング: 200² グリッド (Section 6)
+  - K_high, K_low: 論文のデフォルト値を使用
+
+- **新しい Strategy を実装する際**
+  - 既存の trait を継承して実装
+  - trait のデフォルト実装に手を加えない
+  - Phase 3 以降で追加される trait 実装は、既存の Algorithm 1 ロジックと互換性があるか確認すること
+
+### bevy-pgpm 開発時の注意
+
+- pgpm-core の public API（ProvablyGoodPlanarMapping trait）のみを使用
+- 内部実装に依存しない
+- SOCP 求解はブロッキングなので、フレーム内で `algorithm_step()` は最大1回まで
+- UI の状態管理は Bevy の `States` + `Resource` パターンで実装
+
+---
 
 ## コード品質の指針
 
-凝集度・結合度・Clean Architectureの考え方に基づき、良いコードを心掛ける。
+凝集度・結合度・Clean Architecture の考え方に基づき、良いコードを心掛ける。
 
 ### 凝集度 (モジュール内の協調度。高いほど良い)
 
 | レベル | 凝集度 | 説明 | 方針 |
 |--------|--------|------|------|
-| 1 (最低) | 偶発的凝集 | 無関係な処理の寄せ集め。「とりあえず動く」状態 | **必ず避ける** |
+| 1 (最低) | 偶発的凝集 | 無関係な処理の寄せ集め | **必ず避ける** |
 | 2 | 論理的凝集 | フラグで動作を切り替える共通化 | **可能な限り避ける** |
-| 3 | 時間的凝集 | 同時期に実行する処理の集合（初期化等）。順序入替可 | できるだけ小さく保つ |
-| 4 | 手続き的凝集 | 順番に意味のある処理の集合 | できるだけ小さく保つ |
-| 5 | 通信的凝集 | 同じデータを扱う処理の集合。順序は不問 | 許容 |
-| 6 | 逐次的凝集 | 前の出力が次の入力となる処理の集合 | 良い |
-| 7 (最高) | 機能的凝集 | 単一の明確なタスクを実現し、これ以上分解できない | **目指すべき状態** |
-
-- 凝集度はモジュール内の**一番低いレベル**で評価する
-- 関数分割のしすぎは認知負荷を上げる。意味のわかる単位で区切ること
+| 3 | 時間的凝集 | 同時期に実行する処理の集合 | 小さく保つ |
+| 4 | 手続き的凝集 | 順番に意味のある処理の集合 | 小さく保つ |
+| 5 | 通信的凝集 | 同じデータを扱う処理の集合 | 許容 |
+| 6 | 逐次的凝集 | 前の出力が次の入力となる処理 | 良い |
+| 7 (最高) | 機能的凝集 | 単一の明確なタスク実現 | **目指すべき** |
 
 ### 結合度 (モジュール間の依存度。低いほど良い)
 
 | レベル | 結合度 | 説明 | 方針 |
 |--------|--------|------|------|
-| 1 (最高) | 内部結合 | 非公開データへの直接アクセス（リフレクション等） | **必ず避ける** |
-| 2 | 共通結合 | 複数モジュールが同じグローバルデータにアクセス | **避ける** |
-| 3 | 外部結合 | 標準化インターフェース経由でのグローバルアクセス | やむを得ない場合のみ |
-| 4 | 制御結合 | フラグで他モジュールの処理フローを制御 | **避ける** |
-| 5 | スタンプ結合 | 構造体/クラス全体の受け渡し（不要データを含みうる） | 必要最小限に |
-| 6 | データ結合 | プリミティブ型など必要最小限のデータの受け渡し | 良い |
-| 7 (最低) | メッセージ結合 | 引数なしのやりとり（タイミングのみ伝達） | **理想的** |
-
-- 凝集度が高くなれば結合度は低くなる傾向がある
+| 1 (最高) | 内部結合 | 非公開データへのアクセス | **必ず避ける** |
+| 2 | 共通結合 | グローバルデータ共有 | **避ける** |
+| 3 | 外部結合 | 標準化 IF経由グローバル | やむを得ない場合のみ |
+| 4 | 制御結合 | フラグで処理フロー制御 | **避ける** |
+| 5 | スタンプ結合 | 構造体全体受け渡し | 最小限に |
+| 6 | データ結合 | プリミティブ型受け渡し | 良い |
+| 7 (最低) | メッセージ結合 | 引数なし呼び出し | **理想的** |
 
 ### Clean Architecture
 
-- レイヤーに分離し**関心事の分離**を行う
-- 依存は**内側（ビジネスロジック）にのみ**向ける。外側（UI、DB、フレームワーク）に依存しない
-- 境界を超えるデータは単純なデータ構造を使い、内側が外側の知識を持たないようにする
-- 内側から外側への情報伝達にはストリームや依存関係逆転（インターフェース）を使う
+- レイヤーに分離し関心事の分離を行う
+- 依存は**内側（コア・ロジック）にのみ**向ける
+- UI（bevy-pgpm）はコア（pgpm-core）に依存。その逆は不可
+- 境界を超えるデータは単純なデータ構造
+- Strategy trait を通じた依存関係逆転で柔軟性を確保
 
-### 適切にエラーハンドリングすること.
-AIはすぐにフォールバックしようとするが, warningやerrorが良いタイミングもよね
+### 適切なエラーハンドリング
 
-## 開発時の注意
-
-- **ビルド・実行は必ず `nix develop` シェル内で行うこと**
-  - `nix develop` で開発シェルに入った後に `cargo build`, `cargo run` 等を実行する
-  - もしくは `nix run` でそのまま実行可能
-  - Nix 外でビルドすると Bevy の依存ライブラリ (Vulkan, X11, Wayland 等) が見つからない
-- コードにコメントを書く際、必ず論文の式番号を付記すること
-  - 例: `// Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||`
-- テストケースは論文 Section 6 の実験設定を再現すること
-- パフォーマンスチューニングは論文の範囲内で行うこと（例: 200²グリッド）
-
-### bevy-pgpm 開発時の注意 (Phase 2)
-
-- pgpm-core の公開APIのみを使用し、内部実装に依存しないこと
-- Phase 3 未実装の機能を呼び出す箇所には `// Phase 3: ...` コメントを残すこと
-- SOCP求解はブロッキングなので、フレーム内で `step()` を1回のみ呼ぶこと
-  - 将来の非同期化が必要になったら Phase 3 以降で検討
-- GPU レンダリング (頂点シェーダでの写像評価) は v2 の `deform.wgsl` を参考にすること
-- UI の状態管理は Bevy の `States` + `Resource` パターンで行うこと
+- LLM（Claude）がすぐにフォールバックしようとするが、warning や error が適切な場合も多い
+- fold-over 検出時は panic/error ではなく検証結果として報告すること
+- SOCP 求解失敗は重大エラー（solver backend の問題の可能性）

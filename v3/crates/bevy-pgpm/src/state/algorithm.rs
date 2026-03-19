@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
-use pgpm_core::mapping::MappingBridge;
+use pgpm_core::MappingBridge;
 
 /// Core algorithm state, used by the solver and rendering systems.
 #[derive(Resource)]

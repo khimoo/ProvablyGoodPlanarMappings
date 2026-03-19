@@ -4,9 +4,8 @@ use bevy::prelude::*;
 use bevy::sprite::MeshMaterial2d;
 
 use nalgebra::Vector2;
-use pgpm_core::mapping::MappingBridge;
-use pgpm_core::model::domain::{Domain, PolygonDomain};
-use pgpm_core::model::types::{DomainBounds, MappingParams, SolverConfig};
+use pgpm_core::bridge::{MappingBridge, MappingParams};
+use pgpm_core::{DomainInfo, DomainBoundary};
 
 use crate::domain::rbf::compute_rbf_scale;
 use crate::rendering::{DeformMaterial, DeformUniform};
@@ -318,83 +317,71 @@ fn push_params(params: &AlgoParams, algo_state: &mut AlgorithmState) {
 /// Construct a pgpm-core mapping from UI parameters and handle positions.
 ///
 /// This is the bridge between bevy-pgpm's UI types (`AlgoParams`, `BasisType`)
-/// and pgpm-core's algorithm types (`MappingParams`, `BasisFunction`, `Domain`).
+/// and pgpm-core's algorithm types via the MappingBridge compatibility layer.
 fn build_mapping(
     source_handles: &[Vector2<f64>],
     image_width: f64,
     image_height: f64,
     algo_params: &AlgoParams,
     contour: &[(f32, f32)],
-    holes: &[Vec<(f32, f32)>],
+    _holes: &[Vec<(f32, f32)>],
 ) -> Box<dyn MappingBridge> {
-    let epsilon = algo_params.epsilon;
-    let domain = DomainBounds {
-        x_min: -epsilon,
-        x_max: image_width + epsilon,
-        y_min: -epsilon,
-        y_max: image_height + epsilon,
+    use pgpm_core::*;
+
+    // 1. Create domain from contour
+    let boundary = DomainBoundary {
+        points: contour
+            .iter()
+            .map(|&(x, y)| Vector2::new(x as f64, y as f64))
+            .collect(),
     };
 
-    let s = compute_rbf_scale(source_handles, image_width, image_height);
-
-    let contour_v2: Vec<Vector2<f64>> = contour
-        .iter()
-        .map(|&(x, y)| Vector2::new(x as f64, y as f64))
-        .collect();
-
-    let holes_v2: Vec<Vec<Vector2<f64>>> = holes
-        .iter()
-        .map(|hole| {
-            hole.iter()
-                .map(|&(x, y)| Vector2::new(x as f64, y as f64))
-                .collect()
-        })
-        .collect();
-
-    let basis: Box<dyn pgpm_core::basis::BasisFunction> = match algo_params.basis_type {
-        BasisType::Gaussian => {
-            Box::new(pgpm_core::basis::gaussian::GaussianBasis::new(
-                source_handles.to_vec(),
-                s,
-            ))
-        }
-        BasisType::ShapeAwareGaussian => {
-            let fmm_resolution = 256;
-            Box::new(
-                pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis::new(
-                    source_handles.to_vec(),
-                    s,
-                    &contour_v2,
-                    &domain,
-                    fmm_resolution,
-                ),
-            )
-        }
-    };
-
-    let params = MappingParams {
-        k_bound: algo_params.k_bound,
-        lambda_reg: algo_params.reg_mode.effective_lambda(algo_params.lambda_reg),
-        regularization: algo_params.reg_mode.to_core(
-            algo_params.lambda_arap,
-            algo_params.lambda_bh,
-        ),
-    };
-
-    let algo_domain: Option<Box<dyn Domain>> = if contour_v2.is_empty() {
-        None
+    // Eq. 5: Filling distance η = max_x min_j ||x - x_j||
+    // Approximate as diagonal divided by number of points
+    let filling_distance = if source_handles.is_empty() {
+        (image_width * image_width + image_height * image_height).sqrt() / 10.0
     } else {
-        Some(Box::new(PolygonDomain::new(contour_v2, holes_v2)))
+        let diag = (image_width * image_width + image_height * image_height).sqrt();
+        diag / (source_handles.len() as f64).sqrt()
     };
 
-    pgpm_core::create_isometric_mapping(
-        basis,
-        params,
-        domain,
-        source_handles.to_vec(),
-        algo_params.grid_resolution,
-        algo_params.fps_k,
-        algo_domain,
-        SolverConfig::default(),
-    )
+    let domain = DomainInfo {
+        boundary,
+        filling_distance,
+    };
+
+    // 2. Create basis function
+    let s = compute_rbf_scale(source_handles, image_width, image_height);
+    let basis: Box<dyn BasisFunction> = match algo_params.basis_type {
+        BasisType::Gaussian => Box::new(GaussianBasis::new(s)),
+        BasisType::ShapeAwareGaussian => {
+            log::warn!("ShapeAwareGaussian not yet implemented (Phase 3), using Gaussian");
+            Box::new(GaussianBasis::new(s))
+        }
+    };
+
+    // 3. Create distortion strategy (always isometric for Phase 2)
+    let distortion = Box::new(IsometricStrategy::new(
+        algo_params.k_bound,
+        algo_params.k_bound * 0.95, // K_low slightly less than K_high
+    ));
+
+    // 4. Create regularization
+    let regularization = Box::new(BiharmonicRegularization::new(algo_params.lambda_reg));
+
+    // 5. Create solver
+    let solver = Box::new(ClarabelSolver::default());
+
+    // 6. Create PGPMv2 instance
+    let mut mapping = PGPMv2::new(domain, basis, distortion, regularization, solver);
+
+    // 7. Add handles
+    for (id, &pos) in source_handles.iter().enumerate() {
+        mapping.add_handle(id, pos, pos).unwrap_or_else(|e| {
+            log::error!("Failed to add handle {}: {}", id, e);
+        });
+    }
+
+    // 8. Wrap in bridge for compatibility
+    Box::new(PGPMv2Bridge::new(mapping))
 }
