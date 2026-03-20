@@ -26,7 +26,7 @@ pub fn update_status_text(
     algo_state: Res<AlgorithmState>,
     mut query: Query<(&mut Text, &mut TextColor), With<StatusText>>,
 ) {
-    let Ok((mut text, mut color)) = query.get_single_mut() else { return };
+    let Ok((mut text, mut color)) = query.single_mut() else { return };
     match state.get() {
         AppState::Setup => {
             let n = algo_state.source_handles.len();
@@ -59,7 +59,7 @@ pub fn update_toggle_label(
 ) {
     for entity in &query {
         if let Ok(children) = children_q.get(entity) {
-            for &child in children.iter() {
+            for child in children.iter() {
                 if let Ok(mut txt) = text_q.get_mut(child) {
                     **txt = match state.get() {
                         AppState::Setup => "\u{f04b}  Start Deforming".to_string(),
@@ -103,7 +103,7 @@ pub fn update_reg_mode_label(
     if !params.is_changed() { return; }
     for entity in &query {
         if let Ok(children) = children_q.get(entity) {
-            for &child in children.iter() {
+            for child in children.iter() {
                 if let Ok(mut txt) = text_q.get_mut(child) {
                     **txt = params.reg_mode.label().to_string();
                 }
@@ -122,7 +122,7 @@ pub fn update_basis_type_label(
     if !params.is_changed() { return; }
     for entity in &query {
         if let Ok(children) = children_q.get(entity) {
-            for &child in children.iter() {
+            for child in children.iter() {
                 if let Ok(mut txt) = text_q.get_mut(child) {
                     **txt = params.basis_type.label().to_string();
                 }

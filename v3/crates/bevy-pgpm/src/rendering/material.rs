@@ -5,8 +5,9 @@
 //! simply samples the source texture at the original UV coordinates.
 
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderRef, ShaderType};
-use bevy::sprite::Material2d;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
+use bevy::sprite_render::{AlphaMode2d, Material2d};
 
 /// Maximum number of RBF centers supported in the uniform buffer.
 /// The shader uses a fixed-size array for GPU compatibility.
@@ -89,5 +90,9 @@ impl Material2d for DeformMaterial {
 
     fn fragment_shader() -> ShaderRef {
         "shaders/deform.wgsl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
     }
 }

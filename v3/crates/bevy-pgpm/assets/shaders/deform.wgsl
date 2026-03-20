@@ -29,9 +29,9 @@ struct DeformUniform {
     coeffs: array<RBFCoeff, 256>,
 }
 
-@group(2) @binding(0) var source_texture: texture_2d<f32>;
-@group(2) @binding(1) var source_sampler: sampler;
-@group(2) @binding(2) var<uniform> uniforms: DeformUniform;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var source_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var source_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> uniforms: DeformUniform;
 
 /// Gaussian RBF: φ(r²) = exp(-r² / (2s²))
 fn rbf_basis(r_squared: f32, s_param: f32) -> f32 {
@@ -72,7 +72,6 @@ fn evaluate_forward_mapping(pos: vec2<f32>) -> vec2<f32> {
 @vertex
 fn vertex(
     @builtin(instance_index) instance_index: u32,
-    @builtin(vertex_index) vertex_index: u32,
     @location(0) position: vec3<f32>,
     @location(2) uv: vec2<f32>,
 ) -> VertexOutput {
@@ -95,6 +94,7 @@ fn vertex(
     let model = mesh2d_functions::get_world_from_local(instance_index);
     out.world_position = mesh2d_functions::mesh2d_position_local_to_world(model, local_pos);
     out.position = mesh2d_functions::mesh2d_position_local_to_clip(model, local_pos);
+    out.world_normal = vec3<f32>(0.0, 0.0, 1.0);
     out.uv = uv;
 
     return out;
@@ -102,6 +102,5 @@ fn vertex(
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSample(source_texture, source_sampler, in.uv);
-    return color;
+    return textureSample(source_texture, source_sampler, in.uv);
 }

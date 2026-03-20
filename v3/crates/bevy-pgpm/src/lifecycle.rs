@@ -1,7 +1,9 @@
 //! Lifecycle systems: image loading/reloading and algorithm stepping.
 
 use bevy::prelude::*;
-use bevy::sprite::MeshMaterial2d;
+use bevy::image::Image as BevyImage;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use log::{info, warn, error};
 use image::GenericImageView;
 
 use crate::domain::image_loader::extract_contour_from_image;
@@ -14,7 +16,7 @@ use crate::state::{
 pub fn load_image(
     mut commands: Commands,
     mut path_config: ResMut<ImagePathConfig>,
-    asset_server: Res<AssetServer>,
+    mut images: ResMut<Assets<BevyImage>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<DeformMaterial>>,
     existing_image: Query<Entity, With<DeformedImage>>,
@@ -30,9 +32,22 @@ pub fn load_image(
     let abs_path = &path_config.abs_path;
     info!("Loading image from: {}", abs_path);
 
-    let Some((image_width, image_height)) = load_image_dimensions(abs_path) else {
-        return;
+    // Load the image with the `image` crate (for dimensions, contour, AND GPU texture).
+    // By loading manually and inserting into Assets<Image>, we bypass AssetServer
+    // path resolution issues entirely.
+    let img = match image::open(abs_path) {
+        Ok(img) => img,
+        Err(e) => {
+            error!("Failed to load image '{}': {}", abs_path, e);
+            return;
+        }
     };
+
+    let (w, h) = img.dimensions();
+    let image_width = w as f32;
+    let image_height = h as f32;
+    info!("Image dimensions: {}x{}", w, h);
+
     let contour_data = extract_contour_from_image(abs_path);
     let contour = contour_data.outer;
     let holes = contour_data.holes;
@@ -47,7 +62,17 @@ pub fn load_image(
         );
     }
 
-    let image_handle: Handle<Image> = asset_server.load(abs_path.to_string());
+    // Convert to RGBA8 and insert directly into Bevy's Assets<Image>.
+    // This avoids AssetServer path resolution issues entirely.
+    let rgba = img.to_rgba8();
+    let bevy_image = BevyImage::new(
+        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        rgba.into_raw(),
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    let image_handle = images.add(bevy_image);
 
     commands.insert_resource(ImageInfo {
         width: image_width,
@@ -128,19 +153,4 @@ pub fn update_deformation(
     algo_state.needs_solve = false;
 }
 
-// Private helpers
-
-fn load_image_dimensions(abs_path: &str) -> Option<(f32, f32)> {
-    match image::open(abs_path) {
-        Ok(img) => {
-            let (w, h) = img.dimensions();
-            info!("Image dimensions: {}x{}", w, h);
-            Some((w as f32, h as f32))
-        }
-        Err(e) => {
-            error!("Failed to load image '{}': {}", abs_path, e);
-            None
-        }
-    }
-}
 

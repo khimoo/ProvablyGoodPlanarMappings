@@ -7,6 +7,7 @@
 //! GUI panel in `ui/`.
 
 use bevy::prelude::*;
+use log::info;
 
 use crate::domain::coords::ImageCoords;
 use crate::state::{AlgorithmState, AppState, DragState, ImageInfo, MainCamera};
@@ -28,8 +29,8 @@ pub fn handle_input(
     ui_interaction: Query<&Interaction, With<Button>>,
 ) {
     let Some(image_info) = image_info else { return };
-    let Ok(window) = windows.get_single() else { return };
-    let Ok((camera, cam_transform)) = camera_q.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, cam_transform)) = camera_q.single() else { return };
 
     // If any UI button is being interacted with, don't process canvas clicks
     let ui_active = ui_interaction.iter().any(|i| *i != Interaction::None);

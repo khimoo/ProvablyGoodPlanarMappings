@@ -5,8 +5,8 @@
 //! original position as UV for texture lookup.
 
 use bevy::prelude::*;
-use bevy::render::mesh::Indices;
-use bevy::render::render_asset::RenderAssetUsages;
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::Indices;
 use bevy::render::render_resource::PrimitiveTopology;
 use delaunator::{triangulate, Point};
 use geo::{Contains, Coord, LineString, Polygon};

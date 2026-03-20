@@ -9,16 +9,25 @@ pgpm-core = { path = "../pgpm-core" }
 log = "0.4"
 nalgebra = "0.33"
 
-bevy = { version = "0.15", default-features = false, features = [
+bevy = { version = "0.18", default-features = false, features = [
+    # Core
     "bevy_asset",
     "bevy_winit",
-    "bevy_core_pipeline",
-    "bevy_render",
-    "bevy_sprite",
-    "bevy_gizmos",
-    "bevy_ui",
-    "bevy_text",
     "bevy_state",
+    "bevy_image",
+    # Rendering pipeline
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_camera",
+    "bevy_shader",
+    # 2D rendering (bevy_sprite_render includes bevy_sprite)
+    "bevy_sprite_render",
+    # Gizmos rendering (bevy_gizmos_render includes bevy_gizmos)
+    "bevy_gizmos_render",
+    # UI rendering (bevy_ui_render includes bevy_ui)
+    "bevy_ui_render",
+    "bevy_text",
+    # Platform
     "default_font",
     "png",
     "multi_threaded",

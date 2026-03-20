@@ -4,7 +4,6 @@
 //! basis values directly.
 
 use bevy::prelude::*;
-use bevy::sprite::MeshMaterial2d;
 
 use crate::rendering::material::{DeformMaterial, DeformUniform, RBFCenter, RBFCoeff, MAX_RBF_COUNT};
 use crate::state::{AlgorithmState, DeformedImage, ImageInfo};
@@ -22,7 +21,7 @@ pub fn update_deform_material(
     let Some(image_info) = image_info else { return };
     let Some(ref algo) = algo_state.algorithm else { return };
 
-    let Ok(material_2d) = query.get_single() else { return };
+    let Ok(material_2d) = query.single() else { return };
     let Some(material) = materials.get_mut(&material_2d.0) else { return };
 
     let coefficients = algo.coefficients();

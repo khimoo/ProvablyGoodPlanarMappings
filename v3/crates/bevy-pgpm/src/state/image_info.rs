@@ -25,8 +25,9 @@ impl ImageInfo {
 
 /// Configuration for the image file path.
 ///
-/// The `abs_path` is used for `image::open()` (contour extraction, dimension query).
-/// The `bevy_path` is used for `AssetServer::load()` (GPU texture).
+/// Stores the absolute filesystem path to the image.
+/// The image is loaded via `image::open()` and inserted directly into
+/// Bevy's `Assets<Image>`, bypassing `AssetServer` path resolution.
 #[derive(Resource)]
 pub struct ImagePathConfig {
     /// Absolute filesystem path to the image file.

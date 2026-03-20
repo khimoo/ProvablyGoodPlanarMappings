@@ -15,13 +15,12 @@
 
 use bevy::{
     prelude::*,
-    render::{
-        camera::{ClearColorConfig, OrthographicProjection, Viewport},
-        view::RenderLayers,
-    },
-    sprite::Material2dPlugin,
+    camera::{ClearColorConfig, Viewport},
     window::WindowResized,
 };
+
+use bevy::sprite_render::Material2dPlugin;
+use log::info;
 
 use bevy_pgpm::{
     input::handle_input,
@@ -31,23 +30,34 @@ use bevy_pgpm::{
     ui,
 };
 
-/// Resolve the default image path.
-/// Expects texture.png in the crate's own assets/ directory.
-fn default_image_abs_path() -> String {
+/// Return the absolute path to the crate's own assets/ directory.
+///
+/// Used for:
+/// - Bevy's `AssetPlugin` root (shaders, fonts)
+/// - Resolving the default image absolute path
+fn crate_asset_dir() -> String {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR not set (run via `cargo run`)");
-    let p = std::path::PathBuf::from(&manifest)
-        .join("assets")
-        .join("texture.png");
+    let dir = std::path::PathBuf::from(&manifest).join("assets");
+    assert!(
+        dir.is_dir(),
+        "Assets directory not found: {}\n\
+         Expected crates/bevy-pgpm/assets/ to exist.",
+        dir.display(),
+    );
+    dir.to_string_lossy().into_owned()
+}
+
+/// Resolve the absolute path to the default texture image.
+fn default_image_path(asset_dir: &str) -> String {
+    let p = std::path::PathBuf::from(asset_dir).join("texture.png");
     assert!(
         p.exists(),
         "Default image not found: {}\n\
          Place a texture.png in the crates/bevy-pgpm/assets/ directory.",
         p.display(),
     );
-    let path = p.to_string_lossy().into_owned();
-    info!("Using image: {}", path);
-    path
+    p.to_string_lossy().into_owned()
 }
 
 /// Systems that only run during Deforming mode.
@@ -55,22 +65,32 @@ fn default_image_abs_path() -> String {
 struct DeformingSet;
 
 fn main() {
+    let asset_dir = crate_asset_dir();
+    let default_image = default_image_path(&asset_dir);
+    info!("Asset root: {}", asset_dir);
+
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "PGPM - Provably Good Planar Mappings".into(),
-                resolution: bevy::window::WindowResolution::new(1280.0, 800.0),
+        .add_plugins(DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "PGPM - Provably Good Planar Mappings".into(),
+                    resolution: bevy::window::WindowResolution::new(1280, 800),
+                    ..default()
+                }),
                 ..default()
-            }),
-            ..default()
-        }))
+            })
+            .set(AssetPlugin {
+                file_path: asset_dir,
+                ..default()
+            })
+        )
         .add_plugins(Material2dPlugin::<DeformMaterial>::default())
         .init_state::<AppState>()
         .init_resource::<AlgorithmState>()
         .init_resource::<DragState>()
         .init_resource::<DeformationInfo>()
         .init_resource::<AlgoParams>()
-        .insert_resource(ImagePathConfig::new(default_image_abs_path()))
+        .insert_resource(ImagePathConfig::new(default_image))
         .configure_sets(Update, DeformingSet.run_if(in_state(AppState::Deforming)))
         .add_systems(Startup, (setup_camera, ui::spawn_control_panel))
         .add_systems(Update, (
@@ -128,7 +148,7 @@ fn setup_camera(mut commands: Commands) {
             clear_color: ClearColorConfig::None,
             ..default()
         },
-        RenderLayers::layer(1),
+        bevy::camera::visibility::RenderLayers::layer(1),
         IsDefaultUiCamera,
     ));
 }
@@ -139,8 +159,8 @@ fn setup_camera(mut commands: Commands) {
 fn setup_camera_scale(
     image_info: Option<Res<ImageInfo>>,
     windows: Query<&Window>,
-    mut camera_q: Query<(&mut Camera, &mut OrthographicProjection), With<MainCamera>>,
-    mut resize_events: EventReader<WindowResized>,
+    mut camera_q: Query<(&mut Camera, &mut Projection), With<MainCamera>>,
+    mut resize_events: MessageReader<WindowResized>,
 ) {
     let Some(image_info) = image_info else { return };
 
@@ -149,8 +169,8 @@ fn setup_camera_scale(
         return;
     }
 
-    let Ok(window) = windows.get_single() else { return };
-    let Ok((mut camera, mut projection)) = camera_q.get_single_mut() else { return };
+    let Ok(window) = windows.single() else { return };
+    let Ok((mut camera, mut projection)) = camera_q.single_mut() else { return };
 
     // Compute viewport in physical pixels (required by Bevy's Viewport).
     let scale_factor = window.scale_factor();
@@ -174,10 +194,13 @@ fn setup_camera_scale(
     let scale_y = (logical_h * margin) / image_info.height;
     let scale = scale_x.min(scale_y);
 
-    projection.scale = 1.0 / scale;
+    // Update the orthographic projection scale through the Projection enum.
+    if let Projection::Orthographic(ref mut ortho) = *projection {
+        ortho.scale = 1.0 / scale;
 
-    info!(
-        "Camera viewport: {}x{} physical, image: {}x{}, scale: {}",
-        viewport_w, physical_h, image_info.width, image_info.height, projection.scale
-    );
+        info!(
+            "Camera viewport: {}x{} physical, image: {}x{}, scale: {}",
+            viewport_w, physical_h, image_info.width, image_info.height, ortho.scale
+        );
+    }
 }

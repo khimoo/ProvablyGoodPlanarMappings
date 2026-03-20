@@ -95,7 +95,7 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
 
 // Builder helpers
 
-fn separator(parent: &mut ChildBuilder) {
+fn separator(parent: &mut ChildSpawnerCommands) {
     parent.spawn((
         Node {
             width: Val::Percent(100.0),
@@ -107,7 +107,7 @@ fn separator(parent: &mut ChildBuilder) {
     ));
 }
 
-fn label(parent: &mut ChildBuilder, text: &str, font: &Handle<Font>) {
+fn label(parent: &mut ChildSpawnerCommands, text: &str, font: &Handle<Font>) {
     parent.spawn((
         Text::new(text.to_string()),
         TextFont { font: font.clone(), font_size: 12.0, ..default() },
@@ -115,7 +115,7 @@ fn label(parent: &mut ChildBuilder, text: &str, font: &Handle<Font>) {
     ));
 }
 
-fn wide_button<M: Component>(parent: &mut ChildBuilder, text: &str, marker: M, font: &Handle<Font>) {
+fn wide_button<M: Component>(parent: &mut ChildSpawnerCommands, text: &str, marker: M, font: &Handle<Font>) {
     parent
         .spawn((
             Button,
@@ -139,7 +139,7 @@ fn wide_button<M: Component>(parent: &mut ChildBuilder, text: &str, marker: M, f
 }
 
 fn param_row<TM: Component, LB: Component, RB: Component>(
-    parent: &mut ChildBuilder,
+    parent: &mut ChildSpawnerCommands,
     initial: &str,
     text_marker: TM,
     left_label: &str,

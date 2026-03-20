@@ -1,7 +1,7 @@
 //! Button action systems: handle user interactions on UI buttons.
 
 use bevy::prelude::*;
-use bevy::sprite::MeshMaterial2d;
+use log::{info, warn};
 
 use nalgebra::Vector2;
 use pgpm_core::mapping::MappingBridge;
@@ -74,7 +74,7 @@ pub fn on_reset(
         next_state.set(AppState::Setup);
 
         // Reset shader uniform to identity mapping
-        if let (Some(ref image_info), Ok(mat_handle)) = (image_info.as_ref(), mat_query.get_single()) {
+        if let (Some(ref image_info), Ok(mat_handle)) = (image_info.as_ref(), mat_query.single()) {
             if let Some(material) = materials.get_mut(&mat_handle.0) {
                 material.params = DeformUniform::identity(image_info.width, image_info.height);
             }
