@@ -1,5 +1,5 @@
 {
-  description = "Bevy + Python (PyO3) Image Deformation Dev Environment";
+  description = "Provably Good Planar Mappings v2 – pgpm-core + bevy-pgpm";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -15,24 +15,12 @@
           inherit system overlays;
         };
 
-        # 1. Python環境の定義
-        # userのコードで必要なライブラリを全て含めます
-        myPython = pkgs.python3.withPackages (ps: with ps; [
-          numpy
-          scipy
-          matplotlib
-          cvxpy
-          ecos # cvxpyで指定されていたソルバー
-          pillow
-          # その他必要ならここに追加 (例: jupyter, ipythonなど)
-        ]);
-
-        # 2. Rustツールチェーンの定義
+        # Rustツールチェーン
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
-        # 3. Bevyに必要なネイティブライブラリ群 (Linux用)
+        # ビルドツール
         nativeBuildInputs = with pkgs; [
           pkg-config
           rustToolchain
@@ -40,21 +28,22 @@
           mold
         ];
 
+        # Nerd Fonts (FiraCode — ASCII + Unicode記号 + Nerdアイコン all-in-one)
+        nerdFonts = pkgs.nerd-fonts.fira-code;
+
+        # Bevyに必要なネイティブライブラリ群 (Linux用)
         buildInputs = with pkgs; [
           udev
           alsa-lib
           vulkan-loader
-          # X11 dependencies
+          # X11
           libx11
           libxcursor
           libxi
           libxrandr
-          # Wayland dependencies (optional but recommended)
+          # Wayland
           libxkbcommon
           wayland
-
-          # Python本体 (ヘッダーファイルと共有ライブラリ)
-          myPython
         ];
 
       in
@@ -62,42 +51,38 @@
         devShells.default = pkgs.mkShell {
           inherit nativeBuildInputs buildInputs;
 
-          # 環境変数設定
-
-          # Rustにmoldをリンカとして使用させる
           RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
-
-          # PyO3がビルド時および実行時に正しいPythonを見つけられるようにする
-          PYO3_PYTHON = "${myPython}/bin/python";
-
-          # LinuxでBevyが実行時に共有ライブラリを見つけられるようにする魔法の設定
-          # これがないと "vulkan icd not found" や "alsa error" で落ちます
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
 
           shellHook = ''
-            echo "=========================================================="
-            echo "🚀 Bevy + Python Dev Shell Activated"
-            echo "Python: $(python --version)"
             echo "Rust: $(rustc --version)"
-            echo "=========================================================="
-
-            # wgpu (Bevyのレンダリングバックエンド) がVulkanを見つけやすくする
             export WGPU_BACKEND=vulkan
+
+            # Nerd Fonts を assets/fonts/ にリンク
+            mkdir -p crates/bevy-pgpm/assets/fonts
+            ln -sfn ${nerdFonts}/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf \
+              crates/bevy-pgpm/assets/fonts/FiraCodeNerdFontMono-Regular.ttf
           '';
         };
 
+        # nix run で bevy-pgpm を実行
         apps.default = {
           type = "app";
-          program = "${pkgs.writeShellScriptBin "run-app" ''
-            # nix developと同じ環境で cargo run を実行する
+          program = "${pkgs.writeShellScriptBin "run-bevy-pgpm" ''
+            export PATH="${pkgs.lib.makeBinPath nativeBuildInputs}:$PATH"
+            export PKG_CONFIG_PATH="${pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" buildInputs}:${pkgs.lib.makeSearchPathOutput "dev" "share/pkgconfig" buildInputs}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+            export WGPU_BACKEND=vulkan
 
-            # v2ディレクトリ直下での実行を前提とするため、パスを固定
-            CMD="cd ./bevy_image_deform && cargo run --features bevy/dynamic_linking"
+            # Nerd Fonts を assets/fonts/ にリンク (shellHook と同じ処理)
+            mkdir -p crates/bevy-pgpm/assets/fonts
+            ln -sfn ${nerdFonts}/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf \
+              crates/bevy-pgpm/assets/fonts/FiraCodeNerdFontMono-Regular.ttf
 
-            # nix develop の環境内でコマンドを実行
-            # 現在のディレクトリの flake.nix を参照します
-            nix develop --command bash -c "$CMD"
-          ''}/bin/run-app";
+            # nix run が実行されたディレクトリ（= flake.nix のあるディレクトリ）で cargo run
+            exec cargo run --features bevy/dynamic_linking -p bevy-pgpm
+          ''}/bin/run-bevy-pgpm";
         };
       }
     );
