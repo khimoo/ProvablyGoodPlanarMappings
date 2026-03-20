@@ -16,8 +16,8 @@ use crate::algorithm::strategy;
 use crate::basis::BasisFunction;
 use crate::distortion;
 use crate::model::types::{
-    AlgorithmError, AlgorithmState, CoefficientMatrix, MappingContext, MappingParams,
-    PrecomputedData, RegularizationType, StepInfo,
+    AlgorithmError, AlgorithmState, CoefficientMatrix, DomainBounds, MappingContext,
+    MappingParams, PrecomputedData, RegularizationType, StepInfo,
 };
 use crate::numerics::solver;
 use log::warn;
@@ -83,6 +83,36 @@ pub trait PlanarMapping: Send + Sync {
     fn max_refinement_resolution(&self) -> usize {
         let (ctx, _) = self.parts();
         ctx.solver_config.max_refinement_resolution
+    }
+
+    /// Grid resolution (width, height) for collocation grid (Section 4).
+    fn grid_resolution(&self) -> (usize, usize) {
+        let (_, state) = self.parts();
+        (state.grid_width, state.grid_height)
+    }
+
+    /// Number of collocation points |Z| (Section 4).
+    fn num_collocation_points(&self) -> usize {
+        let (_, state) = self.parts();
+        state.collocation_points.len()
+    }
+
+    /// Number of basis functions n (Table 1).
+    fn num_basis_functions(&self) -> usize {
+        let (ctx, _) = self.parts();
+        ctx.basis.count()
+    }
+
+    /// Source handle positions {p_l} (Eq. 29).
+    fn source_handles(&self) -> Vec<Vector2<f64>> {
+        let (ctx, _) = self.parts();
+        ctx.source_handles.to_vec()
+    }
+
+    /// Bounding box of domain Omega (Eq. 5).
+    fn domain_bounds_query(&self) -> DomainBounds {
+        let (ctx, _) = self.parts();
+        ctx.domain_bounds.clone()
     }
 
     /// Precompute basis function values and gradients at all collocation points.

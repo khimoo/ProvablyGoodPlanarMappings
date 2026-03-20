@@ -23,7 +23,6 @@ pub fn on_toggle_mode(
     mut next_state: ResMut<NextState<AppState>>,
     mut algo_state: ResMut<AlgorithmState>,
     mut drag_state: ResMut<DragState>,
-    mut deform_info: ResMut<DeformationInfo>,
     algo_params: Res<AlgoParams>,
     image_info: Option<Res<ImageInfo>>,
 ) {
@@ -45,9 +44,6 @@ pub fn on_toggle_mode(
                     &image_info.holes,
                 );
                 algo_state.set_mapping(mapping);
-                deform_info.k_bound = algo_params.k_bound;
-                deform_info.lambda_reg = algo_params.lambda_reg;
-                deform_info.reg_mode_label = algo_params.reg_mode.label();
                 next_state.set(AppState::Deforming);
             }
             AppState::Deforming => {
@@ -91,7 +87,6 @@ pub fn on_k_bound(
     q_minus: Query<&Interaction, (Changed<Interaction>, With<KMinusButton>)>,
     q_plus: Query<&Interaction, (Changed<Interaction>, With<KPlusButton>)>,
     mut params: ResMut<AlgoParams>,
-    mut info: ResMut<DeformationInfo>,
     mut algo_state: ResMut<AlgorithmState>,
 ) {
     let mut changed = false;
@@ -109,7 +104,6 @@ pub fn on_k_bound(
     }
     if changed {
         enforce_k_max_invariant(&mut params);
-        info.k_bound = params.k_bound;
         push_params(&params, &mut algo_state);
     }
 }
@@ -119,7 +113,6 @@ pub fn on_lambda(
     q_down: Query<&Interaction, (Changed<Interaction>, With<LambdaDownButton>)>,
     q_up: Query<&Interaction, (Changed<Interaction>, With<LambdaUpButton>)>,
     mut params: ResMut<AlgoParams>,
-    mut info: ResMut<DeformationInfo>,
     mut algo_state: ResMut<AlgorithmState>,
 ) {
     let mut changed = false;
@@ -136,7 +129,6 @@ pub fn on_lambda(
         }
     }
     if changed {
-        info.lambda_reg = params.lambda_reg;
         push_params(&params, &mut algo_state);
     }
 }
@@ -145,13 +137,11 @@ pub fn on_lambda(
 pub fn on_reg_mode(
     query: Query<&Interaction, (Changed<Interaction>, With<RegModeButton>)>,
     mut params: ResMut<AlgoParams>,
-    mut info: ResMut<DeformationInfo>,
     mut algo_state: ResMut<AlgorithmState>,
 ) {
     for interaction in &query {
         if *interaction != Interaction::Pressed { continue; }
         params.reg_mode = params.reg_mode.next();
-        info.reg_mode_label = params.reg_mode.label();
         push_params(&params, &mut algo_state);
     }
 }

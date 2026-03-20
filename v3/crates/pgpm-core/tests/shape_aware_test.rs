@@ -34,18 +34,6 @@ fn square_contour(w: f64, h: f64) -> Vec<Vector2<f64>> {
     ]
 }
 
-/// Create an L-shaped polygon to test non-convex geodesic routing.
-fn l_shape_contour() -> Vec<Vector2<f64>> {
-    vec![
-        Vector2::new(0.0, 0.0),
-        Vector2::new(200.0, 0.0),
-        Vector2::new(200.0, 100.0),
-        Vector2::new(100.0, 100.0),
-        Vector2::new(100.0, 200.0),
-        Vector2::new(0.0, 200.0),
-    ]
-}
-
 #[test]
 fn test_fmm_distances_finite_inside_polygon() {
     let w = 256.0;
