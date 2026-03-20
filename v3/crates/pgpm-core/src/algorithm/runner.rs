@@ -139,7 +139,7 @@ impl<D: DistortionPolicy> Algorithm<D> {
 // ─────────────────────────────────────────────
 
 impl<D: DistortionPolicy> PlanarMapping for Algorithm<D> {
-    // All algorithmic methods (step, evaluate, refine_strategy2, etc.)
+    // All algorithmic methods (step, refine_strategy2, etc.)
     // use the default implementations from PlanarMapping.
     // Only the three required accessors are provided here.
 
@@ -227,9 +227,18 @@ mod tests {
     fn test_identity_mapping() {
         let alg = make_test_algorithm();
 
-        // With identity coefficients, f(x) should be approximately x
+        // With identity coefficients, f(x) should be approximately x (Eq. 3)
         let test_point = Vector2::new(0.5, 0.5);
-        let result = alg.evaluate(test_point);
+        let phi = alg.basis().evaluate(test_point);
+        let c = alg.coefficients();
+        let n = alg.basis().count();
+        let mut u = 0.0;
+        let mut v = 0.0;
+        for i in 0..n {
+            u += c[(0, i)] * phi[i];
+            v += c[(1, i)] * phi[i];
+        }
+        let result = Vector2::new(u, v);
 
         assert!(
             (result - test_point).norm() < 1e-10,
@@ -298,8 +307,17 @@ mod tests {
             info.max_distortion
         );
 
-        // The evaluated point at the handle should be close to target
-        let mapped = alg.evaluate(Vector2::new(0.5, 0.5));
+        // The evaluated point at the handle should be close to target (Eq. 3)
+        let phi = alg.basis().evaluate(Vector2::new(0.5, 0.5));
+        let c = alg.coefficients();
+        let n = alg.basis().count();
+        let mut mu = 0.0;
+        let mut mv = 0.0;
+        for i in 0..n {
+            mu += c[(0, i)] * phi[i];
+            mv += c[(1, i)] * phi[i];
+        }
+        let mapped = Vector2::new(mu, mv);
         assert!(
             (mapped - Vector2::new(0.6, 0.5)).norm() < 0.5,
             "Handle should approximately reach target: got ({}, {})",

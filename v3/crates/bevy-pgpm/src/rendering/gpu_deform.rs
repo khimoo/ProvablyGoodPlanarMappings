@@ -12,7 +12,7 @@ use crate::domain::rbf::compute_rbf_scale;
 
 /// System: push pgpm-core coefficients into the GPU material uniform.
 ///
-/// Run conditions: `DeformingSet` + `not(needs_cpu_deform)`
+/// Run conditions: `DeformingSet`
 pub fn update_deform_material(
     algo_state: Res<AlgorithmState>,
     image_info: Option<Res<ImageInfo>>,

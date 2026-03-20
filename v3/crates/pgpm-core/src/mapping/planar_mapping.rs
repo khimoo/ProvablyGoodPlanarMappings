@@ -396,21 +396,6 @@ pub trait PlanarMapping: Send + Sync {
         })
     }
 
-    /// Evaluate the mapping f(x) = Σ c_i φ_i(x) (Eq. 3).
-    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
-        let (ctx, state) = self.parts();
-        let phi = ctx.basis.evaluate(x);
-        let c = &state.coefficients;
-        let n = ctx.basis.count();
-        let mut u = 0.0;
-        let mut v = 0.0;
-        for i in 0..n {
-            u += c[(0, i)] * phi[i];
-            v += c[(1, i)] * phi[i];
-        }
-        Vector2::new(u, v)
-    }
-
     /// Compute the Jacobian gradients (∇u, ∇v) at point x (Eq. 3 differentiated).
     fn grad_uv_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
         let (ctx, state) = self.parts();

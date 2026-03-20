@@ -10,12 +10,26 @@
 //! 5. Distortion bound is maintained under deformation
 
 use pgpm_core::basis::gaussian::GaussianBasis;
+use pgpm_core::basis::BasisFunction;
 use pgpm_core::distortion;
 use pgpm_core::algorithm::Algorithm;
 use pgpm_core::mapping::PlanarMapping;
 use pgpm_core::model::types::*;
 use pgpm_core::policy::IsometricPolicy;
 use nalgebra::Vector2;
+
+/// Evaluate the mapping f(x) = Σ c_i φ_i(x) (Eq. 3) from coefficients and basis.
+fn eval_mapping(coefficients: &CoefficientMatrix, basis: &dyn BasisFunction, x: Vector2<f64>) -> Vector2<f64> {
+    let phi = basis.evaluate(x);
+    let n = basis.count();
+    let mut u = 0.0;
+    let mut v = 0.0;
+    for i in 0..n {
+        u += coefficients[(0, i)] * phi[i];
+        v += coefficients[(1, i)] * phi[i];
+    }
+    Vector2::new(u, v)
+}
 
 /// Helper: create a well-conditioned test setup on [0,1]^2
 /// with denser RBF centers and appropriate scale.
@@ -210,8 +224,8 @@ fn verify_handle_tracking() {
         alg.step(&target).expect("Should succeed");
     }
 
-    // Evaluate the mapping at the source handle
-    let mapped = alg.evaluate(Vector2::new(0.5, 0.5));
+    // Evaluate the mapping at the source handle (Eq. 3)
+    let mapped = eval_mapping(alg.coefficients(), alg.basis(), Vector2::new(0.5, 0.5));
     let error = (mapped - target[0]).norm();
 
     println!(
@@ -295,10 +309,12 @@ fn verify_mapping_continuity() {
         Vector2::new(0.2, 0.8),
     ];
 
+    let coefficients = alg.coefficients();
+    let basis = alg.basis();
     for &p in &test_points {
-        let f_p = alg.evaluate(p);
-        let f_px = alg.evaluate(p + Vector2::new(eps, 0.0));
-        let f_py = alg.evaluate(p + Vector2::new(0.0, eps));
+        let f_p = eval_mapping(coefficients, basis, p);
+        let f_px = eval_mapping(coefficients, basis, p + Vector2::new(eps, 0.0));
+        let f_py = eval_mapping(coefficients, basis, p + Vector2::new(0.0, eps));
 
         let dx = (f_px - f_p).norm();
         let dy = (f_py - f_p).norm();
@@ -353,7 +369,7 @@ fn verify_k_bound_effect() {
         );
 
         let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let handle_error = (alg.evaluate(Vector2::new(0.5, 0.5)) - target[0]).norm();
+        let handle_error = (eval_mapping(alg.coefficients(), alg.basis(), Vector2::new(0.5, 0.5)) - target[0]).norm();
 
         println!(
             "K={}: max_D={:.4}, handle_error={:.4}, active={}",
@@ -400,9 +416,9 @@ fn verify_two_handle_deformation() {
         );
     }
 
-    // Check both handles are tracked
-    let mapped_a = alg.evaluate(src[0]);
-    let mapped_b = alg.evaluate(src[1]);
+    // Check both handles are tracked (Eq. 3)
+    let mapped_a = eval_mapping(alg.coefficients(), alg.basis(), src[0]);
+    let mapped_b = eval_mapping(alg.coefficients(), alg.basis(), src[1]);
 
     let err_a = (mapped_a - target[0]).norm();
     let err_b = (mapped_b - target[1]).norm();

@@ -4,11 +4,8 @@ use bevy::prelude::*;
 use bevy::sprite::MeshMaterial2d;
 use image::GenericImageView;
 
-use crate::domain::coords::ImageCoords;
 use crate::domain::image_loader::extract_contour_from_image;
-use crate::rendering::{
-    create_contour_mesh, DeformMaterial, DeformUniform, OriginalVertexPositions,
-};
+use crate::rendering::{create_contour_mesh, DeformMaterial, DeformUniform};
 use crate::state::{
     AlgorithmState, AppState, DeformationInfo, DeformedImage, ImageInfo, ImagePathConfig,
 };
@@ -77,12 +74,6 @@ pub fn load_image(
         &contour,
         &holes,
     );
-
-    // Store original pixel-space vertex positions for CPU deformation path.
-    let pixel_positions = extract_pixel_positions(&grid_mesh, image_width, image_height);
-    commands.insert_resource(OriginalVertexPositions {
-        positions: pixel_positions,
-    });
 
     let mesh_handle = meshes.add(grid_mesh);
 
@@ -153,21 +144,3 @@ fn load_image_dimensions(abs_path: &str) -> Option<(f32, f32)> {
     }
 }
 
-fn extract_pixel_positions(mesh: &Mesh, width: f32, height: f32) -> Vec<[f32; 2]> {
-    let coords = ImageCoords::new(width, height);
-    let Some(attr) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
-        error!("Mesh missing ATTRIBUTE_POSITION — cannot extract vertex positions");
-        return vec![];
-    };
-    let Some(positions) = attr.as_float3() else {
-        error!("Mesh ATTRIBUTE_POSITION is not Float32x3 — cannot extract vertex positions");
-        return vec![];
-    };
-    positions
-        .iter()
-        .map(|[bx, by, _]| {
-            let (px, py) = coords.world_to_pixel(Vec2::new(*bx, *by));
-            [px, py]
-        })
-        .collect()
-}

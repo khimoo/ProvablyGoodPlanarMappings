@@ -26,10 +26,7 @@ use bevy::{
 use bevy_pgpm::{
     input::handle_input,
     lifecycle::{load_image, update_deformation},
-    rendering::{
-        update_deform_material, cpu_update_mesh_positions,
-        needs_cpu_deform, DeformMaterial,
-    },
+    rendering::{update_deform_material, DeformMaterial},
     state::*,
     ui,
 };
@@ -86,11 +83,7 @@ fn main() {
                 .in_set(DeformingSet)
                 .before(update_deform_material),
             update_deform_material
-                .in_set(DeformingSet)
-                .run_if(not(needs_cpu_deform)),
-            cpu_update_mesh_positions
-                .in_set(DeformingSet)
-                .run_if(needs_cpu_deform),
+                .in_set(DeformingSet),
         ))
         .add_systems(Update, (
             ui::draw_handles,

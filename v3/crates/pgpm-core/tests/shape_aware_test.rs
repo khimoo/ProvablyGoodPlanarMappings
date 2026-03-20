@@ -7,9 +7,22 @@ use pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis;
 use pgpm_core::basis::BasisFunction;
 use pgpm_core::mapping::PlanarMapping;
 use pgpm_core::model::domain::PolygonDomain;
-use pgpm_core::model::types::{DomainBounds, MappingParams, RegularizationType};
+use pgpm_core::model::types::{CoefficientMatrix, DomainBounds, MappingParams, RegularizationType};
 use pgpm_core::numerics::geodesic::{GeodesicField, build_domain_mask};
 use pgpm_core::policy::IsometricPolicy;
+
+/// Evaluate the mapping f(x) = Σ c_i φ_i(x) (Eq. 3) from coefficients and basis.
+fn eval_mapping(coefficients: &CoefficientMatrix, basis: &dyn BasisFunction, x: Vector2<f64>) -> Vector2<f64> {
+    let phi = basis.evaluate(x);
+    let n = basis.count();
+    let mut u = 0.0;
+    let mut v = 0.0;
+    for i in 0..n {
+        u += coefficients[(0, i)] * phi[i];
+        v += coefficients[(1, i)] * phi[i];
+    }
+    Vector2::new(u, v)
+}
 
 /// Create a simple square polygon (like an image with no alpha cutout).
 fn square_contour(w: f64, h: f64) -> Vec<Vector2<f64>> {
@@ -184,14 +197,14 @@ fn test_shape_aware_algorithm_step() {
     println!("Step result: {:?}", result);
     assert!(result.is_ok(), "SOCP step failed: {:?}", result.err());
 
-    // The mapped point at source should be close to target
-    let mapped = algo.evaluate(Vector2::new(128.0, 128.0));
+    // The mapped point at source should be close to target (Eq. 3)
+    let mapped = eval_mapping(algo.coefficients(), algo.basis(), Vector2::new(128.0, 128.0));
     println!("Source (128,128) maps to ({}, {}), target=(160,128)", mapped.x, mapped.y);
     assert!((mapped.x - 160.0).abs() < 50.0,
         "Handle should approximately reach target: mapped to ({}, {})", mapped.x, mapped.y);
 
     // A point away from handle should also move (not identity)
-    let other = algo.evaluate(Vector2::new(64.0, 64.0));
+    let other = eval_mapping(algo.coefficients(), algo.basis(), Vector2::new(64.0, 64.0));
     println!("Point (64,64) maps to ({}, {})", other.x, other.y);
     // It shouldn't be exactly identity
     let drift = ((other.x - 64.0).powi(2) + (other.y - 64.0).powi(2)).sqrt();

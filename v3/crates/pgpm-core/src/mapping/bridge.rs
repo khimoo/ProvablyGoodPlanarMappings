@@ -21,9 +21,6 @@ pub trait MappingBridge: Send + Sync {
     /// Get basis function reference (Table 1). Used by GPU rendering path.
     fn basis(&self) -> &dyn BasisFunction;
 
-    /// Evaluate the mapping f(x) (Eq. 3). Used by CPU rendering path.
-    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64>;
-
     /// Update algorithm parameters at runtime (K, lambda, regularization).
     fn update_params(&mut self, params: MappingParams);
 
@@ -47,10 +44,6 @@ impl<T: PlanarMapping + ?Sized> MappingBridge for T {
 
     fn basis(&self) -> &dyn BasisFunction {
         PlanarMapping::basis(self)
-    }
-
-    fn evaluate(&self, x: Vector2<f64>) -> Vector2<f64> {
-        PlanarMapping::evaluate(self, x)
     }
 
     fn update_params(&mut self, params: MappingParams) {
