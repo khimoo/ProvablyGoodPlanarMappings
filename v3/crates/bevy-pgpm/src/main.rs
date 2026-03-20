@@ -19,13 +19,12 @@ use bevy::{
     window::WindowResized,
 };
 
-use bevy::sprite_render::Material2dPlugin;
 use log::info;
 
 use bevy_pgpm::{
     input::handle_input,
     lifecycle::{load_image, update_deformation},
-    rendering::{update_deform_material, DeformMaterial},
+    rendering::update_cpu_deform,
     state::*,
     ui,
 };
@@ -84,7 +83,6 @@ fn main() {
                 ..default()
             })
         )
-        .add_plugins(Material2dPlugin::<DeformMaterial>::default())
         .init_state::<AppState>()
         .init_resource::<AlgorithmState>()
         .init_resource::<DragState>()
@@ -101,8 +99,8 @@ fn main() {
         .add_systems(Update, (
             update_deformation
                 .in_set(DeformingSet)
-                .before(update_deform_material),
-            update_deform_material
+                .before(update_cpu_deform),
+            update_cpu_deform
                 .in_set(DeformingSet),
         ))
         .add_systems(Update, (

@@ -9,10 +9,9 @@ use pgpm_core::model::domain::{Domain, PolygonDomain};
 use pgpm_core::model::types::{DomainBounds, MappingParams, SolverConfig};
 
 use crate::domain::rbf::compute_rbf_scale;
-use crate::rendering::{DeformMaterial, DeformUniform};
 use crate::state::{
     AlgoParams, AlgorithmState, AppState, BasisType, DeformationInfo, DeformedImage, DragState,
-    ImageInfo, ImagePathConfig,
+    ImageInfo, ImagePathConfig, OriginalVertexPositions,
 };
 use crate::ui::markers::*;
 
@@ -61,9 +60,9 @@ pub fn on_reset(
     mut drag_state: ResMut<DragState>,
     mut deform_info: ResMut<DeformationInfo>,
     mut next_state: ResMut<NextState<AppState>>,
-    image_info: Option<Res<ImageInfo>>,
-    mut materials: ResMut<Assets<DeformMaterial>>,
-    mat_query: Query<&MeshMaterial2d<DeformMaterial>, With<DeformedImage>>,
+    original_positions: Option<Res<OriginalVertexPositions>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mesh_query: Query<&Mesh2d, With<DeformedImage>>,
 ) {
     for interaction in &query {
         if *interaction != Interaction::Pressed { continue; }
@@ -73,10 +72,10 @@ pub fn on_reset(
         *deform_info = DeformationInfo::default();
         next_state.set(AppState::Setup);
 
-        // Reset shader uniform to identity mapping
-        if let (Some(ref image_info), Ok(mat_handle)) = (image_info.as_ref(), mat_query.single()) {
-            if let Some(material) = materials.get_mut(&mat_handle.0) {
-                material.params = DeformUniform::identity(image_info.width, image_info.height);
+        // Reset mesh vertex positions to original (undeformed) positions
+        if let (Some(ref orig), Ok(mesh_handle)) = (original_positions.as_ref(), mesh_query.single()) {
+            if let Some(mesh) = meshes.get_mut(&mesh_handle.0) {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, orig.world_positions.clone());
             }
         }
     }

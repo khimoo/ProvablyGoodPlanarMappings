@@ -2,14 +2,17 @@
 
 use bevy::prelude::*;
 use bevy::image::Image as BevyImage;
+use bevy::mesh::VertexAttributeValues;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use log::{info, warn, error};
 use image::GenericImageView;
 
+use crate::domain::coords::ImageCoords;
 use crate::domain::image_loader::extract_contour_from_image;
-use crate::rendering::{create_contour_mesh, DeformMaterial, DeformUniform};
+use crate::rendering::create_contour_mesh;
 use crate::state::{
     AlgorithmState, AppState, DeformationInfo, DeformedImage, ImageInfo, ImagePathConfig,
+    OriginalVertexPositions,
 };
 
 /// System: load (or reload) the image when `ImagePathConfig.needs_reload` is set.
@@ -18,7 +21,7 @@ pub fn load_image(
     mut path_config: ResMut<ImagePathConfig>,
     mut images: ResMut<Assets<BevyImage>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<DeformMaterial>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     existing_image: Query<Entity, With<DeformedImage>>,
     mut algo_state: ResMut<AlgorithmState>,
     mut deform_info: ResMut<DeformationInfo>,
@@ -102,9 +105,33 @@ pub fn load_image(
 
     let mesh_handle = meshes.add(grid_mesh);
 
-    let material_handle = materials.add(DeformMaterial {
-        source_texture: image_handle,
-        params: DeformUniform::identity(image_width, image_height),
+    // Extract original vertex positions for CPU deformation path
+    let world_positions = meshes
+        .get(&mesh_handle)
+        .and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
+        .and_then(|attr| match attr {
+            VertexAttributeValues::Float32x3(v) => Some(v.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let coords = ImageCoords::new(image_width, image_height);
+    let pixel_positions: Vec<nalgebra::Vector2<f64>> = world_positions
+        .iter()
+        .map(|[wx, wy, _]| {
+            let (px, py) = coords.world_to_pixel(Vec2::new(*wx, *wy));
+            nalgebra::Vector2::new(px as f64, py as f64)
+        })
+        .collect();
+
+    commands.insert_resource(OriginalVertexPositions {
+        pixel_positions,
+        world_positions,
+    });
+
+    let material_handle = materials.add(ColorMaterial {
+        texture: Some(image_handle),
+        ..default()
     });
 
     commands.spawn((
@@ -152,5 +179,3 @@ pub fn update_deformation(
 
     algo_state.needs_solve = false;
 }
-
-

@@ -426,6 +426,29 @@ pub trait PlanarMapping: Send + Sync {
         })
     }
 
+    /// Evaluate the forward mapping f(x) = Σ c_i φ_i(x) at multiple points (Eq. 3).
+    ///
+    /// Takes a slice of domain-space points, returns the mapped positions.
+    /// Used by the CPU rendering path for any basis function type.
+    fn evaluate_mapping_at(&self, points: &[Vector2<f64>]) -> Vec<Vector2<f64>> {
+        let (ctx, state) = self.parts();
+        let c = &state.coefficients;
+        let n = ctx.basis.count();
+        points
+            .iter()
+            .map(|&x| {
+                let phi = ctx.basis.evaluate(x);
+                let mut u = 0.0;
+                let mut v = 0.0;
+                for i in 0..n {
+                    u += c[(0, i)] * phi[i];
+                    v += c[(1, i)] * phi[i];
+                }
+                Vector2::new(u, v)
+            })
+            .collect()
+    }
+
     /// Compute the Jacobian gradients (∇u, ∇v) at point x (Eq. 3 differentiated).
     fn grad_uv_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
         let (ctx, state) = self.parts();

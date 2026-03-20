@@ -9,7 +9,7 @@ pub mod image_info;
 pub mod interaction;
 pub mod params;
 
-pub use algorithm::AlgorithmState;
+pub use algorithm::{AlgorithmState, OriginalVertexPositions};
 pub use display_info::DeformationInfo;
 pub use image_info::{ImageInfo, ImagePathConfig};
 pub use interaction::DragState;

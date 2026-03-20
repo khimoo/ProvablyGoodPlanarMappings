@@ -43,3 +43,16 @@ impl AlgorithmState {
         self.algorithm = Some(algorithm);
     }
 }
+
+/// Stores the original (undeformed) vertex positions.
+///
+/// Created once when the mesh is spawned. Used by:
+/// - CPU deformation path: `pixel_positions` as input to `evaluate_mapping_at()`
+/// - Reset: `world_positions` to restore the mesh to its undeformed state
+#[derive(Resource)]
+pub struct OriginalVertexPositions {
+    /// Vertex positions in domain (pixel) coordinates.
+    pub pixel_positions: Vec<Vector2<f64>>,
+    /// Vertex positions in world coordinates (original undeformed).
+    pub world_positions: Vec<[f32; 3]>,
+}
