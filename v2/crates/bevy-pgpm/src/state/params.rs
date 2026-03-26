@@ -130,10 +130,10 @@ impl Default for AlgoParams {
             grid_resolution: 50,
             fps_k: 8,
             epsilon: 40.0,
-            reg_mode: RegMode::Arap,
+            reg_mode: RegMode::Mixed,
             lambda_arap: 1.0,
             lambda_bh: 0.1,
-            basis_type: BasisType::Gaussian,
+            basis_type: BasisType::ShapeAwareGaussian,
             k_max: 6.0, // デフォルト: k_bound * 2.0
         }
     }
