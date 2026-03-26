@@ -5,25 +5,26 @@
 ![デモ](screenshots/demo.gif)
 <!-- TODO: screenshots/ にデモ GIF を配置 -->
 
-Provably Good Planar Mapingsは、画像変形の、特に非凸な空間の変形に焦点を当てたアルゴリズムです。
-## 実行方法
-### Nixのインストール
+Provably Good Planar Mapingsは画像変形のアルゴリズムで、特に非凸な空間の変形に焦点を当てています。非凸領域上に離散的に存在する計算点で最適化を実行するだけで、非凸領域全体で画像の裏返りが発生しないことを数学的に保証しています。
 
-[Nix](https://nixos.org/download/) がインストールされており、Flakes が有効になっている必要があります。
+このようなアルゴリズムを使用し、背景透過画像(PNG)を変形させて新たに保存するツールとしてまとめました。
+# 実行方法
 
-Flakes の有効化（未設定の場合）:
+[Nix](https://nixos.org/download/) をインストールし、Flakesを有効化してください。
+
+Flakes の有効化:
 ```bash
 # ~/.config/nix/nix.conf に追記
 mkdir -p ~/.config/nix
 echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
 
-### 実行方法
-nix runを実行してください。
+nix runでプログラムが起動します。
 ```bash
 nix run
 ```
 
+# 操作方法
 ## 論文概要
 
 ### 解く問題
