@@ -1,5 +1,5 @@
-pub mod planar_mapping;
+pub mod pgpm_algorithm;
 pub mod bridge;
 
-pub use planar_mapping::PlanarMapping;
+pub use pgpm_algorithm::PgpmAlgorithm;
 pub use bridge::MappingBridge;

@@ -3,13 +3,13 @@
 //! 論文参照: Algorithm 1 (Section 5)
 //! このモジュールは証明付き良好な平面写像のデータを保持する
 //! 具象 `Algorithm<D>` 構造体を提供する。全てのアルゴリズムロジックは
-//! [`PlanarMapping`] トレイトのデフォルトメソッドに存在し、この構造体は
+//! [`PgpmAlgorithm`] トレイトのデフォルトメソッドに存在し、この構造体は
 //! 借用分離アクセサのみを提供する。
 
 use crate::algorithm::active_set;
 use crate::basis::BasisFunction;
-use crate::mapping::planar_mapping::{build_domain_mask, generate_collocation_grid};
-use crate::mapping::PlanarMapping;
+use crate::mapping::pgpm_algorithm::{build_domain_mask, generate_collocation_grid};
+use crate::mapping::PgpmAlgorithm;
 use crate::model::domain::Domain;
 use crate::model::types::*;
 use crate::policy::DistortionPolicy;
@@ -134,12 +134,12 @@ impl<D: DistortionPolicy> Algorithm<D> {
 }
 
 // ─────────────────────────────────────────────
-// PlanarMapping トレイト実装
+// PgpmAlgorithm トレイト実装
 // ─────────────────────────────────────────────
 
-impl<D: DistortionPolicy> PlanarMapping for Algorithm<D> {
+impl<D: DistortionPolicy> PgpmAlgorithm for Algorithm<D> {
     // 全てのアルゴリズムメソッド（step, refine_strategy2 等）は
-    // PlanarMapping のデフォルト実装を使用。
+    // PgpmAlgorithm のデフォルト実装を使用。
     // ここでは3つの必須アクセサのみを提供。
 
     fn parts(&self) -> (MappingContext<'_>, &AlgorithmState) {

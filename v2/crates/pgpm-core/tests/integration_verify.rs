@@ -12,7 +12,7 @@
 use pgpm_core::basis::gaussian::GaussianBasis;
 use pgpm_core::distortion;
 use pgpm_core::algorithm::Algorithm;
-use pgpm_core::mapping::PlanarMapping;
+use pgpm_core::mapping::PgpmAlgorithm;
 use pgpm_core::model::types::*;
 use pgpm_core::policy::IsometricPolicy;
 use nalgebra::Vector2;

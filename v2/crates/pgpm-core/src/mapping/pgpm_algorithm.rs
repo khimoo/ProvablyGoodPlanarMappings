@@ -1,6 +1,6 @@
 //! 平面写像トレイト。
 //!
-//! [`PlanarMapping`] はアルゴリズム全体（Algorithm 1, Section 5）の抽象定義。
+//! [`PgpmAlgorithm`] はアルゴリズム全体（Algorithm 1, Section 5）の抽象定義。
 //! 数学的評価（Eq. 3, Section 3）と最適化手続き（SOCP、アクティブ集合、
 //! Strategy 2）の両方を含む。
 //!
@@ -27,14 +27,14 @@ use nalgebra::{DMatrix, Vector2};
 /// アクティブ集合管理、フレーム更新、Strategy 2 精緻化。
 ///
 /// **必須メソッド**（3つのみ）:
-/// - [`parts`](PlanarMapping::parts) / [`parts_mut`](PlanarMapping::parts_mut) —
+/// - [`parts`](PgpmAlgorithm::parts) / [`parts_mut`](PgpmAlgorithm::parts_mut) —
 ///   `(MappingContext, &AlgorithmState)` または `(MappingContext, &mut AlgorithmState)`
 ///   を返す借用分離アクセサ。
-/// - [`set_params`](PlanarMapping::set_params) — アルゴリズムパラメータの更新。
+/// - [`set_params`](PgpmAlgorithm::set_params) — アルゴリズムパラメータの更新。
 ///
 /// **デフォルトメソッド**: Algorithm 1 の完全なスケルトンと
 /// 数学的評価（Eq. 3）。
-pub trait PlanarMapping: Send + Sync {
+pub trait PgpmAlgorithm: Send + Sync {
     // ─────────────────────────────────────────
     // 必須: 借用分離アクセサ
     // ─────────────────────────────────────────

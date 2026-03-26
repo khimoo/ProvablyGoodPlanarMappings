@@ -5,7 +5,7 @@ use nalgebra::Vector2;
 use pgpm_core::algorithm::Algorithm;
 use pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis;
 use pgpm_core::basis::BasisFunction;
-use pgpm_core::mapping::PlanarMapping;
+use pgpm_core::mapping::PgpmAlgorithm;
 use pgpm_core::model::domain::PolygonDomain;
 use pgpm_core::model::types::{DomainBounds, MappingParams, RegularizationType};
 use pgpm_core::numerics::geodesic::{GeodesicField, build_domain_mask};

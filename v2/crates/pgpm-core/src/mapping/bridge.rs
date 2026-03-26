@@ -1,13 +1,13 @@
 //! フロントエンドブリッジトレイト。
 
 use crate::algorithm::strategy;
-use crate::mapping::PlanarMapping;
+use crate::mapping::PgpmAlgorithm;
 use crate::model::types::{AlgorithmError, DomainBounds, MappingParams, StepInfo};
 use nalgebra::Vector2;
 
-/// フロントエンドブリッジ: UI利用者に公開する [`PlanarMapping`] のサブセット。
+/// フロントエンドブリッジ: UI利用者に公開する [`PgpmAlgorithm`] のサブセット。
 ///
-/// `bevy-pgpm` はこのトレイトにのみ依存し、`PlanarMapping` には直接依存しない。
+/// `bevy-pgpm` はこのトレイトにのみ依存し、`PgpmAlgorithm` には直接依存しない。
 /// 内部メソッド（`coefficients`, `basis`, `grad_uv_at`, `j_s_j_a_at`,
 /// `singular_values_at`）はアルゴリズム内部で使用され、
 /// このインターフェースには含まれない。
@@ -54,18 +54,18 @@ pub trait MappingBridge: Send + Sync {
     fn domain_bounds(&self) -> DomainBounds;
 }
 
-/// ブランケット実装: `PlanarMapping` を実装する型は自動的に `MappingBridge` を満たす。
-impl<T: PlanarMapping + ?Sized> MappingBridge for T {
+/// ブランケット実装: `PgpmAlgorithm` を実装する型は自動的に `MappingBridge` を満たす。
+impl<T: PgpmAlgorithm + ?Sized> MappingBridge for T {
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
-        PlanarMapping::step(self, target_handles)
+        PgpmAlgorithm::step(self, target_handles)
     }
 
     fn evaluate_mapping_at(&self, points: &[Vector2<f64>]) -> Vec<Vector2<f64>> {
-        PlanarMapping::evaluate_mapping_at(self, points)
+        PgpmAlgorithm::evaluate_mapping_at(self, points)
     }
 
     fn update_params(&mut self, params: MappingParams) {
-        PlanarMapping::update_params(self, params)
+        PgpmAlgorithm::update_params(self, params)
     }
 
     fn refine_strategy2(
@@ -73,30 +73,30 @@ impl<T: PlanarMapping + ?Sized> MappingBridge for T {
         k_max: f64,
         target_handles: &[Vector2<f64>],
     ) -> Result<strategy::Strategy2Result, AlgorithmError> {
-        PlanarMapping::refine_strategy2(self, k_max, target_handles)
+        PgpmAlgorithm::refine_strategy2(self, k_max, target_handles)
     }
 
     fn params(&self) -> MappingParams {
-        PlanarMapping::params(self)
+        PgpmAlgorithm::params(self)
     }
 
     fn grid_resolution(&self) -> (usize, usize) {
-        PlanarMapping::grid_resolution(self)
+        PgpmAlgorithm::grid_resolution(self)
     }
 
     fn num_collocation_points(&self) -> usize {
-        PlanarMapping::num_collocation_points(self)
+        PgpmAlgorithm::num_collocation_points(self)
     }
 
     fn num_basis_functions(&self) -> usize {
-        PlanarMapping::num_basis_functions(self)
+        PgpmAlgorithm::num_basis_functions(self)
     }
 
     fn source_handles(&self) -> Vec<Vector2<f64>> {
-        PlanarMapping::source_handles(self)
+        PgpmAlgorithm::source_handles(self)
     }
 
     fn domain_bounds(&self) -> DomainBounds {
-        PlanarMapping::domain_bounds_query(self)
+        PgpmAlgorithm::domain_bounds_query(self)
     }
 }

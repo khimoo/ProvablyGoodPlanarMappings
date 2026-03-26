@@ -72,7 +72,7 @@ impl Default for SolverConfig {
 /// Algorithm 1 (Section 5) の不変コンテキスト。
 ///
 /// 単一のアルゴリズムステップ内で変化しない全データへの参照を束ねる。
-/// `&mut AlgorithmState` と共に [`PlanarMapping::parts_mut`] から返され、
+/// `&mut AlgorithmState` と共に [`PgpmAlgorithm::parts_mut`] から返され、
 /// トレイトのデフォルトメソッド内での借用分割を可能にする。
 pub struct MappingContext<'a> {
     /// 基底関数 φ_i (Table 1)
