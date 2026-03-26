@@ -10,7 +10,6 @@
 //! 5. 変形下で歪み上界が維持される
 
 use pgpm_core::basis::gaussian::GaussianBasis;
-use pgpm_core::basis::BasisFunction;
 use pgpm_core::distortion;
 use pgpm_core::algorithm::Algorithm;
 use pgpm_core::mapping::PlanarMapping;
@@ -18,18 +17,27 @@ use pgpm_core::model::types::*;
 use pgpm_core::policy::IsometricPolicy;
 use nalgebra::Vector2;
 
-/// 係数と基底から写像 f(x) = Σ c_i φ_i(x) (Eq. 3) を評価。
-fn eval_mapping(coefficients: &CoefficientMatrix, basis: &dyn BasisFunction, x: Vector2<f64>) -> Vector2<f64> {
-    let phi = basis.evaluate(x);
-    let n = basis.count();
-    let mut u = 0.0;
-    let mut v = 0.0;
-    for i in 0..n {
-        u += coefficients[(0, i)] * phi[i];
-        v += coefficients[(1, i)] * phi[i];
-    }
-    Vector2::new(u, v)
-}
+// ────────────────────────────────────────────────────────────
+// 許容誤差定数
+// ────────────────────────────────────────────────────────────
+
+/// 純粋な数学的恒等式の許容誤差（SVD分解、恒等写像評価）。
+/// 浮動小数点丸め誤差のみを許容。
+const EXACT_TOL: f64 = 1e-10;
+
+/// 単一の数値計算パスの許容誤差。
+/// 基底関数評価・勾配計算を経由するが、SOCPは通さない場合。
+/// SolverConfig::p_reg_coefficient (1e-6) と同オーダー。
+const NUMERICAL_TOL: f64 = 1e-5;
+
+/// SOCP歪み制約 D(z) <= K の充足許容誤差。
+/// Clarabel tol_feas = 1e-5 だが、反復的アクティブ集合更新で
+/// 累積する。reduced_tol_feas = 1e-2 も考慮。
+const SOCP_CONSTRAINT_TOL: f64 = 0.05;
+
+/// ソフトハンドル追跡の許容誤差 (Eq. 30: E_pos 最小化)。
+/// ハード制約ではなく目的関数の一項なので、K と変形量に依存。
+const HANDLE_TRACKING_TOL: f64 = 0.15;
 
 /// ヘルパー: [0,1]^2 上に条件の良いテストセットアップを作成。
 /// 密なRBF中心と適切なスケールで構成。
@@ -93,7 +101,7 @@ fn verify_identity_coefficients_give_distortion_one() {
         info.max_distortion
     );
     assert!(
-        (info.max_distortion - 1.0).abs() < 1e-6,
+        (info.max_distortion - 1.0).abs() < NUMERICAL_TOL,
         "Identity coefficients should give D=1 everywhere, got {:.6}",
         info.max_distortion
     );
@@ -123,10 +131,10 @@ fn verify_identity_target_converges() {
     // 収束後、最大歪みは K 以下であるべき（小さな許容誤差付き）
     let info = last_info.unwrap();
     assert!(
-        info.max_distortion <= k + 0.1,
+        info.max_distortion <= k + SOCP_CONSTRAINT_TOL,
         "After 10 steps with identity target, max_D={:.4} should be <= K+eps={}",
         info.max_distortion,
-        k + 0.1
+        k + SOCP_CONSTRAINT_TOL
     );
 
     // 求解後の歪みも上界内であることを検証
@@ -140,10 +148,10 @@ fn verify_identity_target_converges() {
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Post-solve max_D after 10 steps: {:.4}", max_d);
     assert!(
-        max_d <= k + 0.1,
+        max_d <= k + SOCP_CONSTRAINT_TOL,
         "Post-solve max_D={:.4} should be <= K+eps={}",
         max_d,
-        k + 0.1
+        k + SOCP_CONSTRAINT_TOL
     );
 }
 
@@ -175,27 +183,26 @@ fn verify_distortion_bound_at_constrained_points() {
     );
 
     // アクティブ集合点を確認: D(z) <= K（数値許容誤差付き）
-    let tol = 0.1; // SOCPソルバーの許容誤差
     for &idx in &state.active_set {
         assert!(
-            distortions[idx] <= k + tol,
+            distortions[idx] <= k + SOCP_CONSTRAINT_TOL,
             "Active point {}: D = {:.4} > K = {} (tol={})",
             idx,
             distortions[idx],
             k,
-            tol
+            SOCP_CONSTRAINT_TOL
         );
     }
 
     // 安定集合点も同様に確認
     for &idx in &state.stable_set {
         assert!(
-            distortions[idx] <= k + tol,
+            distortions[idx] <= k + SOCP_CONSTRAINT_TOL,
             "Stable point {}: D = {:.4} > K = {} (tol={})",
             idx,
             distortions[idx],
             k,
-            tol
+            SOCP_CONSTRAINT_TOL
         );
     }
 
@@ -224,7 +231,7 @@ fn verify_handle_tracking() {
     }
 
     // ソースハンドルで写像を評価（Eq. 3）
-    let mapped = eval_mapping(alg.coefficients(), alg.basis(), Vector2::new(0.5, 0.5));
+    let mapped = alg.evaluate_mapping_at(&[Vector2::new(0.5, 0.5)])[0];
     let error = (mapped - target[0]).norm();
 
     println!(
@@ -233,9 +240,10 @@ fn verify_handle_tracking() {
     );
 
     assert!(
-        error < 0.15,
-        "Handle tracking error {:.4} too large (expected < 0.15)",
-        error
+        error < HANDLE_TRACKING_TOL,
+        "Handle tracking error {:.4} too large (expected < {})",
+        error,
+        HANDLE_TRACKING_TOL
     );
 }
 
@@ -308,12 +316,15 @@ fn verify_mapping_continuity() {
         Vector2::new(0.2, 0.8),
     ];
 
-    let coefficients = alg.coefficients();
-    let basis = alg.basis();
     for &p in &test_points {
-        let f_p = eval_mapping(coefficients, basis, p);
-        let f_px = eval_mapping(coefficients, basis, p + Vector2::new(eps, 0.0));
-        let f_py = eval_mapping(coefficients, basis, p + Vector2::new(0.0, eps));
+        let results = alg.evaluate_mapping_at(&[
+            p,
+            p + Vector2::new(eps, 0.0),
+            p + Vector2::new(0.0, eps),
+        ]);
+        let f_p = results[0];
+        let f_px = results[1];
+        let f_py = results[2];
 
         let dx = (f_px - f_p).norm();
         let dy = (f_py - f_p).norm();
@@ -368,7 +379,7 @@ fn verify_k_bound_effect() {
         );
 
         let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let handle_error = (eval_mapping(alg.coefficients(), alg.basis(), Vector2::new(0.5, 0.5)) - target[0]).norm();
+        let handle_error = (alg.evaluate_mapping_at(&[Vector2::new(0.5, 0.5)])[0] - target[0]).norm();
 
         println!(
             "K={}: max_D={:.4}, handle_error={:.4}, active={}",
@@ -378,20 +389,28 @@ fn verify_k_bound_effect() {
             state.active_set.len()
         );
 
+        // 全 K 値で歪みが有限であることを確認
+        assert!(
+            max_d.is_finite(),
+            "K={}: distortion should be finite, got {}",
+            k,
+            max_d,
+        );
+
         results.push((k, max_d, handle_error));
     }
 
-    // 高い K は一般的により多くの歪み（より少ない制約）を許容し、
-    // かつ/または より良いハンドル追跡（より多くの自由度）を可能にする
-    let (_, d_tight, err_tight) = results[0]; // K=2
-    let (_, d_loose, err_loose) = results[2]; // K=8
+    let (_, _d_tight, err_tight) = results[0]; // K=2
+    let (_, _d_loose, err_loose) = results[2]; // K=8
 
     // K=8（緩い上界）ではソルバーにより多くの自由度があるため、
-    // ハンドルエラーは同等以上であるべき
-    // （厳密な単調保証ではないが、一般的に成立）
-    println!(
-        "K=2: D={:.4} err={:.4} | K=8: D={:.4} err={:.4}",
-        d_tight, err_tight, d_loose, err_loose
+    // ハンドルエラーは K=2 以下であるべき（SOCP許容誤差付き）
+    assert!(
+        err_loose <= err_tight + SOCP_CONSTRAINT_TOL,
+        "K=8 handle error ({:.4}) should be <= K=2 error ({:.4}) + tol ({})",
+        err_loose,
+        err_tight,
+        SOCP_CONSTRAINT_TOL,
     );
 }
 
@@ -402,7 +421,8 @@ fn verify_k_bound_effect() {
 #[test]
 fn verify_two_handle_deformation() {
     let src = vec![Vector2::new(0.3, 0.5), Vector2::new(0.7, 0.5)];
-    let mut alg = make_verification_algorithm(4.0, src.clone(), 20);
+    let k = 4.0;
+    let mut alg = make_verification_algorithm(k, src.clone(), 20);
 
     // ハンドルを引き離す
     let target = vec![Vector2::new(0.2, 0.5), Vector2::new(0.8, 0.5)];
@@ -416,8 +436,9 @@ fn verify_two_handle_deformation() {
     }
 
     // 両ハンドルが追跡されているか確認（Eq. 3）
-    let mapped_a = eval_mapping(alg.coefficients(), alg.basis(), src[0]);
-    let mapped_b = eval_mapping(alg.coefficients(), alg.basis(), src[1]);
+    let mapped = alg.evaluate_mapping_at(&[src[0], src[1]]);
+    let mapped_a = mapped[0];
+    let mapped_b = mapped[1];
 
     let err_a = (mapped_a - target[0]).norm();
     let err_b = (mapped_b - target[1]).norm();
@@ -431,10 +452,10 @@ fn verify_two_handle_deformation() {
         src[1].x, src[1].y, mapped_b.x, mapped_b.y, err_b
     );
 
-    assert!(err_a < 0.2, "Handle A error {:.4} too large", err_a);
-    assert!(err_b < 0.2, "Handle B error {:.4} too large", err_b);
+    assert!(err_a < HANDLE_TRACKING_TOL, "Handle A error {:.4} too large", err_a);
+    assert!(err_b < HANDLE_TRACKING_TOL, "Handle B error {:.4} too large", err_b);
 
-    // 歪み制約を検証
+    // 歪み上界を検証
     let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
@@ -444,6 +465,13 @@ fn verify_two_handle_deformation() {
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Final max distortion: {:.4}", max_d);
+
+    assert!(
+        max_d <= k + SOCP_CONSTRAINT_TOL,
+        "max_D={:.4} should be <= K+tol={}",
+        max_d,
+        k + SOCP_CONSTRAINT_TOL,
+    );
 }
 
 // ────────────────────────────────────────────────────────────
@@ -479,12 +507,12 @@ fn verify_singular_value_decomposition() {
         let svd_min = sv[0].min(sv[1]);
 
         assert!(
-            (sigma_max - svd_max).abs() < 1e-10,
+            (sigma_max - svd_max).abs() < EXACT_TOL,
             "Sigma mismatch: J_S/J_A gives {:.6}, SVD gives {:.6} for grad_u={:?}, grad_v={:?}",
             sigma_max, svd_max, grad_u, grad_v
         );
         assert!(
-            (sigma_min - svd_min).abs() < 1e-10,
+            (sigma_min - svd_min).abs() < EXACT_TOL,
             "sigma mismatch: J_S/J_A gives {:.6}, SVD gives {:.6} for grad_u={:?}, grad_v={:?}",
             sigma_min, svd_min, grad_u, grad_v
         );

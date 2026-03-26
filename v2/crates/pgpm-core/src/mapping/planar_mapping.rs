@@ -206,6 +206,19 @@ pub trait PlanarMapping: Send + Sync {
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
         self.ensure_precomputed();
 
+        // ハンドル数の整合性を検証
+        {
+            let (ctx, _) = self.parts();
+            let n_src = ctx.source_handles.len();
+            let n_tgt = target_handles.len();
+            if n_src != n_tgt {
+                return Err(AlgorithmError::InvalidInput(format!(
+                    "source_handles ({}) and target_handles ({}) count mismatch",
+                    n_src, n_tgt,
+                )));
+            }
+        }
+
         // 2. 歪みを評価（Eq. 19-20）
         let distortions = {
             let (ctx, state) = self.parts();

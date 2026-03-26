@@ -362,6 +362,29 @@ mod tests {
     }
 
     #[test]
+    fn test_step_handle_count_mismatch() {
+        let mut alg = make_test_algorithm();
+
+        // ターゲット数 > ソース数 → エラー
+        let too_many = vec![Vector2::new(0.5, 0.5), Vector2::new(0.6, 0.6)];
+        let err = alg.step(&too_many).unwrap_err();
+        assert!(
+            matches!(err, AlgorithmError::InvalidInput(_)),
+            "Expected InvalidInput, got {:?}",
+            err
+        );
+
+        // ターゲット数 = 0 → エラー
+        let empty: Vec<Vector2<f64>> = vec![];
+        let err = alg.step(&empty).unwrap_err();
+        assert!(
+            matches!(err, AlgorithmError::InvalidInput(_)),
+            "Expected InvalidInput for empty targets, got {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn test_domain_mask_with_polygon_domain() {
         use crate::model::domain::PolygonDomain;
 

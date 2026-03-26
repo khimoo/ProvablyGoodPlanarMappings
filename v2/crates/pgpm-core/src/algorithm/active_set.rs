@@ -158,6 +158,26 @@ mod tests {
     use super::*;
     use nalgebra::Vector2;
 
+    /// テスト用の最小 AlgorithmState を構築。
+    /// K_high = 0.1 + 0.9*k, K_low = 0.5 + 0.5*k (Section 5)。
+    fn make_test_state(grid_w: usize, grid_h: usize, k_bound: f64) -> AlgorithmState {
+        let n = grid_w * grid_h;
+        AlgorithmState {
+            coefficients: nalgebra::DMatrix::zeros(2, 1),
+            collocation_points: Vec::new(),
+            active_set: Vec::new(),
+            stable_set: Vec::new(),
+            frames: Vec::new(),
+            k_high: 0.1 + 0.9 * k_bound,
+            k_low: 0.5 + 0.5 * k_bound,
+            domain_mask: vec![true; n],
+            precomputed: None,
+            grid_width: grid_w,
+            grid_height: grid_h,
+            prev_target_handles: None,
+        }
+    }
+
     #[test]
     fn test_local_maxima_simple() {
         // 中央に単一のピークを持つ3x3グリッド
@@ -200,20 +220,7 @@ mod tests {
 
     #[test]
     fn test_active_set_update() {
-        let mut state = crate::model::types::AlgorithmState {
-            coefficients: nalgebra::DMatrix::zeros(2, 1),
-            collocation_points: Vec::new(),
-            active_set: Vec::new(),
-            stable_set: Vec::new(),
-            frames: Vec::new(),
-            k_high: 2.8, // 0.1 + 0.9*3
-            k_low: 2.0,   // 0.5 + 0.5*3
-            domain_mask: vec![true; 9],
-            precomputed: None,
-            grid_width: 3,
-            grid_height: 3,
-            prev_target_handles: None,
-        };
+        let mut state = make_test_state(3, 3, 3.0);
 
         // 3x3グリッド、中央に高い歪み
         #[rustfmt::skip]
@@ -230,20 +237,8 @@ mod tests {
 
     #[test]
     fn test_active_set_removal() {
-        let mut state = crate::model::types::AlgorithmState {
-            coefficients: nalgebra::DMatrix::zeros(2, 1),
-            collocation_points: Vec::new(),
-            active_set: vec![4],
-            stable_set: Vec::new(),
-            frames: Vec::new(),
-            k_high: 2.8,
-            k_low: 2.0,
-            domain_mask: vec![true; 9],
-            precomputed: None,
-            grid_width: 3,
-            grid_height: 3,
-            prev_target_handles: None,
-        };
+        let mut state = make_test_state(3, 3, 3.0);
+        state.active_set = vec![4];
 
         // 4の歪みがK_low以下に低下
         #[rustfmt::skip]
@@ -294,21 +289,9 @@ mod tests {
 
     #[test]
     fn test_active_set_skips_exterior_points() {
-        // 3x3グリッド: 中央はドメイン外 (mask = false)
-        let mut state = crate::model::types::AlgorithmState {
-            coefficients: nalgebra::DMatrix::zeros(2, 1),
-            collocation_points: Vec::new(),
-            active_set: Vec::new(),
-            stable_set: Vec::new(),
-            frames: Vec::new(),
-            k_high: 2.8,
-            k_low: 2.0,
-            domain_mask: vec![true, true, true, true, false, true, true, true, true],
-            precomputed: None,
-            grid_width: 3,
-            grid_height: 3,
-            prev_target_handles: None,
-        };
+        let mut state = make_test_state(3, 3, 3.0);
+        // 中央はドメイン外 (mask = false)
+        state.domain_mask[4] = false;
 
         // 中央は高い歪みを持つがドメイン外
         #[rustfmt::skip]

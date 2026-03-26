@@ -1,9 +1,9 @@
 //! # pgpm-core
 //!
 //! "Provably Good Planar Mappings" (Poranne & Lipman, 2014) の
-//! 純粋なRust実装。
+//! 純粋な実装。
 //!
-//! このクレートは論文に記述されたアルゴリズム**のみ**を含む。
+//! このクレートは論文に記述されたアルゴリズム以外を含めないこと.
 //! Bevy、UI、画像処理への依存は一切ない。
 
 pub mod model;
