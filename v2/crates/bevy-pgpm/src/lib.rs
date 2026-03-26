@@ -1,4 +1,4 @@
-//! bevy-pgpm library: module declarations and re-exports.
+//! bevy-pgpm ライブラリ: モジュール宣言と再エクスポート。
 
 pub mod domain;
 pub mod state;

@@ -1,14 +1,14 @@
-//! Adjustable algorithm parameters and enum types.
+//! 調整可能なアルゴリズムパラメータと列挙型。
 
 use bevy::prelude::*;
 use pgpm_core::model::types::RegularizationType;
 
-/// Which basis function type to use (Table 1).
+/// 使用する基底関数タイプ (Table 1)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BasisType {
-    /// Standard Euclidean Gaussian -- GPU path (vertex shader evaluates RBFs).
+    /// 標準ユークリッド Gaussian -- GPU パス（頂点シェーダが RBF を評価）。
     Gaussian,
-    /// Shape-aware Gaussian using geodesic distance -- CPU path.
+    /// 測地距離を使用する Shape-aware Gaussian -- CPU パス。
     ShapeAwareGaussian,
     // Phase 3: BSpline,
     // Phase 3: TPS,
@@ -29,7 +29,7 @@ impl BasisType {
         }
     }
 
-    /// Whether the GPU shader can evaluate this basis directly.
+    /// GPU シェーダがこの基底を直接評価できるか。
     pub fn supports_gpu_eval(self) -> bool {
         match self {
             BasisType::Gaussian => true,
@@ -46,7 +46,7 @@ impl std::fmt::Display for BasisType {
     }
 }
 
-/// Which regularization mode the user has selected.
+/// ユーザーが選択した正則化モード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegMode {
     Arap,
@@ -74,7 +74,7 @@ impl RegMode {
         }
     }
 
-    /// Convert to pgpm-core RegularizationType.
+    /// pgpm-core の RegularizationType に変換。
     pub fn to_core(self, lambda_arap: f64, lambda_bh: f64) -> RegularizationType {
         match self {
             RegMode::Arap => RegularizationType::Arap,
@@ -83,11 +83,11 @@ impl RegMode {
                 lambda_bh,
                 lambda_arap,
             },
-            RegMode::None => RegularizationType::Arap, // lambda=0 handles this
+            RegMode::None => RegularizationType::Arap, // lambda=0 で対応
         }
     }
 
-    /// Effective lambda_reg: for None mode we force 0.
+    /// 有効な lambda_reg: None モードでは 0 に強制。
     pub fn effective_lambda(self, lambda_reg: f64) -> f64 {
         match self {
             RegMode::None => 0.0,
@@ -102,7 +102,7 @@ impl std::fmt::Display for RegMode {
     }
 }
 
-/// Adjustable algorithm parameters.
+/// 調整可能なアルゴリズムパラメータ。
 #[derive(Resource)]
 pub struct AlgoParams {
     pub k_bound: f64,
@@ -110,15 +110,15 @@ pub struct AlgoParams {
     pub grid_resolution: usize,
     pub fps_k: usize,
     pub epsilon: f64,
-    /// Regularization mode (ARAP / Biharmonic / Mixed / None)
+    /// 正則化モード (ARAP / Biharmonic / Mixed / None)
     pub reg_mode: RegMode,
-    /// ARAP weight for Mixed mode
+    /// Mixed モード用 ARAP 重み
     pub lambda_arap: f64,
-    /// Biharmonic weight for Mixed mode
+    /// Mixed モード用 Biharmonic 重み
     pub lambda_bh: f64,
-    /// Basis function type (Table 1)
+    /// 基底関数タイプ (Table 1)
     pub basis_type: BasisType,
-    /// Strategy 2 target K_max (Eq. 14, must be > k_bound)
+    /// Strategy 2 の目標 K_max (Eq. 14、k_bound より大きい必要あり)
     pub k_max: f64,
 }
 
@@ -134,7 +134,7 @@ impl Default for AlgoParams {
             lambda_arap: 1.0,
             lambda_bh: 0.1,
             basis_type: BasisType::Gaussian,
-            k_max: 6.0, // default: k_bound * 2.0
+            k_max: 6.0, // デフォルト: k_bound * 2.0
         }
     }
 }

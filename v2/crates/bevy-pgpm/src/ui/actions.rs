@@ -1,4 +1,4 @@
-//! Button action systems: handle user interactions on UI buttons.
+//! ボタンアクションシステム: UI ボタンでのユーザーインタラクションを処理。
 
 use bevy::prelude::*;
 use log::{info, warn};
@@ -15,7 +15,7 @@ use crate::state::{
 };
 use crate::ui::markers::*;
 
-/// System: toggle between Setup and Deforming mode.
+/// システム: Setup と Deforming モードを切り替え。
 pub fn on_toggle_mode(
     query: Query<&Interaction, (Changed<Interaction>, With<ToggleModeButton>)>,
     state: Res<State<AppState>>,
@@ -53,7 +53,7 @@ pub fn on_toggle_mode(
     }
 }
 
-/// System: reset all state and return to Setup.
+/// システム: 全状態をリセットして Setup に戻る。
 pub fn on_reset(
     query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
     mut algo_state: ResMut<AlgorithmState>,
@@ -72,7 +72,7 @@ pub fn on_reset(
         *deform_info = DeformationInfo::default();
         next_state.set(AppState::Setup);
 
-        // Reset mesh vertex positions to original (undeformed) positions
+        // メッシュ頂点位置を元の（変形前）位置にリセット
         if let (Some(ref orig), Ok(mesh_handle)) = (original_positions.as_ref(), mesh_query.single()) {
             if let Some(mesh) = meshes.get_mut(&mesh_handle.0) {
                 mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, orig.world_positions.clone());
@@ -81,7 +81,7 @@ pub fn on_reset(
     }
 }
 
-/// System: adjust K bound via +/- buttons.
+/// システム: +/- ボタンで K 上界を調整。
 pub fn on_k_bound(
     q_minus: Query<&Interaction, (Changed<Interaction>, With<KMinusButton>)>,
     q_plus: Query<&Interaction, (Changed<Interaction>, With<KPlusButton>)>,
@@ -107,7 +107,7 @@ pub fn on_k_bound(
     }
 }
 
-/// System: adjust lambda via /10 and x10 buttons.
+/// システム: /10 と x10 ボタンで lambda を調整。
 pub fn on_lambda(
     q_down: Query<&Interaction, (Changed<Interaction>, With<LambdaDownButton>)>,
     q_up: Query<&Interaction, (Changed<Interaction>, With<LambdaUpButton>)>,
@@ -132,7 +132,7 @@ pub fn on_lambda(
     }
 }
 
-/// System: cycle regularization mode.
+/// システム: 正則化モードを循環。
 pub fn on_reg_mode(
     query: Query<&Interaction, (Changed<Interaction>, With<RegModeButton>)>,
     mut params: ResMut<AlgoParams>,
@@ -145,7 +145,7 @@ pub fn on_reg_mode(
     }
 }
 
-/// System: cycle basis function type (only effective in Setup mode).
+/// システム: 基底関数タイプを循環（Setup モードでのみ有効）。
 pub fn on_basis_type(
     query: Query<&Interaction, (Changed<Interaction>, With<BasisTypeButton>)>,
     mut params: ResMut<AlgoParams>,
@@ -162,7 +162,7 @@ pub fn on_basis_type(
     }
 }
 
-/// System: handle the "Load Image" button click (opens native file dialog).
+/// システム: "Load Image" ボタンクリックを処理（ネイティブファイルダイアログを開く）。
 pub fn on_image_path(
     query: Query<&Interaction, (Changed<Interaction>, With<ImageLoadButton>)>,
     mut path_config: ResMut<ImagePathConfig>,
@@ -172,13 +172,13 @@ pub fn on_image_path(
     for interaction in &query {
         if *interaction != Interaction::Pressed { continue; }
 
-        // Only allow image loading in Setup mode
+        // Setup モードでのみ画像読み込みを許可
         if *state.get() != AppState::Setup {
             info!("Switch to Setup mode before loading a new image");
             continue;
         }
 
-        // Open native file dialog
+        // ネイティブファイルダイアログを開く
         let dialog = rfd::FileDialog::new()
             .add_filter("PNG Images", &["png"])
             .add_filter("All Images", &["png", "jpg", "jpeg", "bmp", "tga"])
@@ -188,7 +188,7 @@ pub fn on_image_path(
             let abs_path = path.to_string_lossy().into_owned();
             info!("Selected image: {}", abs_path);
 
-            // Update the display text (show just filename)
+            // 表示テキストを更新（ファイル名のみ表示）
             let display_name = path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| abs_path.clone());
@@ -196,14 +196,14 @@ pub fn on_image_path(
                 **text = display_name.clone();
             }
 
-            // Trigger reload
+            // 再読み込みをトリガー
             path_config.abs_path = abs_path;
             path_config.needs_reload = true;
         }
     }
 }
 
-/// System: adjust K_max parameter via +/- buttons.
+/// システム: +/- ボタンで K_max パラメータを調整。
 pub fn on_k_max(
     q_minus: Query<&Interaction, (Changed<Interaction>, With<KMaxMinusButton>)>,
     q_plus: Query<&Interaction, (Changed<Interaction>, With<KMaxPlusButton>)>,
@@ -228,7 +228,7 @@ pub fn on_k_max(
     }
 }
 
-/// System: handle the "Refine (Strategy 2)" button click.
+/// システム: "Refine (Strategy 2)" ボタンクリックを処理。
 pub fn on_strategy2(
     query: Query<&Interaction, (Changed<Interaction>, With<Strategy2Button>)>,
     state: Res<State<AppState>>,
@@ -281,9 +281,9 @@ pub fn on_strategy2(
     }
 }
 
-// Private helpers
+// プライベートヘルパー
 
-/// Enforce Strategy 2 invariant: K_max > K (Eq. 14 precondition).
+/// Strategy 2 不変条件を強制: K_max > K (Eq. 14 前提条件)。
 fn enforce_k_max_invariant(params: &mut AlgoParams) {
     let min_k_max = params.k_bound + 0.1;
     if params.k_max < min_k_max {
@@ -291,7 +291,7 @@ fn enforce_k_max_invariant(params: &mut AlgoParams) {
     }
 }
 
-/// Push updated parameters to the algorithm instance and flag for re-solve.
+/// 更新されたパラメータをアルゴリズムインスタンスにプッシュし、再求解フラグを立てる。
 fn push_params(params: &AlgoParams, algo_state: &mut AlgorithmState) {
     if let Some(ref mut algo) = algo_state.algorithm {
         let core_params = MappingParams {
@@ -304,10 +304,10 @@ fn push_params(params: &AlgoParams, algo_state: &mut AlgorithmState) {
     }
 }
 
-/// Construct a pgpm-core mapping from UI parameters and handle positions.
+/// UI パラメータとハンドル位置から pgpm-core 写像を構築。
 ///
-/// This is the bridge between bevy-pgpm's UI types (`AlgoParams`, `BasisType`)
-/// and pgpm-core's algorithm types (`MappingParams`, `BasisFunction`, `Domain`).
+/// bevy-pgpm の UI 型（`AlgoParams`、`BasisType`）と pgpm-core の
+/// アルゴリズム型（`MappingParams`、`BasisFunction`、`Domain`）間の橋渡し。
 fn build_mapping(
     source_handles: &[Vector2<f64>],
     image_width: f64,

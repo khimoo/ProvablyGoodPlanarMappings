@@ -1,7 +1,7 @@
-//! GUI panel: buttons, parameter controls, handle gizmos, and status display.
+//! GUI パネル: ボタン、パラメータコントロール、ハンドルギズモ、ステータス表示。
 //!
-//! All user interactions (except handle placement/dragging on the canvas)
-//! are performed through on-screen UI elements.  No keyboard shortcuts.
+//! キャンバス上でのハンドル配置/ドラッグを除く全てのユーザーインタラクションは
+//! 画面上の UI 要素を通じて行われる。キーボードショートカットは無し。
 
 pub mod markers;
 pub mod panel;
@@ -23,10 +23,10 @@ pub use gizmos::draw_handles;
 
 use bevy::prelude::*;
 
-/// Width of the right-side control panel in logical pixels.
+/// 右側コントロールパネルの論理ピクセル単位での幅。
 pub const PANEL_WIDTH: f32 = 220.0;
 
-// Shared colours used across UI sub-modules.
+// UI サブモジュール間で共有される色。
 pub(crate) const PANEL_BG: Color = Color::srgba(0.08, 0.08, 0.12, 0.92);
 pub(crate) const BTN_NORMAL: Color = Color::srgb(0.25, 0.25, 0.35);
 pub(crate) const BTN_HOVERED: Color = Color::srgb(0.35, 0.35, 0.50);

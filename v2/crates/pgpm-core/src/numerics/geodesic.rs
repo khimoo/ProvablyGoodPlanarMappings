@@ -1,49 +1,48 @@
-//! Geodesic distance computation via Fast Marching Method (FMM).
+//! Fast Marching Method (FMM) による測地距離計算。
 //!
-//! Paper Section "Shape aware bases" (p.76:9):
+//! 論文 Section "Shape aware bases" (p.76:9):
 //! > "we tested shape aware variation of Gaussians, which is achieved by
 //! > simply replacing the norm in their definition with the shortest
 //! > distance function."
 //!
-//! The FMM solves the eikonal equation |∇T| = 1 on a 2D grid,
-//! where cells outside the domain polygon are treated as obstacles.
-//! This gives the shortest interior-path distance from a source point
-//! to every grid cell.
+//! FMM は2Dグリッド上でアイコナル方程式 |∇T| = 1 を解く。
+//! ドメインポリゴン外のセルは障害物として扱う。
+//! これにより、ソース点から全グリッドセルへのドメイン内部最短経路距離が得られる。
 
 use crate::model::types::DomainBounds;
 use nalgebra::Vector2;
 use std::collections::BinaryHeap;
 use std::cmp::Ordering;
 
-/// A geodesic distance field computed by FMM from a single source.
+/// 単一ソースからFMMで計算された測地距離場。
 pub struct GeodesicField {
-    /// Distance values on the grid (row-major: idx = row * width + col).
+    /// グリッド上の距離値（行優先: idx = row * width + col）。
     distances: Vec<f64>,
-    /// Grid dimensions.
+    /// グリッドの次元。
     width: usize,
     height: usize,
-    /// Grid spacing.
+    /// グリッド間隔。
     dx: f64,
     dy: f64,
-    /// Domain bounds (for coordinate ↔ index conversion).
+    /// ドメイン境界（座標 ↔ インデックス変換用）。
     x_min: f64,
     y_min: f64,
 }
 
-/// Cell state for FMM.
+/// FMM用のセル状態。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CellState {
-    /// Not yet reached.
+    /// 未到達。
     Far,
-    /// In the narrow band (tentative distance assigned).
+    /// ナローバンド内（暫定距離が割り当て済み）。
     Narrow,
-    /// Distance finalized.
+    /// 距離が確定済み。
     Frozen,
-    /// Outside the domain (obstacle).
+    /// ドメイン外（障害物）。
     Wall,
 }
 
-/// Priority queue entry (min-heap via Reverse ordering).
+/// 優先度キューのエントリ（Reverseによる最小ヒープ）。
 #[derive(Clone, Copy)]
 struct FmmEntry {
     dist: f64,
@@ -60,17 +59,17 @@ impl PartialOrd for FmmEntry {
 }
 impl Ord for FmmEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap (BinaryHeap is max-heap by default)
+        // 最小ヒープのための逆順（BinaryHeap はデフォルトで最大ヒープ）
         other.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
     }
 }
 
 impl GeodesicField {
-    /// Compute the geodesic distance field from `source` on a grid.
+    /// `source` からの測地距離場をグリッド上で計算する。
     ///
-    /// `domain_mask` should have length `width * height` (row-major),
-    /// where `true` means the cell is inside the domain.
-    /// The grid covers `bounds` with the given `width` × `height` cells.
+    /// `domain_mask` は長さ `width * height`（行優先）で、
+    /// `true` はセルがドメイン内部であることを意味する。
+    /// グリッドは指定された `width` × `height` のセルで `bounds` を覆う。
     pub fn compute(
         source: Vector2<f64>,
         bounds: &DomainBounds,
@@ -87,19 +86,19 @@ impl GeodesicField {
         let mut distances = vec![f64::INFINITY; n];
         let mut states = vec![CellState::Far; n];
 
-        // Mark walls
+        // 壁をマーク
         for i in 0..n {
             if !domain_mask[i] {
                 states[i] = CellState::Wall;
             }
         }
 
-        // Find the grid cell closest to source
+        // ソースに最も近いグリッドセルを見つける
         let src_col_f = (source.x - bounds.x_min) / dx;
         let src_row_f = (source.y - bounds.y_min) / dy;
 
-        // Initialize seed cells: the 2×2 neighborhood around the source,
-        // setting distance to the exact Euclidean distance from source.
+        // シードセルの初期化: ソース周りの2×2近傍、
+        // ソースからの正確なユークリッド距離を設定
         let mut heap = BinaryHeap::new();
 
         let col0 = (src_col_f.floor() as isize).max(0) as usize;
@@ -124,7 +123,7 @@ impl GeodesicField {
             }
         }
 
-        // FMM main loop
+        // FMMメインループ
         while let Some(entry) = heap.pop() {
             let idx = entry.idx;
             if states[idx] == CellState::Frozen {
@@ -135,7 +134,7 @@ impl GeodesicField {
             let row = idx / width;
             let col = idx % width;
 
-            // Update 4-connected neighbors
+            // 4連結近傍を更新
             let neighbors: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
             for &(dr, dc) in &neighbors {
                 let nr = row as isize + dr;
@@ -172,17 +171,17 @@ impl GeodesicField {
         }
     }
 
-    /// Get distance at a grid index.
+    /// グリッドインデックスでの距離を取得する。
     #[inline]
     pub fn distance_at_index(&self, idx: usize) -> f64 {
         self.distances[idx]
     }
 
-    /// Bilinear interpolation of the distance field at an arbitrary point.
+    /// 任意の点での距離場の双線形補間。
     ///
-    /// If any of the 2×2 bilinear neighbors have Inf distance (Wall cells),
-    /// they are excluded and only finite neighbors contribute. This prevents
-    /// Inf from contaminating interpolation near the domain boundary.
+    /// 2×2双線形近傍のいずれかがInf距離（壁セル）の場合、
+    /// 有限な近傍のみで寄与する。ドメイン境界付近で
+    /// Infが補間を汚染するのを防ぐ。
     pub fn interpolate(&self, x: Vector2<f64>) -> f64 {
         let cf = (x.x - self.x_min) / self.dx;
         let rf = (x.y - self.y_min) / self.dy;
@@ -200,14 +199,14 @@ impl GeodesicField {
         let d01 = self.distances[r1 * self.width + c0];
         let d11 = self.distances[r1 * self.width + c1];
 
-        // Check if all four are finite → standard bilinear
+        // 4つ全てが有限 → 標準的な双線形補間
         if d00.is_finite() && d10.is_finite() && d01.is_finite() && d11.is_finite() {
             let d0 = d00 * (1.0 - tc) + d10 * tc;
             let d1 = d01 * (1.0 - tc) + d11 * tc;
             return d0 * (1.0 - tr) + d1 * tr;
         }
 
-        // Some neighbors are walls: weighted average of finite neighbors only
+        // 一部の近傍が壁: 有限な近傍のみの加重平均
         let corners = [
             (d00, (1.0 - tc) * (1.0 - tr)),
             (d10, tc * (1.0 - tr)),
@@ -229,8 +228,8 @@ impl GeodesicField {
         }
     }
 
-    /// Gradient of the distance field at a grid point (central differences).
-    /// Returns (∂d/∂x, ∂d/∂y).
+    /// グリッド点での距離場の勾配（中心差分）。
+    /// (∂d/∂x, ∂d/∂y) を返す。
     pub fn gradient_at_index(&self, idx: usize) -> Vector2<f64> {
         let row = idx / self.width;
         let col = idx % self.width;
@@ -254,10 +253,9 @@ impl GeodesicField {
         Vector2::new(ddx, ddy)
     }
 
-    /// Interpolated gradient at an arbitrary point.
+    /// 任意の点での補間された勾配。
     ///
-    /// Skips Wall cells (Inf distance) when interpolating, analogous to
-    /// `interpolate()`.
+    /// `interpolate()` と同様に壁セル（Inf距離）をスキップする。
     pub fn interpolate_gradient(&self, x: Vector2<f64>) -> Vector2<f64> {
         let cf = (x.x - self.x_min) / self.dx;
         let rf = (x.y - self.y_min) / self.dy;
@@ -299,21 +297,21 @@ impl GeodesicField {
         }
     }
 
-    /// Grid dimensions.
+    /// グリッドの次元。
     pub fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
 
-    /// Grid spacing.
+    /// グリッドの間隔。
     pub fn spacing(&self) -> (f64, f64) {
         (self.dx, self.dy)
     }
 }
 
-/// Solve the 2D eikonal equation at cell (row, col) using upwind neighbors.
+/// セル (row, col) での2Dアイコナル方程式を風上近傍で解く。
 ///
-/// Standard FMM update: solve ((T - T_x)/dx)² + ((T - T_y)/dy)² = 1
-/// where T_x, T_y are the minimum frozen x- and y-neighbor distances.
+/// 標準FMM更新: ((T - T_x)/dx)² + ((T - T_y)/dy)² = 1 を解く。
+/// T_x, T_y は最小の確定済みx/y方向近傍距離。
 fn solve_eikonal_2d(
     distances: &[f64],
     states: &[CellState],
@@ -324,7 +322,7 @@ fn solve_eikonal_2d(
     dx: f64,
     dy: f64,
 ) -> f64 {
-    // Get minimum frozen/narrow neighbor in x-direction
+    // x方向の最小確定/ナローバンド近傍を取得
     let tx = {
         let left = if col > 0 {
             let i = row * width + col - 1;
@@ -337,7 +335,7 @@ fn solve_eikonal_2d(
         left.min(right)
     };
 
-    // Get minimum frozen/narrow neighbor in y-direction
+    // y方向の最小確定/ナローバンド近傍を取得
     let ty = {
         let up = if row > 0 {
             let i = (row - 1) * width + col;
@@ -361,7 +359,7 @@ fn solve_eikonal_2d(
         return tx + dx;
     }
 
-    // Solve: ((T - tx)/dx)² + ((T - ty)/dy)² = 1
+    // 解く: ((T - tx)/dx)² + ((T - ty)/dy)² = 1
     let a = 1.0 / (dx * dx) + 1.0 / (dy * dy);
     let b = -2.0 * (tx / (dx * dx) + ty / (dy * dy));
     let c = tx * tx / (dx * dx) + ty * ty / (dy * dy) - 1.0;
@@ -369,11 +367,11 @@ fn solve_eikonal_2d(
     let discriminant = b * b - 4.0 * a * c;
 
     if discriminant < 0.0 {
-        // Fall back to 1D solution
+        // 1D解にフォールバック
         (tx + dx).min(ty + dy)
     } else {
         let t = (-b + discriminant.sqrt()) / (2.0 * a);
-        // Ensure result is >= both neighbors
+        // 結果が両方の近傍以上であることを確認
         if t >= tx && t >= ty {
             t
         } else {
@@ -382,18 +380,16 @@ fn solve_eikonal_2d(
     }
 }
 
-/// Build a domain mask on a grid from a polygon contour.
+/// ポリゴン輪郭からグリッド上のドメインマスクを構築する。
 ///
-/// Returns a Vec<bool> of length width*height (row-major).
-/// `true` if the grid cell at (col, row) is inside the polygon
-/// **or within one grid cell of the polygon boundary**.
+/// 長さ width*height の Vec<bool>（行優先）を返す。
+/// (col, row) のグリッドセルがポリゴンの内部
+/// **またはポリゴン境界から1グリッドセル以内**にある場合に `true`。
 ///
-/// The standard ray-casting point-in-polygon test returns `false` for
-/// points exactly on the boundary. Since the FMM marks non-interior
-/// cells as walls (distance = Inf), this causes bilinear interpolation
-/// to produce Inf near the boundary. Including boundary-adjacent cells
-/// ensures the distance field is well-defined everywhere inside the
-/// contour.
+/// 標準的なレイキャスティング内包判定は境界上の点に対して `false` を返す。
+/// FMMが非内部セルを壁（距離 = Inf）としてマークするため、
+/// 境界付近の双線形補間がInfになってしまう。境界隣接セルを含めることで、
+/// 輪郭内部の全箇所で距離場が適切に定義されることを保証する。
 pub fn build_domain_mask(
     bounds: &DomainBounds,
     width: usize,
@@ -402,7 +398,7 @@ pub fn build_domain_mask(
 ) -> Vec<bool> {
     let dx = (bounds.x_max - bounds.x_min) / (width as f64 - 1.0);
     let dy = (bounds.y_max - bounds.y_min) / (height as f64 - 1.0);
-    let margin = dx.max(dy) * 1.5; // include cells within 1.5 grid spacings of boundary
+    let margin = dx.max(dy) * 1.5; // 境界から1.5グリッド間隔以内のセルを含める
 
     let mut mask = vec![false; width * height];
 
@@ -419,7 +415,7 @@ pub fn build_domain_mask(
     mask
 }
 
-/// Check whether a point is within `margin` distance of any polygon edge.
+/// 点がポリゴン辺から `margin` 距離以内にあるかを判定する。
 fn point_near_polygon_edge(x: f64, y: f64, polygon: &[Vector2<f64>], margin: f64) -> bool {
     let n = polygon.len();
     if n < 2 {
@@ -430,12 +426,12 @@ fn point_near_polygon_edge(x: f64, y: f64, polygon: &[Vector2<f64>], margin: f64
         let j = (i + 1) % n;
         let (ax, ay) = (polygon[i].x, polygon[i].y);
         let (bx, by) = (polygon[j].x, polygon[j].y);
-        // Project point onto the line segment [a, b]
+        // 点を線分 [a, b] に射影
         let abx = bx - ax;
         let aby = by - ay;
         let len_sq = abx * abx + aby * aby;
         if len_sq < 1e-30 {
-            // Degenerate edge
+            // 退化した辺
             let dx = x - ax;
             let dy = y - ay;
             if dx * dx + dy * dy <= margin_sq {
@@ -456,7 +452,7 @@ fn point_near_polygon_edge(x: f64, y: f64, polygon: &[Vector2<f64>], margin: f64
     false
 }
 
-/// Ray-casting point-in-polygon test.
+/// レイキャスティングによる点のポリゴン内包判定。
 fn point_in_polygon_f64(x: f64, y: f64, polygon: &[Vector2<f64>]) -> bool {
     let n = polygon.len();
     if n < 3 {
@@ -481,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_fmm_open_domain() {
-        // Simple square domain, no obstacles
+        // 単純な正方形ドメイン、障害物なし
         let bounds = DomainBounds {
             x_min: 0.0, x_max: 1.0,
             y_min: 0.0, y_max: 1.0,
@@ -493,11 +489,11 @@ mod tests {
 
         let field = GeodesicField::compute(source, &bounds, w, h, &mask);
 
-        // Distance at source should be ~0
+        // ソースでの距離は ~0 であるべき
         let center_idx = 10 * w + 10;
         assert!(field.distance_at_index(center_idx) < 0.1);
 
-        // Distance at corner (0,0) should be ~sqrt(0.5) ≈ 0.707
+        // 角 (0,0) での距離は ~sqrt(0.5) ≈ 0.707 であるべき
         let corner_dist = field.distance_at_index(0);
         assert!((corner_dist - 0.5_f64.sqrt()).abs() < 0.1,
             "Corner distance: {}, expected ~{}", corner_dist, 0.5_f64.sqrt());
@@ -505,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_fmm_with_wall() {
-        // Domain with a wall that forces a detour
+        // 迂回を強いる壁のあるドメイン
         let bounds = DomainBounds {
             x_min: 0.0, x_max: 4.0,
             y_min: 0.0, y_max: 4.0,
@@ -514,22 +510,22 @@ mod tests {
         let h = 41;
         let mut mask = vec![true; w * h];
 
-        // Create a wall at x=2, from y=0 to y=3 (leaving a gap at y=3..4)
+        // x=2 に y=0 から y=3 までの壁を作成（y=3..4 にギャップを残す）
         let wall_col = 20; // x = 2.0
-        for row in 0..31 { // y = 0.0 to 3.0
+        for row in 0..31 { // y = 0.0 から 3.0
             mask[row * w + wall_col] = false;
         }
 
         let source = Vector2::new(1.0, 1.0);
         let field = GeodesicField::compute(source, &bounds, w, h, &mask);
 
-        // Point at (3, 1) is on the other side of the wall.
-        // Euclidean distance = 2.0, but geodesic must go around the wall.
+        // (3, 1) の点は壁の反対側にある。
+        // ユークリッド距離 = 2.0 だが、測地距離は壁を迂回する必要がある。
         let target_col = 30; // x = 3.0
         let target_row = 10; // y = 1.0
         let geodesic_dist = field.distance_at_index(target_row * w + target_col);
 
-        // Geodesic distance should be significantly greater than Euclidean
+        // 測地距離はユークリッド距離より大幅に大きいはず
         assert!(geodesic_dist > 2.5,
             "Geodesic distance {} should be > 2.5 (Euclidean = 2.0)", geodesic_dist);
     }

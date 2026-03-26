@@ -1,4 +1,4 @@
-//! Lifecycle systems: image loading/reloading and algorithm stepping.
+//! ライフサイクルシステム: 画像の読み込み/再読み込みとアルゴリズムステップ。
 
 use bevy::prelude::*;
 use bevy::image::Image as BevyImage;
@@ -15,7 +15,7 @@ use crate::state::{
     OriginalVertexPositions,
 };
 
-/// System: load (or reload) the image when `ImagePathConfig.needs_reload` is set.
+/// システム: `ImagePathConfig.needs_reload` が設定されたときに画像を読み込む（または再読み込み）。
 pub fn load_image(
     mut commands: Commands,
     mut path_config: ResMut<ImagePathConfig>,
@@ -35,9 +35,9 @@ pub fn load_image(
     let abs_path = &path_config.abs_path;
     info!("Loading image from: {}", abs_path);
 
-    // Load the image with the `image` crate (for dimensions, contour, AND GPU texture).
-    // By loading manually and inserting into Assets<Image>, we bypass AssetServer
-    // path resolution issues entirely.
+    // `image` クレートで画像を読み込む（寸法、輪郭、および GPU テクスチャ用）。
+    // 手動で読み込んで Assets<Image> に挿入することで、AssetServer の
+    // パス解決問題を完全に回避。
     let img = match image::open(abs_path) {
         Ok(img) => img,
         Err(e) => {
@@ -65,8 +65,8 @@ pub fn load_image(
         );
     }
 
-    // Convert to RGBA8 and insert directly into Bevy's Assets<Image>.
-    // This avoids AssetServer path resolution issues entirely.
+    // RGBA8 に変換して Bevy の Assets<Image> に直接挿入。
+    // AssetServer のパス解決問題を完全に回避。
     let rgba = img.to_rgba8();
     let bevy_image = BevyImage::new(
         Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -85,17 +85,17 @@ pub fn load_image(
         holes: holes.clone(),
     });
 
-    // Remove previous image entity if reloading
+    // 再読み込みの場合は以前の画像エンティティを削除
     for entity in existing_image.iter() {
         commands.entity(entity).despawn();
     }
 
-    // Reset state on image change
+    // 画像変更時に状態をリセット
     algo_state.reset();
     *deform_info = DeformationInfo::default();
     next_state.set(AppState::Setup);
 
-    // Create mesh (Delaunay triangulation)
+    // メッシュを作成（ドロネー三角形分割）
     let grid_mesh = create_contour_mesh(
         Vec2::new(image_width, image_height),
         UVec2::new(200, 200),
@@ -105,7 +105,7 @@ pub fn load_image(
 
     let mesh_handle = meshes.add(grid_mesh);
 
-    // Extract original vertex positions for CPU deformation path
+    // CPU 変形パス用に元の頂点位置を抽出
     let world_positions = meshes
         .get(&mesh_handle)
         .and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
@@ -142,16 +142,16 @@ pub fn load_image(
     ));
 }
 
-/// System: run one Algorithm step if needed.
+/// システム: 必要に応じてアルゴリズムを1ステップ実行。
 ///
-/// Run condition: `in_state(AppState::Deforming)` via DeformingSet.
+/// 実行条件: DeformingSet 経由で `in_state(AppState::Deforming)`。
 pub fn update_deformation(
     mut algo_state: ResMut<AlgorithmState>,
     mut deform_info: ResMut<DeformationInfo>,
 ) {
-    // Keep iterating while dragging OR while the algorithm hasn't converged.
-    // Convergence is determined by pgpm-core (Algorithm 1: max_distortion ≤ K
-    // and active set stable).
+    // ドラッグ中またはアルゴリズムが収束していない間は反復を継続。
+    // 収束は pgpm-core で判定（Algorithm 1: max_distortion ≤ K
+    // かつアクティブ集合が安定）。
     let needs_more = algo_state.needs_solve
         || (deform_info.step_count > 0 && !deform_info.converged);
 
@@ -161,7 +161,7 @@ pub fn update_deformation(
 
     let targets: Vec<nalgebra::Vector2<f64>> = algo_state.target_handles.clone();
 
-    // Run exactly one Algorithm 1 step per frame (SOCP is blocking).
+    // フレームごとに Algorithm 1 を正確に1ステップ実行（SOCP はブロッキング）。
     if let Some(ref mut algo) = algo_state.algorithm {
         match algo.step(&targets) {
             Ok(step_info) => {

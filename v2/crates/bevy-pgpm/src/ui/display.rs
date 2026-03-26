@@ -1,4 +1,4 @@
-//! Display update systems: status text, parameter labels, button visuals.
+//! 表示更新システム: ステータステキスト、パラメータラベル、ボタンビジュアル。
 
 use bevy::prelude::*;
 
@@ -6,7 +6,7 @@ use crate::ui::{BTN_NORMAL, BTN_HOVERED, BTN_PRESSED};
 use crate::ui::markers::*;
 use crate::state::{AlgoParams, AlgorithmState, AppState, DeformationInfo};
 
-/// System: button hover/press visual feedback.
+/// システム: ボタンホバー/プレスの視覚フィードバック。
 pub fn button_visuals(
     mut query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<Button>)>,
 ) {
@@ -19,7 +19,7 @@ pub fn button_visuals(
     }
 }
 
-/// System: update the main status text.
+/// システム: メインステータステキストを更新。
 pub fn update_status_text(
     state: Res<State<AppState>>,
     deform_info: Res<DeformationInfo>,
@@ -50,7 +50,7 @@ pub fn update_status_text(
     }
 }
 
-/// System: update the toggle mode button label.
+/// システム: モード切替ボタンラベルを更新。
 pub fn update_toggle_label(
     state: Res<State<AppState>>,
     query: Query<Entity, With<ToggleModeButton>>,
@@ -71,7 +71,7 @@ pub fn update_toggle_label(
     }
 }
 
-/// System: update K bound display text.
+/// システム: K 上界表示テキストを更新。
 pub fn update_k_text(
     params: Res<AlgoParams>,
     mut query: Query<&mut Text, With<KBoundText>>,
@@ -82,7 +82,7 @@ pub fn update_k_text(
     }
 }
 
-/// System: update lambda display text.
+/// システム: lambda 表示テキストを更新。
 pub fn update_lambda_text(
     params: Res<AlgoParams>,
     mut query: Query<&mut Text, With<LambdaText>>,
@@ -93,7 +93,7 @@ pub fn update_lambda_text(
     }
 }
 
-/// System: update regularization mode button label.
+/// システム: 正則化モードボタンラベルを更新。
 pub fn update_reg_mode_label(
     params: Res<AlgoParams>,
     query: Query<Entity, With<RegModeButton>>,
@@ -112,7 +112,7 @@ pub fn update_reg_mode_label(
     }
 }
 
-/// System: update basis type button label.
+/// システム: 基底タイプボタンラベルを更新。
 pub fn update_basis_type_label(
     params: Res<AlgoParams>,
     query: Query<Entity, With<BasisTypeButton>>,
@@ -131,7 +131,7 @@ pub fn update_basis_type_label(
     }
 }
 
-/// System: update K_max display text.
+/// システム: K_max 表示テキストを更新。
 pub fn update_k_max_text(
     params: Res<AlgoParams>,
     mut query: Query<&mut Text, With<KMaxText>>,

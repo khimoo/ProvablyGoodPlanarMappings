@@ -1,17 +1,17 @@
-//! bevy-pgpm: Interactive UI for Provably Good Planar Mappings.
+//! bevy-pgpm: 証明付き良好な平面写像のインタラクティブUI。
 //!
-//! Phase 2 implementation: Gaussian basis + Isometric distortion only.
-//! Uses pgpm-core for the SOCP-based deformation algorithm and Bevy for
-//! rendering/input/UI.
+//! Phase 2 実装: Gaussian 基底 + 等長歪みのみ。
+//! SOCP ベースの変形アルゴリズムに pgpm-core を使用し、
+//! レンダリング/入力/UI に Bevy を使用。
 //!
-//! Usage:
+//! 使用方法:
 //!   cargo run -p bevy-pgpm
 //!
-//! Place a texture.png in the assets/ directory.
-//! All interactions are via the on-screen control panel:
-//! 1. Setup mode: click to place control handles, then click "Start Deforming".
-//! 2. Deform mode: drag handles to deform the image.
-//! 3. Adjust K bound, regularization type and lambda via the panel buttons.
+//! assets/ ディレクトリに texture.png を配置する。
+//! 全ての操作は画面上のコントロールパネルから:
+//! 1. セットアップモード: クリックしてハンドルを配置、次に「Start Deforming」をクリック。
+//! 2. 変形モード: ハンドルをドラッグして画像を変形。
+//! 3. K 上限、正則化タイプ、lambda をパネルボタンで調整。
 
 use bevy::{
     prelude::*,
@@ -29,11 +29,11 @@ use bevy_pgpm::{
     ui,
 };
 
-/// Return the absolute path to the crate's own assets/ directory.
+/// このクレート自身の assets/ ディレクトリの絶対パスを返す。
 ///
-/// Used for:
-/// - Bevy's `AssetPlugin` root (shaders, fonts)
-/// - Resolving the default image absolute path
+/// 用途:
+/// - Bevy の `AssetPlugin` ルート（シェーダ、フォント）
+/// - デフォルト画像の絶対パス解決
 fn crate_asset_dir() -> String {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR not set (run via `cargo run`)");
@@ -47,7 +47,7 @@ fn crate_asset_dir() -> String {
     dir.to_string_lossy().into_owned()
 }
 
-/// Resolve the absolute path to the default texture image.
+/// デフォルトテクスチャ画像の絶対パスを解決。
 fn default_image_path(asset_dir: &str) -> String {
     let p = std::path::PathBuf::from(asset_dir).join("texture.png");
     assert!(
@@ -59,7 +59,7 @@ fn default_image_path(asset_dir: &str) -> String {
     p.to_string_lossy().into_owned()
 }
 
-/// Systems that only run during Deforming mode.
+/// 変形モードでのみ実行されるシステム。
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 struct DeformingSet;
 
@@ -126,19 +126,19 @@ fn main() {
         .run();
 }
 
-/// Startup: spawn scene camera and UI camera.
+/// スタートアップ: シーンカメラとUIカメラを生成。
 ///
-/// Two cameras are used to tile the window:
-///   - Scene camera (MainCamera): viewport restricted to the left area,
-///     renders Mesh2d entities on default render layer 0.
-///   - UI camera: covers the full window, on render layer 1 (no scene
-///     entities) so it only renders the UI overlay via IsDefaultUiCamera.
+/// ウィンドウを分割するために2つのカメラを使用:
+///   - シーンカメラ (MainCamera): ビューポートを左側に制限、
+///     デフォルトレンダーレイヤー0で Mesh2d エンティティをレンダリング。
+///   - UIカメラ: ウィンドウ全体をカバー、レンダーレイヤー1（シーン
+///     エンティティなし）で IsDefaultUiCamera 経由で UI オーバーレイのみをレンダリング。
 fn setup_camera(mut commands: Commands) {
-    // Scene camera: default render layer 0, viewport set by setup_camera_viewport.
+    // シーンカメラ: デフォルトレンダーレイヤー0、ビューポートは setup_camera_viewport で設定。
     commands.spawn((Camera2d::default(), MainCamera));
 
-    // UI camera: render layer 1 (empty) prevents Mesh2d double-rendering.
-    // IsDefaultUiCamera directs all UI nodes to this camera.
+    // UIカメラ: レンダーレイヤー1（空）で Mesh2d の二重レンダリングを防止。
+    // IsDefaultUiCamera は全てのUIノードをこのカメラに向ける。
     commands.spawn((
         Camera2d::default(),
         Camera {
@@ -151,9 +151,9 @@ fn setup_camera(mut commands: Commands) {
     ));
 }
 
-/// System: set scene camera viewport to the area left of the UI panel and
-/// scale the projection to fit the image. Re-runs on ImageInfo change or
-/// window resize.
+/// システム: シーンカメラのビューポートをUIパネルの左側エリアに設定し、
+/// 投影を画像にフィットするようにスケール。ImageInfo の変更または
+/// ウィンドウリサイズ時に再実行。
 fn setup_camera_scale(
     image_info: Option<Res<ImageInfo>>,
     windows: Query<&Window>,
@@ -170,7 +170,7 @@ fn setup_camera_scale(
     let Ok(window) = windows.single() else { return };
     let Ok((mut camera, mut projection)) = camera_q.single_mut() else { return };
 
-    // Compute viewport in physical pixels (required by Bevy's Viewport).
+    // 物理ピクセルでビューポートを計算（Bevy の Viewport に必要）。
     let scale_factor = window.scale_factor();
     let physical_w = (window.width() * scale_factor) as u32;
     let physical_h = (window.height() * scale_factor) as u32;
@@ -183,7 +183,7 @@ fn setup_camera_scale(
         ..default()
     });
 
-    // Scale projection to fit the image within the viewport with margin.
+    // 投影をスケールして画像をビューポート内にマージン付きでフィット。
     let logical_w = viewport_w as f32 / scale_factor;
     let logical_h = physical_h as f32 / scale_factor;
 
@@ -192,7 +192,7 @@ fn setup_camera_scale(
     let scale_y = (logical_h * margin) / image_info.height;
     let scale = scale_x.min(scale_y);
 
-    // Update the orthographic projection scale through the Projection enum.
+    // Projection enum を通じて正射影のスケールを更新。
     if let Projection::Orthographic(ref mut ortho) = *projection {
         ortho.scale = 1.0 / scale;
 

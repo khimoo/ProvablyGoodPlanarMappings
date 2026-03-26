@@ -1,10 +1,10 @@
-//! Algorithm 1 integration.
+//! Algorithm 1 統合。
 //!
-//! Paper reference: Algorithm 1 (Section 5)
-//! This module provides the concrete `Algorithm<D>` struct that holds
-//! the data for a provably good planar mapping.  All algorithmic logic
-//! lives in the [`PlanarMapping`] trait's default methods; this struct
-//! only supplies the borrow-splitting accessors.
+//! 論文参照: Algorithm 1 (Section 5)
+//! このモジュールは証明付き良好な平面写像のデータを保持する
+//! 具象 `Algorithm<D>` 構造体を提供する。全てのアルゴリズムロジックは
+//! [`PlanarMapping`] トレイトのデフォルトメソッドに存在し、この構造体は
+//! 借用分離アクセサのみを提供する。
 
 use crate::algorithm::active_set;
 use crate::basis::BasisFunction;
@@ -15,43 +15,42 @@ use crate::model::types::*;
 use crate::policy::DistortionPolicy;
 use nalgebra::Vector2;
 
-/// Algorithm 1: complete implementation, parameterised by distortion policy.
+/// Algorithm 1: 歪みポリシーでパラメータ化された完全実装。
 pub struct Algorithm<D: DistortionPolicy> {
-    /// Basis functions (Table 1)
+    /// 基底関数 (Table 1)
     basis: Box<dyn BasisFunction>,
-    /// Algorithm parameters (K, lambda, regularization type)
+    /// アルゴリズムパラメータ (K, lambda, 正則化タイプ)
     params: MappingParams,
-    /// Distortion policy (isometric or conformal)
+    /// 歪みポリシー (isometric または conformal)
     policy: D,
-    /// Algorithm state (coefficients, active set, frames, etc.)
+    /// アルゴリズム状態 (係数、アクティブ集合、フレーム等)
     state: AlgorithmState,
-    /// Source handle positions {p_l} (Eq. 29) -- fixed
+    /// ソースハンドル位置 {p_l} (Eq. 29) -- 固定
     source_handles: Vec<Vector2<f64>>,
-    /// Domain bounds for biharmonic energy integration
+    /// biharmonic エネルギー積分用ドメイン境界
     domain_bounds: DomainBounds,
-    /// Domain Omega for "x in Omega" test (Paper Section 4).
-    /// When `None`, all grid points are considered inside the domain.
+    /// "x ∈ Ω" テスト用ドメイン Ω (論文 Section 4)。
+    /// `None` の場合、全グリッド点がドメイン内とみなされる。
     domain: Option<Box<dyn Domain>>,
-    /// SOCP solver numerical tuning (not from the paper).
+    /// SOCP ソルバーの数値調整（論文に無い）。
     solver_config: SolverConfig,
 }
 
 impl<D: DistortionPolicy> Algorithm<D> {
-    /// Create a new Algorithm instance.
+    /// 新しい Algorithm インスタンスを作成。
     ///
-    /// # Arguments
-    /// - `basis`: Basis function implementation (Gaussian, B-Spline, TPS)
-    /// - `params`: Algorithm parameters (K, lambda, regularization)
-    /// - `policy`: Distortion policy (isometric or conformal)
-    /// - `domain_bounds`: Bounding box of domain Omega (Eq. 5)
-    /// - `source_handles`: Fixed handle positions {p_l} (Eq. 29)
-    /// - `grid_resolution`: Number of grid points per side (paper Section 6: 200)
-    /// - `fps_k`: Number of farthest point samples for Z'' (stable set)
-    /// - `domain`: Abstract domain Omega. When `Some`, only grid points where
-    ///   `domain.contains(pt)` returns true are eligible for the active/stable
-    ///   sets and ARAP regularisation. The rectangular grid structure is
-    ///   preserved for local-maxima detection (Section 5). When `None`, all
-    ///   grid points are considered inside the domain.
+    /// # 引数
+    /// - `basis`: 基底関数実装 (Gaussian, B-Spline, TPS)
+    /// - `params`: アルゴリズムパラメータ (K, lambda, 正則化)
+    /// - `policy`: 歪みポリシー (isometric または conformal)
+    /// - `domain_bounds`: ドメイン Ω のバウンディングボックス (Eq. 5)
+    /// - `source_handles`: 固定ハンドル位置 {p_l} (Eq. 29)
+    /// - `grid_resolution`: 1辺あたりのグリッド点数 (論文 Section 6: 200)
+    /// - `fps_k`: Z''（安定集合）の最遠点サンプル数
+    /// - `domain`: 抽象ドメイン Ω。`Some` の場合、`domain.contains(pt)` が
+    ///   true を返すグリッド点のみがアクティブ/安定集合と ARAP 正則化の
+    ///   対象となる。矩形グリッド構造は局所最大検出用に保持される
+    ///   (Section 5)。`None` の場合、全グリッド点がドメイン内とみなされる。
     pub fn new(
         basis: Box<dyn BasisFunction>,
         params: MappingParams,
@@ -63,39 +62,39 @@ impl<D: DistortionPolicy> Algorithm<D> {
         domain: Option<Box<dyn Domain>>,
         solver_config: SolverConfig,
     ) -> Self {
-        // Generate collocation grid
-        // Section 4: "consider all the points from a surrounding
-        // uniform grid that fall inside the domain"
+        // コロケーショングリッドを生成
+        // Section 4: 「ドメイン内に収まる周囲一様グリッドの
+        // 全点を考慮する」
         let (collocation_points, grid_width, grid_height) =
             generate_collocation_grid(&domain_bounds, grid_resolution);
 
         let m = collocation_points.len();
 
-        // Build domain mask: true for points inside Omega.
-        // Paper Section 4: "consider all the points from a surrounding
-        // uniform grid that fall inside the domain"
+        // ドメインマスクを構築: Ω 内の点に対して true。
+        // 論文 Section 4: 「ドメイン内に収まる周囲一様グリッドの
+        // 全点を考慮する」
         let domain_mask = build_domain_mask(&collocation_points, domain.as_deref());
 
         // Section 5 "Activation of constraints":
-        // K_high = 0.1 + 0.9*K, K_low = 0.5 + 0.5*K
+        // K_high = 0.1 + 0.9*K、K_low = 0.5 + 0.5*K
         let k = params.k_bound;
         let k_high = 0.1 + 0.9 * k;
         let k_low = 0.5 + 0.5 * k;
 
-        // Initialize frames to (1, 0) -- Algorithm 1: "Initialize d_i"
+        // フレームを (1, 0) で初期化 -- Algorithm 1: "Initialize d_i"
         let frames = vec![Vector2::new(1.0, 0.0); m];
 
-        // Initialize with identity coefficients
+        // 恒等係数で初期化
         let coefficients = basis.identity_coefficients();
 
-        // Initialize stable set with FPS (only among domain-interior points)
+        // FPS で安定集合を初期化（ドメイン内部の点のみ）
         let stable_set =
             active_set::initialize_stable_set(&collocation_points, fps_k, &domain_mask);
 
         let state = AlgorithmState {
             coefficients,
             collocation_points,
-            active_set: Vec::new(), // Algorithm 1: "Initialize empty active set Z'"
+            active_set: Vec::new(), // Algorithm 1: "空のアクティブ集合 Z' を初期化"
             stable_set,
             frames,
             k_high,
@@ -120,28 +119,28 @@ impl<D: DistortionPolicy> Algorithm<D> {
     }
 
     // ─────────────────────────────────────────
-    // Inherent convenience methods (not in trait)
+    // 固有の便利メソッド（トレイトに無い）
     // ─────────────────────────────────────────
 
-    /// Get current active set size.
+    /// 現在のアクティブ集合サイズを取得。
     pub fn active_set_size(&self) -> usize {
         self.state.active_set.len()
     }
 
-    /// Get collocation points.
+    /// コロケーション点を取得。
     pub fn collocation_points(&self) -> &[Vector2<f64>] {
         &self.state.collocation_points
     }
 }
 
 // ─────────────────────────────────────────────
-// PlanarMapping trait implementation
+// PlanarMapping トレイト実装
 // ─────────────────────────────────────────────
 
 impl<D: DistortionPolicy> PlanarMapping for Algorithm<D> {
-    // All algorithmic methods (step, refine_strategy2, etc.)
-    // use the default implementations from PlanarMapping.
-    // Only the three required accessors are provided here.
+    // 全てのアルゴリズムメソッド（step, refine_strategy2 等）は
+    // PlanarMapping のデフォルト実装を使用。
+    // ここでは3つの必須アクセサのみを提供。
 
     fn parts(&self) -> (MappingContext<'_>, &AlgorithmState) {
         (
@@ -185,7 +184,7 @@ mod tests {
     use crate::policy::IsometricPolicy;
 
     fn make_test_algorithm() -> Algorithm<IsometricPolicy> {
-        // Simple 4-center Gaussian basis on [0,1]^2
+        // [0,1]² 上の単純な4中心 Gaussian 基底
         let centers = vec![
             Vector2::new(0.25, 0.25),
             Vector2::new(0.75, 0.25),
@@ -196,7 +195,7 @@ mod tests {
 
         let params = MappingParams {
             k_bound: 3.0,
-            lambda_reg: 0.0, // No regularization for simplicity
+            lambda_reg: 0.0, // 単純化のため正則化なし
             regularization: RegularizationType::Arap,
         };
 
@@ -209,7 +208,7 @@ mod tests {
 
         let handles = vec![Vector2::new(0.5, 0.5)];
 
-        // Small grid for testing (no domain constraint -> full rectangle)
+        // テスト用の小さいグリッド（ドメイン制約なし → 完全矩形）
         Algorithm::new(
             basis,
             params,
@@ -227,7 +226,7 @@ mod tests {
     fn test_identity_mapping() {
         let alg = make_test_algorithm();
 
-        // With identity coefficients, f(x) should be approximately x (Eq. 3)
+        // 恒等係数では f(x) は近似的に x であるべき (Eq. 3)
         let test_point = Vector2::new(0.5, 0.5);
         let phi = alg.basis().evaluate(test_point);
         let c = alg.coefficients();
@@ -265,7 +264,7 @@ mod tests {
             ctx.policy,
         );
 
-        // Identity mapping should have D ~ 1 everywhere
+        // 恒等写像は全点で D ≈ 1 であるべき
         for (i, &d) in distortions.iter().enumerate() {
             assert!(
                 (d - 1.0).abs() < 1e-6,
@@ -280,11 +279,11 @@ mod tests {
     fn test_step_with_identity_target() {
         let mut alg = make_test_algorithm();
 
-        // Target = source (identity deformation)
+        // ターゲット = ソース（恒等変形）
         let target = vec![Vector2::new(0.5, 0.5)];
         let info = alg.step(&target).expect("Step should succeed");
 
-        // After solving with identity target, distortion should be close to 1
+        // 恒等ターゲットで求解後、歪みは 1 に近いはず
         assert!(
             info.max_distortion < 2.0,
             "Max distortion = {}, expected < 2.0 for near-identity",
@@ -296,18 +295,18 @@ mod tests {
     fn test_step_with_deformed_target() {
         let mut alg = make_test_algorithm();
 
-        // Move the handle slightly
+        // ハンドルを少し動かす
         let target = vec![Vector2::new(0.6, 0.5)];
         let info = alg.step(&target).expect("Step should succeed");
 
-        // The mapping should still be valid (not infinite distortion)
+        // 写像はまだ有効であるべき（無限大の歪みではない）
         assert!(
             info.max_distortion < 100.0,
             "Max distortion = {}, expected finite value",
             info.max_distortion
         );
 
-        // The evaluated point at the handle should be close to target (Eq. 3)
+        // ハンドルでの評価点はターゲットに近いはず (Eq. 3)
         let phi = alg.basis().evaluate(Vector2::new(0.5, 0.5));
         let c = alg.coefficients();
         let n = alg.basis().count();
@@ -339,7 +338,7 @@ mod tests {
         assert_eq!(h, 5);
         assert_eq!(points.len(), 25);
 
-        // Check corners
+        // コーナーを確認
         assert!((points[0] - Vector2::new(0.0, 0.0)).norm() < 1e-12);
         assert!((points[4] - Vector2::new(1.0, 0.0)).norm() < 1e-12);
         assert!((points[24] - Vector2::new(1.0, 1.0)).norm() < 1e-12);
@@ -350,14 +349,14 @@ mod tests {
         let mut alg = make_test_algorithm();
         let target = vec![Vector2::new(0.6, 0.5)];
 
-        // Run multiple steps -- the distortion should converge
+        // 複数ステップ実行 -- 歪みは収束するはず
         for step in 0..5 {
             let info = alg.step(&target).expect("Step should succeed");
             println!(
                 "Step {}: max_dist={:.4}, active={}",
                 step, info.max_distortion, info.active_set_size
             );
-            // After the first step, distortion should be finite
+            // 最初のステップ後、歪みは有限であるべき
             assert!(info.max_distortion.is_finite());
         }
     }
@@ -380,7 +379,7 @@ mod tests {
             y_max: 1.0,
         };
 
-        // A diamond contour that excludes the corners of the unit square
+        // 単位正方形のコーナーを除外するひし形輪郭
         let contour = vec![
             Vector2::new(0.5, 0.0),
             Vector2::new(1.0, 0.5),
@@ -401,21 +400,21 @@ mod tests {
             SolverConfig::default(),
         );
 
-        // Grid is 5x5 = 25 points, but some should be masked out
+        // グリッドは 5x5 = 25 点だが、一部はマスクされるべき
         let (_, state) = alg.parts();
         let mask = &state.domain_mask;
         assert_eq!(mask.len(), 25);
 
-        // Corners of the grid (0,0), (1,0), (0,1), (1,1) should be outside
+        // グリッドのコーナー (0,0), (1,0), (0,1), (1,1) は外側であるべき
         assert!(!mask[0], "(0,0) should be outside diamond");
         assert!(!mask[4], "(1,0) should be outside diamond");
         assert!(!mask[20], "(0,1) should be outside diamond");
         assert!(!mask[24], "(1,1) should be outside diamond");
 
-        // Center (0.5, 0.5) should be inside
+        // 中心 (0.5, 0.5) は内側であるべき
         assert!(mask[12], "(0.5,0.5) should be inside diamond");
 
-        // Stable set should only contain domain-interior points
+        // 安定集合はドメイン内部の点のみを含むべき
         for &idx in &state.stable_set {
             assert!(mask[idx], "Stable set point {} should be inside domain", idx);
         }

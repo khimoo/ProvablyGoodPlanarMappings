@@ -1,34 +1,34 @@
-//! Active set management.
+//! アクティブ集合管理。
 //!
-//! Paper references:
-//! - Algorithm 1: Initialization and active set update
+//! 論文参照:
+//! - Algorithm 1: 初期化とアクティブ集合更新
 //! - Section 5 "Activation of constraints":
-//!   "the local maxima of the distortion are found"
-//!   "only points where D(z) > K_high are added"
-//!   "points where D(z) < K_low are removed"
+//!   「歪みの局所最大を見つける」
+//!   「D(z) > K_high の点のみを追加」
+//!   「D(z) < K_low の点を削除」
 
 use crate::model::types::AlgorithmState;
 use nalgebra::Vector2;
 
-/// Algorithm 1: Update the active set Z'.
+/// Algorithm 1: アクティブ集合 Z' を更新。
 ///
-/// Follows the paper exactly:
-/// 1. Find Z_max = local maxima of distortion on the grid
-/// 2. For z ∈ Z_max with D(z) > K_high: insert z into Z'
-/// 3. For z ∈ Z' with D(z) < K_low: remove z from Z'
+/// 論文に厳密に従う:
+/// 1. グリッド上の歪みの局所最大 Z_max を見つける
+/// 2. D(z) > K_high となる z ∈ Z_max を Z' に挿入
+/// 3. D(z) < K_low となる z ∈ Z' を Z' から削除
 ///
-/// **IMPORTANT**: No fold-over prevention, no σ checks, no size limits.
-/// The paper states local maxima filtering is sufficient.
+/// **重要**: fold-over 予防、σ チェック、サイズ制限なし。
+/// 論文は局所最大フィルタで十分としている。
 pub fn update_active_set(
     state: &mut AlgorithmState,
     distortions: &[f64],
 ) {
-    // Step 1: Find local maxima on the grid
+    // ステップ1: グリッド上の局所最大を見つける
     let local_maxima = find_local_maxima(distortions, state.grid_width, state.grid_height);
 
-    // Step 2: Add local maxima exceeding K_high
-    // "foreach z ∈ Z_max such that D(z) > K_high do insert z to Z'"
-    // Paper Section 4: only points that fall inside the domain are constrained.
+    // ステップ2: K_high を超える局所最大を追加
+    // 「D(z) > K_high となる各 z ∈ Z_max を Z' に挿入」
+    // 論文 Section 4: ドメイン内の点のみが制約される。
     for &idx in &local_maxima {
         if distortions[idx] > state.k_high && state.domain_mask[idx] {
             if !state.active_set.contains(&idx) {
@@ -37,18 +37,18 @@ pub fn update_active_set(
         }
     }
 
-    // Step 3: Remove points below K_low
-    // "foreach z ∈ Z' such that D(z) < K_low do remove z from Z'"
+    // ステップ3: K_low 未満の点を削除
+    // 「D(z) < K_low となる各 z ∈ Z' を Z' から削除」
     state.active_set.retain(|&idx| distortions[idx] >= state.k_low);
 }
 
-/// Detect local maxima on a rectangular grid (8-neighbor comparison).
+/// 矩形グリッド上の局所最大を検出（8近傍比較）。
 ///
-/// Section 5: "the local maxima of the distortion are found"
-/// "the collocation points are sampled on a dense rectangular grid"
+/// Section 5: 「歪みの局所最大を見つける」
+/// 「コロケーション点は密な矩形グリッド上でサンプリングされる」
 ///
-/// A point is a local maximum if its distortion is strictly greater than
-/// all of its neighbors (up to 8 on a grid).
+/// 点は、その歪みが全近傍（グリッド上で最大8つ）より
+/// 厳密に大きい場合に局所最大となる。
 fn find_local_maxima(
     distortions: &[f64],
     grid_width: usize,
@@ -63,7 +63,7 @@ fn find_local_maxima(
 
             let mut is_max = true;
 
-            // Check all 8 neighbors
+            // 全8近傍をチェック
             for dr in [-1i32, 0, 1] {
                 for dc in [-1i32, 0, 1] {
                     if dr == 0 && dc == 0 {
@@ -97,20 +97,20 @@ fn find_local_maxima(
     maxima
 }
 
-/// Algorithm 1: "Initialize set Z'' with farthest point samples"
+/// Algorithm 1: 「最遠点サンプリングで集合 Z'' を初期化」
 ///
-/// Farthest Point Sampling (FPS) to select k evenly-spaced points
-/// from the collocation points **that lie inside the domain**.
+/// コロケーション点から **ドメイン内に存在する** k 個の
+/// 等間隔点を選択する最遠点サンプリング（FPS）。
 ///
-/// Section 5: "we may keep a small subset of equally spread
-/// collocation points always active"
+/// Section 5: 「等間隔に配置されたコロケーション点の
+/// 小さな部分集合を常にアクティブに保つことができる」
 pub fn initialize_stable_set(
     collocation_points: &[Vector2<f64>],
     k: usize,
     domain_mask: &[bool],
 ) -> Vec<usize> {
     let n = collocation_points.len();
-    // Candidate indices: only domain-interior points
+    // 候補インデックス: ドメイン内部点のみ
     let candidates: Vec<usize> = (0..n).filter(|&i| domain_mask[i]).collect();
     if k == 0 || candidates.is_empty() {
         return Vec::new();
@@ -122,11 +122,11 @@ pub fn initialize_stable_set(
     let mut selected = Vec::with_capacity(k);
     let mut min_dists = vec![f64::INFINITY; n];
 
-    // Start from the first candidate
+    // 最初の候補から開始
     selected.push(candidates[0]);
 
     for _ in 1..k {
-        // Update minimum distances based on the last selected point
+        // 最後に選択された点に基づいて最小距離を更新
         let last = *selected.last().unwrap();
         let last_pt = collocation_points[last];
         for &i in &candidates {
@@ -135,12 +135,12 @@ pub fn initialize_stable_set(
                 min_dists[i] = d;
             }
         }
-        // Set distance of already-selected points to 0 to avoid re-selection
+        // 再選択を避けるため、既選択点の距離を0に設定
         for &s in &selected {
             min_dists[s] = 0.0;
         }
 
-        // Select the candidate with maximum minimum distance
+        // 最小距離が最大となる候補を選択
         let best = candidates.iter()
             .copied()
             .filter(|i| !selected.contains(i))
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_local_maxima_simple() {
-        // 3x3 grid with a single peak in the center
+        // 中央に単一のピークを持つ3x3グリッド
         #[rustfmt::skip]
         let distortions = vec![
             1.0, 1.0, 1.0,
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_local_maxima_corner() {
-        // Corner peak
+        // コーナーのピーク
         #[rustfmt::skip]
         let distortions = vec![
             5.0, 1.0, 1.0,
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_local_maxima_plateau_excluded() {
-        // Plateau: no strict local maximum
+        // プラトー: 厳密な局所最大なし
         #[rustfmt::skip]
         let distortions = vec![
             1.0, 1.0, 1.0,
@@ -194,7 +194,7 @@ mod tests {
             1.0, 1.0, 1.0,
         ];
         let maxima = find_local_maxima(&distortions, 3, 3);
-        // Neither (1,1) nor (1,2) is a strict local max because they're equal
+        // (1,1) も (1,2) も等しいため厳密な局所最大ではない
         assert!(maxima.is_empty());
     }
 
@@ -215,7 +215,7 @@ mod tests {
             prev_target_handles: None,
         };
 
-        // 3x3 grid, center has high distortion
+        // 3x3グリッド、中央に高い歪み
         #[rustfmt::skip]
         let distortions = vec![
             1.0, 1.0, 1.0,
@@ -224,7 +224,7 @@ mod tests {
         ];
 
         update_active_set(&mut state, &distortions);
-        // Center (idx=4) is a local max and D=3.5 > K_high=2.8
+        // 中央 (idx=4) は局所最大で D=3.5 > K_high=2.8
         assert!(state.active_set.contains(&4));
     }
 
@@ -245,7 +245,7 @@ mod tests {
             prev_target_handles: None,
         };
 
-        // Now distortion at 4 drops below K_low
+        // 4の歪みがK_low以下に低下
         #[rustfmt::skip]
         let distortions = vec![
             1.0, 1.0, 1.0,
@@ -254,13 +254,13 @@ mod tests {
         ];
 
         update_active_set(&mut state, &distortions);
-        // Point 4 has D=1.5 < K_low=2.0, should be removed
+        // 点4は D=1.5 < K_low=2.0 なので削除されるべき
         assert!(!state.active_set.contains(&4));
     }
 
     #[test]
     fn test_fps_basic() {
-        // 4 corners of a unit square
+        // 単位正方形の4隅
         let points = vec![
             Vector2::new(0.0, 0.0),
             Vector2::new(1.0, 0.0),
@@ -271,7 +271,7 @@ mod tests {
 
         let selected = initialize_stable_set(&points, 4, &mask);
         assert_eq!(selected.len(), 4);
-        // All 4 should be selected
+        // 全4点が選択されるべき
         for i in 0..4 {
             assert!(selected.contains(&i));
         }
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_fps_selects_spread_points() {
-        // Line of points, FPS should pick endpoints and middle
+        // 点の列、FPSは両端と中央を選ぶべき
         let points: Vec<Vector2<f64>> = (0..11)
             .map(|i| Vector2::new(i as f64, 0.0))
             .collect();
@@ -287,14 +287,14 @@ mod tests {
 
         let selected = initialize_stable_set(&points, 3, &mask);
         assert_eq!(selected.len(), 3);
-        // Should include first point (0) and farthest (10), then middle (5)
+        // 最初の点(0)と最遠(10)、次に中央(5)を含むべき
         assert!(selected.contains(&0));
         assert!(selected.contains(&10));
     }
 
     #[test]
     fn test_active_set_skips_exterior_points() {
-        // 3x3 grid: center is outside domain (mask = false)
+        // 3x3グリッド: 中央はドメイン外 (mask = false)
         let mut state = crate::model::types::AlgorithmState {
             coefficients: nalgebra::DMatrix::zeros(2, 1),
             collocation_points: Vec::new(),
@@ -310,7 +310,7 @@ mod tests {
             prev_target_handles: None,
         };
 
-        // Center has high distortion but is outside domain
+        // 中央は高い歪みを持つがドメイン外
         #[rustfmt::skip]
         let distortions = vec![
             1.0, 1.0, 1.0,
@@ -319,18 +319,18 @@ mod tests {
         ];
 
         update_active_set(&mut state, &distortions);
-        // Center (idx=4) is a local max and D=5.0 > K_high, but domain_mask[4]=false
+        // 中央 (idx=4) は局所最大で D=5.0 > K_high だが domain_mask[4]=false
         assert!(!state.active_set.contains(&4),
             "Exterior point should not be added to active set");
     }
 
     #[test]
     fn test_fps_skips_exterior_points() {
-        // 5 points, but point 2 is outside domain
+        // 5点だが、点2はドメイン外
         let points = vec![
             Vector2::new(0.0, 0.0),
             Vector2::new(1.0, 0.0),
-            Vector2::new(2.0, 0.0), // outside
+            Vector2::new(2.0, 0.0), // 外側
             Vector2::new(3.0, 0.0),
             Vector2::new(4.0, 0.0),
         ];
@@ -338,7 +338,7 @@ mod tests {
 
         let selected = initialize_stable_set(&points, 3, &mask);
         assert_eq!(selected.len(), 3);
-        // Point 2 should never be selected
+        // 点2は選択されないべき
         assert!(!selected.contains(&2),
             "Exterior point should not be in stable set");
     }

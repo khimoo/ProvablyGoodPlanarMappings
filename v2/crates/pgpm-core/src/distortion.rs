@@ -1,31 +1,31 @@
-//! Distortion computation.
+//! 歪み計算。
 //!
-//! Paper Section 3 "Distortion":
-//! - Eq. 19: J_S f, J_A f decomposition of the Jacobian
-//! - Eq. 20: Singular values Σ, σ from J_S, J_A
+//! 論文 Section 3 "Distortion":
+//! - Eq. 19: J_S f, J_A f によるヤコビアンの分解
+//! - Eq. 20: J_S, J_A からの特異値 Σ, σ
 //! - D_iso = max{Σ, 1/σ}, D_conf = Σ/σ
 
 use crate::model::types::{CoefficientMatrix, PrecomputedData};
 use crate::policy::DistortionPolicy;
 use nalgebra::Vector2;
 
-/// Eq. 19: Compute J_S f(x) and J_A f(x) from gradients of u and v.
+/// Eq. 19: ∇u と ∇v の勾配から J_S f(x) と J_A f(x) を計算する。
 ///
 /// J_S f(x) = (∇u(x) + I∇v(x)) / 2
 /// J_A f(x) = (∇u(x) - I∇v(x)) / 2
 ///
-/// where I is the π/2 clockwise rotation: I·(a,b) = (b, -a)
-/// so I∇v = (∂v/∂y, -∂v/∂x)
+/// I は π/2 時計回り回転: I·(a,b) = (b, -a)
+/// よって I∇v = (∂v/∂y, -∂v/∂x)
 ///
-/// Note: The paper states "counter-clockwise" but the formulas in Eq. 19
-/// require I to act as the complex-conjugate rotation (CW) so that
-/// J_S captures the conformal (similarity) part and J_A the anti-conformal part.
-/// Verification: identity f(x,y)=(x,y) is conformal → J_A=0, J_S=(1,0).
+/// 注: 論文では「反時計回り」と記述されているが、Eq. 19 の式は
+/// 複素共役回転（時計回り）として I が作用する必要がある。
+/// J_S が等角（相似）部分、J_A が反等角部分を捉えるため。
+/// 検証: 恒等写像 f(x,y)=(x,y) は等角 → J_A=0, J_S=(1,0)。
 pub fn compute_j_s_j_a(
     grad_u: Vector2<f64>, // ∇u(x) = (∂u/∂x, ∂u/∂y)
     grad_v: Vector2<f64>, // ∇v(x) = (∂v/∂x, ∂v/∂y)
 ) -> (Vector2<f64>, Vector2<f64>) {
-    // I∇v = (∂v/∂y, -∂v/∂x)  [CW π/2 rotation]
+    // I∇v = (∂v/∂y, -∂v/∂x)  [時計回り π/2 回転]
     let i_grad_v = Vector2::new(grad_v.y, -grad_v.x);
 
     let j_s = (grad_u + i_grad_v) / 2.0;
@@ -34,7 +34,7 @@ pub fn compute_j_s_j_a(
     (j_s, j_a)
 }
 
-/// Eq. 20: Compute singular values from J_S and J_A.
+/// Eq. 20: J_S と J_A から特異値を計算する。
 ///
 /// Σ(x) = ||J_S f(x)|| + ||J_A f(x)||
 /// σ(x) = | ||J_S f(x)|| - ||J_A f(x)|| |
@@ -48,7 +48,7 @@ pub fn singular_values(j_s: Vector2<f64>, j_a: Vector2<f64>) -> (f64, f64) {
     (sigma_max, sigma_min)
 }
 
-/// Section 3: Isometric distortion D_iso = max{Σ, 1/σ}
+/// Section 3: 等長歪み D_iso = max{Σ, 1/σ}
 pub fn isometric_distortion(sigma_max: f64, sigma_min: f64) -> f64 {
     if sigma_min < 1e-15 {
         return f64::INFINITY;
@@ -56,7 +56,7 @@ pub fn isometric_distortion(sigma_max: f64, sigma_min: f64) -> f64 {
     f64::max(sigma_max, 1.0 / sigma_min)
 }
 
-/// Section 3: Conformal distortion D_conf = Σ / σ
+/// Section 3: 等角歪み D_conf = Σ / σ
 pub fn conformal_distortion(sigma_max: f64, sigma_min: f64) -> f64 {
     if sigma_min < 1e-15 {
         return f64::INFINITY;
@@ -64,8 +64,8 @@ pub fn conformal_distortion(sigma_max: f64, sigma_min: f64) -> f64 {
     sigma_max / sigma_min
 }
 
-/// Compute gradients ∇u(z) and ∇v(z) at collocation point index `idx`
-/// using precomputed data and current coefficients.
+/// コロケーション点インデックス `idx` における勾配 ∇u(z) と ∇v(z) を
+/// 事前計算データと現在の係数から計算する。
 ///
 /// ∇u(z) = Σ c¹_i ∇f_i(z),  ∇v(z) = Σ c²_i ∇f_i(z)
 fn grad_uv_at(
@@ -93,16 +93,16 @@ fn grad_uv_at(
     (grad_u, grad_v)
 }
 
-/// Evaluate distortion at all collocation points.
+/// 全コロケーション点で歪みを評価する。
 ///
-/// Uses precomputed grad_phi values for efficiency.
-/// Returns a Vec of distortion values, one per collocation point.
+/// 効率化のため事前計算した grad_phi 値を使用する。
+/// コロケーション点ごとに1つの歪み値からなる Vec を返す。
 pub fn evaluate_distortion_all(
     coefficients: &CoefficientMatrix,
     precomputed: &PrecomputedData,
     policy: &dyn DistortionPolicy,
 ) -> Vec<f64> {
-    let m = precomputed.grad_phi_x.nrows(); // number of collocation points
+    let m = precomputed.grad_phi_x.nrows(); // コロケーション点の数
 
     (0..m)
         .map(|idx| {
@@ -115,7 +115,7 @@ pub fn evaluate_distortion_all(
         .collect()
 }
 
-/// Evaluate J_S f at all collocation points (needed for frame update, Eq. 27).
+/// 全コロケーション点で J_S f を評価する（フレーム更新 Eq. 27 に必要）。
 pub fn evaluate_j_s_all(
     coefficients: &CoefficientMatrix,
     precomputed: &PrecomputedData,
@@ -137,17 +137,17 @@ mod tests {
 
     #[test]
     fn test_identity_jacobian() {
-        // For identity mapping: ∇u = (1,0), ∇v = (0,1)
+        // 恒等写像の場合: ∇u = (1,0), ∇v = (0,1)
         let grad_u = Vector2::new(1.0, 0.0);
         let grad_v = Vector2::new(0.0, 1.0);
 
         let (j_s, j_a) = compute_j_s_j_a(grad_u, grad_v);
 
-        // I∇v = I·(0,1) = (1, 0)  [CW π/2: I(a,b) = (b,-a)]
+        // I∇v = I·(0,1) = (1, 0)  [時計回り π/2: I(a,b) = (b,-a)]
         // J_S = ((1,0) + (1,0))/2 = (1, 0)
         // J_A = ((1,0) - (1,0))/2 = (0, 0)
         //
-        // Identity is conformal → J_A = 0, J_S ≠ 0. ✓
+        // 恒等写像は等角 → J_A = 0, J_S ≠ 0. ✓
         // Σ = ||J_S|| + ||J_A|| = 1 + 0 = 1
         // σ = |1 - 0| = 1
         // D_iso = max{1, 1/1} = 1 ✓
@@ -166,14 +166,14 @@ mod tests {
 
     #[test]
     fn test_scaling_jacobian() {
-        // Uniform scaling by 2: ∇u = (2,0), ∇v = (0,2)
+        // 2倍一様スケーリング: ∇u = (2,0), ∇v = (0,2)
         let grad_u = Vector2::new(2.0, 0.0);
         let grad_v = Vector2::new(0.0, 2.0);
 
         let (j_s, j_a) = compute_j_s_j_a(grad_u, grad_v);
         let (sigma_max, sigma_min) = singular_values(j_s, j_a);
 
-        // For uniform scaling by k: Σ = k, σ = k
+        // 一様スケーリング k 倍: Σ = k, σ = k
         assert!((sigma_max - 2.0).abs() < 1e-12);
         assert!((sigma_min - 2.0).abs() < 1e-12);
 
@@ -181,14 +181,14 @@ mod tests {
         let d = isometric_distortion(sigma_max, sigma_min);
         assert!((d - 2.0).abs() < 1e-12);
 
-        // D_conf = 2/2 = 1 (conformal for uniform scaling)
+        // D_conf = 2/2 = 1 (一様スケーリングは等角)
         let d_conf = conformal_distortion(sigma_max, sigma_min);
         assert!((d_conf - 1.0).abs() < 1e-12);
     }
 
     #[test]
     fn test_rotation_jacobian() {
-        // 90° rotation: ∇u = (0,-1), ∇v = (1,0)
+        // 90°回転: ∇u = (0,-1), ∇v = (1,0)
         // (u = -y, v = x)
         let grad_u = Vector2::new(0.0, -1.0);
         let grad_v = Vector2::new(1.0, 0.0);
@@ -196,14 +196,14 @@ mod tests {
         let (j_s, j_a) = compute_j_s_j_a(grad_u, grad_v);
         let (sigma_max, sigma_min) = singular_values(j_s, j_a);
 
-        // Rotation is isometric: Σ = 1, σ = 1
+        // 回転は等長: Σ = 1, σ = 1
         assert!((sigma_max - 1.0).abs() < 1e-12);
         assert!((sigma_min - 1.0).abs() < 1e-12);
     }
 
     #[test]
     fn test_anisotropic_scaling() {
-        // Scale x by 3, y by 1: ∇u = (3,0), ∇v = (0,1)
+        // xを3倍、yを1倍にスケーリング: ∇u = (3,0), ∇v = (0,1)
         let grad_u = Vector2::new(3.0, 0.0);
         let grad_v = Vector2::new(0.0, 1.0);
 
@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn test_conformal_mapping() {
-        // Conformal mapping (holomorphic): uniform scaling + rotation
-        // Scale by 2, rotate 45°: Jacobian = 2*[[cos45, -sin45], [sin45, cos45]]
+        // 等角写像（正則関数）: 一様スケーリング + 回転
+        // 2倍スケーリング、45°回転: ヤコビアン = 2*[[cos45, -sin45], [sin45, cos45]]
         let c = std::f64::consts::FRAC_1_SQRT_2;
         let grad_u = Vector2::new(2.0 * c, -2.0 * c);
         let grad_v = Vector2::new(2.0 * c, 2.0 * c);
@@ -233,11 +233,11 @@ mod tests {
         let (j_s, j_a) = compute_j_s_j_a(grad_u, grad_v);
         let (sigma_max, sigma_min) = singular_values(j_s, j_a);
 
-        // Conformal: Σ = σ = 2
+        // 等角: Σ = σ = 2
         assert!((sigma_max - 2.0).abs() < 1e-10);
         assert!((sigma_min - 2.0).abs() < 1e-10);
 
-        // D_conf = 1 for conformal
+        // 等角では D_conf = 1
         let d_conf = conformal_distortion(sigma_max, sigma_min);
         assert!((d_conf - 1.0).abs() < 1e-10);
     }

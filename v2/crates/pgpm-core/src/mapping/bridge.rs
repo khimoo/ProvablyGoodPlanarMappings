@@ -1,30 +1,30 @@
-//! Frontend bridge trait.
+//! フロントエンドブリッジトレイト。
 
 use crate::algorithm::strategy;
 use crate::mapping::PlanarMapping;
 use crate::model::types::{AlgorithmError, DomainBounds, MappingParams, StepInfo};
 use nalgebra::Vector2;
 
-/// Frontend bridge: subset of [`PlanarMapping`] exposed to UI consumers.
+/// フロントエンドブリッジ: UI利用者に公開する [`PlanarMapping`] のサブセット。
 ///
-/// `bevy-pgpm` depends only on this trait, not on `PlanarMapping` directly.
-/// Internal methods (`coefficients`, `basis`, `grad_uv_at`, `j_s_j_a_at`,
-/// `singular_values_at`) are used by the algorithm internals and are not
-/// part of this interface.
+/// `bevy-pgpm` はこのトレイトにのみ依存し、`PlanarMapping` には直接依存しない。
+/// 内部メソッド（`coefficients`, `basis`, `grad_uv_at`, `j_s_j_a_at`,
+/// `singular_values_at`）はアルゴリズム内部で使用され、
+/// このインターフェースには含まれない。
 pub trait MappingBridge: Send + Sync {
-    /// Algorithm 1: execute one step (Section 5).
+    /// Algorithm 1: 1ステップを実行する (Section 5)。
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError>;
 
-    /// Evaluate the forward mapping f(x) = Σ c_i φ_i(x) at multiple points (Eq. 3).
+    /// 複数の点での前方写像 f(x) = Σ c_i φ_i(x) を評価する (Eq. 3)。
     ///
-    /// Takes a slice of domain-space points, returns the mapped positions.
-    /// Used by the CPU rendering path for any basis function type.
+    /// ドメイン空間の点のスライスを受け取り、写像後の位置を返す。
+    /// 任意の基底関数型に対するCPUレンダリングパスで使用。
     fn evaluate_mapping_at(&self, points: &[Vector2<f64>]) -> Vec<Vector2<f64>>;
 
-    /// Update algorithm parameters at runtime (K, lambda, regularization).
+    /// 実行時にアルゴリズムパラメータを更新する（K, lambda, 正則化）。
     fn update_params(&mut self, params: MappingParams);
 
-    /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
+    /// Strategy 2 事後細分化 (Section 5 "Strategies")。
     fn refine_strategy2(
         &mut self,
         k_max: f64,
@@ -32,29 +32,29 @@ pub trait MappingBridge: Send + Sync {
     ) -> Result<strategy::Strategy2Result, AlgorithmError>;
 
     // ─────────────────────────────────────────
-    // Query methods: read-only state inspection
+    // クエリメソッド: 読み取り専用の状態検査
     // ─────────────────────────────────────────
 
-    /// Get current algorithm parameters (K, lambda, regularization).
+    /// 現在のアルゴリズムパラメータ（K, lambda, 正則化）を取得する。
     fn params(&self) -> MappingParams;
 
-    /// Grid resolution (width, height) for collocation grid (Section 4).
+    /// コロケーショングリッドの解像度 (width, height) (Section 4)。
     fn grid_resolution(&self) -> (usize, usize);
 
-    /// Total number of collocation points |Z| (Section 4).
+    /// コロケーション点の総数 |Z| (Section 4)。
     fn num_collocation_points(&self) -> usize;
 
-    /// Number of basis functions n (Table 1).
+    /// 基底関数の個数 n (Table 1)。
     fn num_basis_functions(&self) -> usize;
 
-    /// Source handle positions {p_l} (Eq. 29).
+    /// ソースハンドル位置 {p_l} (Eq. 29)。
     fn source_handles(&self) -> Vec<Vector2<f64>>;
 
-    /// Bounding box of domain Omega (Eq. 5).
+    /// ドメイン Ω のバウンディングボックス (Eq. 5)。
     fn domain_bounds(&self) -> DomainBounds;
 }
 
-/// Blanket impl: any `PlanarMapping` automatically satisfies `MappingBridge`.
+/// ブランケット実装: `PlanarMapping` を実装する型は自動的に `MappingBridge` を満たす。
 impl<T: PlanarMapping + ?Sized> MappingBridge for T {
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
         PlanarMapping::step(self, target_handles)

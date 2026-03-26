@@ -1,13 +1,13 @@
-//! Integration tests verifying the paper's core claims.
+//! 論文の中核的主張を検証する統合テスト。
 //!
-//! These tests verify that the implementation actually enforces the
-//! properties described in Poranne & Lipman (2014):
+//! これらのテストは、Poranne & Lipman (2014) で記述された
+//! 性質が実際に実装で強制されることを検証:
 //!
-//! 1. Identity mapping has distortion exactly 1
-//! 2. SOCP constraints enforce D(z) <= K at active points
-//! 3. Handle positions are tracked by the mapping
-//! 4. Iterative refinement converges (active set stabilizes)
-//! 5. Distortion bound is maintained under deformation
+//! 1. 恒等写像の歪みは正確に 1
+//! 2. SOCP制約はアクティブ点で D(z) <= K を強制
+//! 3. ハンドル位置は写像によって追跡される
+//! 4. 反復精緻化は収束する（アクティブ集合が安定化）
+//! 5. 変形下で歪み上界が維持される
 
 use pgpm_core::basis::gaussian::GaussianBasis;
 use pgpm_core::basis::BasisFunction;
@@ -18,7 +18,7 @@ use pgpm_core::model::types::*;
 use pgpm_core::policy::IsometricPolicy;
 use nalgebra::Vector2;
 
-/// Evaluate the mapping f(x) = Σ c_i φ_i(x) (Eq. 3) from coefficients and basis.
+/// 係数と基底から写像 f(x) = Σ c_i φ_i(x) (Eq. 3) を評価。
 fn eval_mapping(coefficients: &CoefficientMatrix, basis: &dyn BasisFunction, x: Vector2<f64>) -> Vector2<f64> {
     let phi = basis.evaluate(x);
     let n = basis.count();
@@ -31,14 +31,14 @@ fn eval_mapping(coefficients: &CoefficientMatrix, basis: &dyn BasisFunction, x: 
     Vector2::new(u, v)
 }
 
-/// Helper: create a well-conditioned test setup on [0,1]^2
-/// with denser RBF centers and appropriate scale.
+/// ヘルパー: [0,1]^2 上に条件の良いテストセットアップを作成。
+/// 密なRBF中心と適切なスケールで構成。
 fn make_verification_algorithm(
     k_bound: f64,
     handles_src: Vec<Vector2<f64>>,
     grid_res: usize,
 ) -> Algorithm<IsometricPolicy> {
-    // 4x4 grid of RBF centers for decent coverage
+    // 十分なカバレッジのための4x4 RBF中心グリッド
     let mut centers = Vec::new();
     for i in 0..4 {
         for j in 0..4 {
@@ -48,7 +48,7 @@ fn make_verification_algorithm(
             ));
         }
     }
-    // Scale: roughly 1/(2*sqrt(n_centers)) ~ 0.125, but a bit larger for overlap
+    // スケール: 約 1/(2*sqrt(n_centers)) ~ 0.125 だが、オーバーラップのため少し大きめ
     let basis = Box::new(GaussianBasis::new(centers, 0.25));
 
     let params = MappingParams {
@@ -71,24 +71,23 @@ fn make_verification_algorithm(
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 1: Identity mapping has distortion = 1 everywhere
+// テスト1: 恒等写像の歪みは全点で = 1
 // ────────────────────────────────────────────────────────────
 
-/// Test 1a: Identity coefficients produce D = 1 everywhere.
-/// This verifies the basis function and distortion computation
-/// before any SOCP solving.
+/// テスト1a: 恒等係数は全点で D = 1 を生成。
+/// SOCP求解前の基底関数と歪み計算を検証。
 #[test]
 fn verify_identity_coefficients_give_distortion_one() {
     let handles = vec![Vector2::new(0.3, 0.3), Vector2::new(0.7, 0.7)];
     let mut alg = make_verification_algorithm(3.0, handles, 20);
 
-    // Step triggers precomputation but also solves SOCP.
-    // We need to check distortion BEFORE solving.
-    // Use state() to get identity coefficients and verify D=1.
+    // ステップは事前計算をトリガーするが、SOCPも求解する。
+    // 求解前に歪みを確認する必要がある。
+    // state() を使って恒等係数を取得し D=1 を検証。
     let target = vec![Vector2::new(0.3, 0.3), Vector2::new(0.7, 0.7)];
     let info = alg.step(&target).expect("Should succeed");
 
-    // info.max_distortion is computed BEFORE solving (from identity coefficients)
+    // info.max_distortion は求解前（恒等係数から）に計算される
     println!(
         "Pre-solve max distortion (identity coefficients): {:.6}",
         info.max_distortion
@@ -100,9 +99,9 @@ fn verify_identity_coefficients_give_distortion_one() {
     );
 }
 
-/// Test 1b: With identity target, iterative algorithm converges to D <= K.
-/// After a few steps, the active set stabilizes and max distortion
-/// stays within the bound K.
+/// テスト1b: 恒等ターゲットで反復アルゴリズムは D <= K に収束。
+/// 数ステップ後、アクティブ集合が安定し、最大歪みは
+/// 上界 K 以内に留まる。
 #[test]
 fn verify_identity_target_converges() {
     let handles = vec![Vector2::new(0.3, 0.3), Vector2::new(0.7, 0.7)];
@@ -110,7 +109,7 @@ fn verify_identity_target_converges() {
     let target = vec![Vector2::new(0.3, 0.3), Vector2::new(0.7, 0.7)];
     let k = 3.0;
 
-    // Run enough steps for convergence
+    // 収束に十分なステップを実行
     let mut last_info = None;
     for step in 0..10 {
         let info = alg.step(&target).expect("Should succeed");
@@ -121,7 +120,7 @@ fn verify_identity_target_converges() {
         last_info = Some(info);
     }
 
-    // After convergence, max distortion should be <= K (with small tolerance)
+    // 収束後、最大歪みは K 以下であるべき（小さな許容誤差付き）
     let info = last_info.unwrap();
     assert!(
         info.max_distortion <= k + 0.1,
@@ -130,7 +129,7 @@ fn verify_identity_target_converges() {
         k + 0.1
     );
 
-    // Also verify post-solve distortion is bounded
+    // 求解後の歪みも上界内であることを検証
     let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
@@ -149,7 +148,7 @@ fn verify_identity_target_converges() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 2: SOCP constraints enforce D <= K at active/stable points
+// テスト2: SOCP制約はアクティブ/安定点で D <= K を強制
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -158,15 +157,15 @@ fn verify_distortion_bound_at_constrained_points() {
     let k = 3.0;
     let mut alg = make_verification_algorithm(k, handles, 20);
 
-    // Apply a moderate deformation
+    // 中程度の変形を適用
     let target = vec![Vector2::new(0.65, 0.5)];
 
-    // Run several steps so active set stabilizes
+    // アクティブ集合が安定するまで数ステップ実行
     for _ in 0..5 {
         alg.step(&target).expect("Should succeed");
     }
 
-    // After the SOCP solve, check distortion at constrained points
+    // SOCP求解後、制約点での歪みを確認
     let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
@@ -175,8 +174,8 @@ fn verify_distortion_bound_at_constrained_points() {
         ctx.policy,
     );
 
-    // Check active set points: D(z) <= K (with some numerical tolerance)
-    let tol = 0.1; // SOCP solver tolerance
+    // アクティブ集合点を確認: D(z) <= K（数値許容誤差付き）
+    let tol = 0.1; // SOCPソルバーの許容誤差
     for &idx in &state.active_set {
         assert!(
             distortions[idx] <= k + tol,
@@ -188,7 +187,7 @@ fn verify_distortion_bound_at_constrained_points() {
         );
     }
 
-    // Check stable set points similarly
+    // 安定集合点も同様に確認
     for &idx in &state.stable_set {
         assert!(
             distortions[idx] <= k + tol,
@@ -209,7 +208,7 @@ fn verify_distortion_bound_at_constrained_points() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 3: Mapping tracks handle positions (E_pos minimized)
+// テスト3: 写像はハンドル位置を追跡（E_pos が最小化）
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -219,12 +218,12 @@ fn verify_handle_tracking() {
 
     let target = vec![Vector2::new(0.6, 0.55)];
 
-    // Run several steps
+    // 数ステップ実行
     for _ in 0..5 {
         alg.step(&target).expect("Should succeed");
     }
 
-    // Evaluate the mapping at the source handle (Eq. 3)
+    // ソースハンドルで写像を評価（Eq. 3）
     let mapped = eval_mapping(alg.coefficients(), alg.basis(), Vector2::new(0.5, 0.5));
     let error = (mapped - target[0]).norm();
 
@@ -241,7 +240,7 @@ fn verify_handle_tracking() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 4: Active set converges over iterations
+// テスト4: アクティブ集合は反復で収束
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -263,8 +262,8 @@ fn verify_active_set_convergence() {
         );
     }
 
-    // The active set should stabilize (not grow unboundedly)
-    // Paper: "only a small number of isolated points will be activated at each iteration"
+    // アクティブ集合は安定すべき（無限に成長しない）
+    // 論文: 「各反復で少数の孤立点のみがアクティブ化される」
     let last_size = *active_sizes.last().unwrap();
     let total_points = alg.collocation_points().len();
     let ratio = last_size as f64 / total_points as f64;
@@ -280,14 +279,14 @@ fn verify_active_set_convergence() {
         ratio
     );
 
-    // Distortion should be finite throughout
+    // 歪みは終始有限であるべき
     for (step, &d) in max_dists.iter().enumerate() {
         assert!(d.is_finite(), "Step {}: infinite distortion", step);
     }
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 5: Mapping is continuous (nearby points map nearby)
+// テスト5: 写像は連続（近傍点は近傍に写像）
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -300,7 +299,7 @@ fn verify_mapping_continuity() {
         alg.step(&target).expect("Should succeed");
     }
 
-    // Check continuity: nearby input points should map to nearby output points
+    // 連続性を確認: 近傍入力点は近傍出力点に写像されるべき
     let eps = 0.01;
     let test_points = vec![
         Vector2::new(0.3, 0.3),
@@ -319,8 +318,8 @@ fn verify_mapping_continuity() {
         let dx = (f_px - f_p).norm();
         let dy = (f_py - f_p).norm();
 
-        // With K-bounded distortion, the Lipschitz constant should be <= K
-        // (roughly: ||f(x)-f(y)|| <= K * ||x-y||)
+        // K-有界歪みでは、リプシッツ定数は K 以下であるべき
+        // （大まかに: ||f(x)-f(y)|| <= K * ||x-y||）
         let lip_x = dx / eps;
         let lip_y = dy / eps;
 
@@ -329,7 +328,7 @@ fn verify_mapping_continuity() {
             p.x, p.y, lip_x, lip_y
         );
 
-        // The Lipschitz ratio should be bounded (not infinite = no fold-over)
+        // リプシッツ比は有界であるべき（無限でない = fold-over なし）
         assert!(
             lip_x < 20.0 && lip_y < 20.0,
             "Lipschitz constant too large at ({:.1},{:.1}): ({:.2}, {:.2})",
@@ -342,7 +341,7 @@ fn verify_mapping_continuity() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 6: Different K values produce different quality
+// テスト6: 異なる K 値は異なる品質を生成
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -359,7 +358,7 @@ fn verify_k_bound_effect() {
             alg.step(&target).expect("Should succeed");
         }
 
-        // Measure post-solve distortion
+        // 求解後の歪みを測定
         let (ctx, state) = alg.parts();
         let precomputed = state.precomputed.as_ref().unwrap();
         let distortions = distortion::evaluate_distortion_all(
@@ -382,14 +381,14 @@ fn verify_k_bound_effect() {
         results.push((k, max_d, handle_error));
     }
 
-    // Higher K should generally allow more distortion (fewer constraints)
-    // and/or better handle tracking (more freedom)
+    // 高い K は一般的により多くの歪み（より少ない制約）を許容し、
+    // かつ/または より良いハンドル追跡（より多くの自由度）を可能にする
     let (_, d_tight, err_tight) = results[0]; // K=2
     let (_, d_loose, err_loose) = results[2]; // K=8
 
-    // With K=8 (looser bound), the solver has more freedom,
-    // so handle error should be at least as good or better
-    // (Not a strict monotonic guarantee, but generally holds)
+    // K=8（緩い上界）ではソルバーにより多くの自由度があるため、
+    // ハンドルエラーは同等以上であるべき
+    // （厳密な単調保証ではないが、一般的に成立）
     println!(
         "K=2: D={:.4} err={:.4} | K=8: D={:.4} err={:.4}",
         d_tight, err_tight, d_loose, err_loose
@@ -397,7 +396,7 @@ fn verify_k_bound_effect() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 7: Two-handle deformation
+// テスト7: 2ハンドル変形
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -405,7 +404,7 @@ fn verify_two_handle_deformation() {
     let src = vec![Vector2::new(0.3, 0.5), Vector2::new(0.7, 0.5)];
     let mut alg = make_verification_algorithm(4.0, src.clone(), 20);
 
-    // Pull handles apart
+    // ハンドルを引き離す
     let target = vec![Vector2::new(0.2, 0.5), Vector2::new(0.8, 0.5)];
 
     for step in 0..8 {
@@ -416,7 +415,7 @@ fn verify_two_handle_deformation() {
         );
     }
 
-    // Check both handles are tracked (Eq. 3)
+    // 両ハンドルが追跡されているか確認（Eq. 3）
     let mapped_a = eval_mapping(alg.coefficients(), alg.basis(), src[0]);
     let mapped_b = eval_mapping(alg.coefficients(), alg.basis(), src[1]);
 
@@ -435,7 +434,7 @@ fn verify_two_handle_deformation() {
     assert!(err_a < 0.2, "Handle A error {:.4} too large", err_a);
     assert!(err_b < 0.2, "Handle B error {:.4} too large", err_b);
 
-    // Verify distortion constraint
+    // 歪み制約を検証
     let (ctx, state) = alg.parts();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
@@ -448,13 +447,13 @@ fn verify_two_handle_deformation() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 8: Verify J_S / J_A decomposition matches singular values
+// テスト8: J_S / J_A 分解が特異値と一致することを検証
 // ────────────────────────────────────────────────────────────
 
 #[test]
 fn verify_singular_value_decomposition() {
-    // Test that our J_S/J_A decomposition (Eq. 19-20) matches
-    // the actual SVD of random 2x2 Jacobian matrices.
+    // J_S/J_A 分解（Eq. 19-20）がランダムな 2x2
+    // ヤコビアン行列の実際の SVD と一致することをテスト。
 
     let test_cases: Vec<(Vector2<f64>, Vector2<f64>)> = vec![
         // (grad_u, grad_v)
@@ -468,7 +467,7 @@ fn verify_singular_value_decomposition() {
         let (j_s, j_a) = distortion::compute_j_s_j_a(grad_u, grad_v);
         let (sigma_max, sigma_min) = distortion::singular_values(j_s, j_a);
 
-        // Cross-check with actual SVD of the 2x2 Jacobian
+        // 2x2 ヤコビアンの実際の SVD とクロスチェック
         // J = [[du/dx, du/dy], [dv/dx, dv/dy]]
         let j = nalgebra::Matrix2::new(
             grad_u.x, grad_u.y,
@@ -493,8 +492,8 @@ fn verify_singular_value_decomposition() {
 }
 
 // ────────────────────────────────────────────────────────────
-// Test 9: Post-solve distortion at constrained points <= K
-//         (direct constraint satisfaction check)
+// テスト9: 求解後の制約点での歪み <= K
+//         （直接的な制約充足確認）
 // ────────────────────────────────────────────────────────────
 
 #[test]
@@ -504,23 +503,23 @@ fn verify_post_solve_constraint_satisfaction() {
     let mut alg = make_verification_algorithm(k, handles, 20);
     let target = vec![Vector2::new(0.7, 0.5)];
 
-    // Run one step (which will add some active points and solve)
+    // 1ステップ実行（いくつかのアクティブ点を追加して求解）
     let _info = alg.step(&target).expect("Step 1 should succeed");
 
-    // Now run another step:
-    // At the START of step 2, distortion is evaluated on the SOLVED coefficients.
-    // The constrained points from step 1 should satisfy D <= K.
+    // もう1ステップ実行:
+    // ステップ2の開始時、歪みは求解済み係数で評価される。
+    // ステップ1の制約点は D <= K を満たすべき。
     let info2 = alg.step(&target).expect("Step 2 should succeed");
 
-    // The max distortion BEFORE solving (i.e., evaluated on step1's solution)
-    // should show that the SOCP constraints from step1 were satisfied.
-    // (info2.max_distortion is computed before the step2 solve)
+    // 求解前の最大歪み（ステップ1の解で評価）は、
+    // ステップ1のSOCP制約が満たされたことを示すべき。
+    // （info2.max_distortion はステップ2の求解前に計算される）
     println!(
         "Post-solve distortion (evaluated at start of step 2): {:.4}",
         info2.max_distortion
     );
 
-    // Continue for more steps and check the pattern
+    // さらにステップを継続してパターンを確認
     for step in 2..8 {
         let info = alg.step(&target).expect("Should succeed");
         println!(

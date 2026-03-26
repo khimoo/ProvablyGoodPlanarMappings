@@ -1,38 +1,38 @@
-//! Image-related resources: loaded image data and path configuration.
+//! 画像関連リソース: 読み込まれた画像データとパス設定。
 
 use bevy::prelude::*;
 
 use crate::domain::coords::ImageCoords;
 
-/// Data about the loaded image.
+/// 読み込まれた画像のデータ。
 #[derive(Resource)]
 pub struct ImageInfo {
     pub width: f32,
     pub height: f32,
     pub handle: Handle<Image>,
-    /// Outer boundary contour in pixel coordinates (empty = full rectangle).
+    /// ピクセル座標での外部境界輪郭（空 = 完全矩形）。
     pub contour: Vec<(f32, f32)>,
-    /// Interior hole contours in pixel coordinates.
+    /// ピクセル座標での内部穴輪郭。
     pub holes: Vec<Vec<(f32, f32)>>,
 }
 
 impl ImageInfo {
-    /// Create an `ImageCoords` helper from this image's dimensions.
+    /// この画像の寸法から `ImageCoords` ヘルパーを作成。
     pub fn coords(&self) -> ImageCoords {
         ImageCoords::new(self.width, self.height)
     }
 }
 
-/// Configuration for the image file path.
+/// 画像ファイルパスの設定。
 ///
-/// Stores the absolute filesystem path to the image.
-/// The image is loaded via `image::open()` and inserted directly into
-/// Bevy's `Assets<Image>`, bypassing `AssetServer` path resolution.
+/// 画像への絶対ファイルシステムパスを格納。
+/// 画像は `image::open()` で読み込まれ、`AssetServer` のパス解決を
+/// バイパスして直接 Bevy の `Assets<Image>` に挿入される。
 #[derive(Resource)]
 pub struct ImagePathConfig {
-    /// Absolute filesystem path to the image file.
+    /// 画像ファイルへの絶対ファイルシステムパス。
     pub abs_path: String,
-    /// Whether the image needs to be (re)loaded.
+    /// 画像を（再）読み込みする必要があるか。
     pub needs_reload: bool,
 }
 

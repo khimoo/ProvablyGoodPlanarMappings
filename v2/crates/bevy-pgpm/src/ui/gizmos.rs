@@ -1,11 +1,11 @@
-//! Handle gizmo rendering: circles and lines for source/target handles.
+//! ハンドルギズモレンダリング: ソース/ターゲットハンドルの円と線。
 
 use bevy::prelude::*;
 
 use crate::domain::coords::ImageCoords;
 use crate::state::{AlgorithmState, AppState, DragState, ImageInfo};
 
-/// System: draw handle gizmos on the canvas.
+/// システム: キャンバス上にハンドルギズモを描画。
 pub fn draw_handles(
     algo_state: Res<AlgorithmState>,
     drag_state: Res<DragState>,

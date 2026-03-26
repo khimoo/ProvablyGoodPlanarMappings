@@ -1,10 +1,10 @@
-//! Input handling: mouse interactions on the canvas.
+//! 入力処理: キャンバス上のマウス操作。
 //!
-//! Setup mode: click to add handles.
-//! Deforming mode: drag handles to move them.
+//! セットアップモード: クリックでハンドルを追加。
+//! 変形モード: ハンドルをドラッグして移動。
 //!
-//! All parameter adjustments and mode switching are handled by the
-//! GUI panel in `ui/`.
+//! パラメータ調整とモード切り替えは `ui/` の
+//! GUIパネルで処理。
 
 use bevy::prelude::*;
 use log::info;
@@ -12,12 +12,12 @@ use log::info;
 use crate::domain::coords::ImageCoords;
 use crate::state::{AlgorithmState, AppState, DragState, ImageInfo, MainCamera};
 
-/// Threshold (in world units) for clicking near a handle.
+/// ハンドル近傍クリックの閾値（ワールド単位）。
 const HANDLE_CLICK_RADIUS: f32 = 15.0;
-/// Minimum distance between new handles (in domain pixel coords).
+/// 新規ハンドル間の最小距離（ドメインピクセル座標）。
 const MIN_HANDLE_DISTANCE: f32 = 20.0;
 
-/// System: process mouse input on the canvas (handle placement & dragging).
+/// システム: キャンバス上のマウス入力を処理（ハンドル配置 & ドラッグ）。
 pub fn handle_input(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -32,22 +32,22 @@ pub fn handle_input(
     let Ok(window) = windows.single() else { return };
     let Ok((camera, cam_transform)) = camera_q.single() else { return };
 
-    // If any UI button is being interacted with, don't process canvas clicks
+    // UIボタンとインタラクション中ならキャンバスクリックを処理しない
     let ui_active = ui_interaction.iter().any(|i| *i != Interaction::None);
     if ui_active && !drag_state.active {
         return;
     }
 
-    // Convert cursor to world coordinates
+    // カーソルをワールド座標に変換
     let Some(cursor_pos) = window.cursor_position() else { return };
     let Ok(ray) = camera.viewport_to_world(cam_transform, cursor_pos) else { return };
     let world_pos = ray.origin.truncate();
 
-    // Convert world -> domain (pixel) coordinates
+    // ワールド → ドメイン（ピクセル）座標に変換
     let coords = ImageCoords::new(image_info.width, image_info.height);
     let (domain_x, domain_y) = coords.world_to_pixel(world_pos);
 
-    // Bounds check
+    // 境界チェック
     if domain_x < 0.0 || domain_x > image_info.width || domain_y < 0.0 || domain_y > image_info.height {
         if drag_state.active && buttons.just_released(MouseButton::Left) {
             drag_state.end();

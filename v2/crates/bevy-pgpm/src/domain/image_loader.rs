@@ -1,7 +1,7 @@
-//! Image loading and contour extraction.
+//! 画像読み込みと輪郭抽出。
 //!
-//! Loads a PNG image, extracts the alpha-channel contour (for non-rectangular
-//! images), and resamples it to a manageable number of points.
+//! PNG 画像を読み込み、アルファチャンネル輪郭（非矩形画像用）を抽出し、
+//! 扱いやすい点数にリサンプリング。
 
 use imageproc::contours::{find_contours, BorderType};
 use image::GenericImageView;
@@ -10,21 +10,21 @@ use log::{error, info, warn};
 pub const CONTOUR_TARGET_POINTS: usize = 1024;
 pub const ALPHA_THRESHOLD: u8 = 128;
 
-/// Extracted contour data: outer boundary and interior holes.
+/// 抽出された輪郭データ: 外部境界と内部穴。
 pub struct ContourData {
-    /// Outer boundary contour in pixel coordinates.
-    /// Empty means "use full rectangle" (fully opaque image).
+    /// ピクセル座標での外部境界輪郭。
+    /// 空の場合は「完全矩形を使用」を意味する（完全不透明画像）。
     pub outer: Vec<(f32, f32)>,
-    /// Interior hole contours in pixel coordinates.
-    /// Each hole is a closed polygon; points inside a hole are outside the domain.
+    /// ピクセル座標での内部穴輪郭。
+    /// 各穴は閉じたポリゴン。穴の内側の点はドメイン外。
     pub holes: Vec<Vec<(f32, f32)>>,
 }
 
-/// Extract the contour from an image's alpha channel.
+/// 画像のアルファチャンネルから輪郭を抽出。
 ///
-/// For fully opaque rectangular images, returns empty outer (meaning "use full rect").
-/// For images with transparency, returns the longest outer contour and any
-/// hole contours that are direct children of it.
+/// 完全不透明な矩形画像の場合、空の outer を返す（「完全矩形を使用」の意味）。
+/// 透明部分を持つ画像の場合、最長の外部輪郭とその直接の子である
+/// 穴輪郭を返す。
 pub fn extract_contour_from_image(image_path: &str) -> ContourData {
     let img = match image::open(image_path) {
         Ok(img) => img,
@@ -37,10 +37,10 @@ pub fn extract_contour_from_image(image_path: &str) -> ContourData {
     let (width, height) = img.dimensions();
     let rgba = img.to_rgba8();
 
-    // Check if image has any transparent pixels at all
+    // 画像に透明ピクセルがあるかチェック
     let has_transparency = rgba.pixels().any(|p| p[3] < ALPHA_THRESHOLD);
     if !has_transparency {
-        // Fully opaque: use full rectangle, return empty (caller handles this)
+        // 完全不透明: 完全矩形を使用、空を返す（呼び出し側で処理）
         return ContourData { outer: vec![], holes: vec![] };
     }
 
@@ -67,7 +67,7 @@ pub fn extract_contour_from_image(image_path: &str) -> ContourData {
         };
     }
 
-    // Find the longest Outer contour → main domain boundary
+    // 最長の外部輪郭を検索 → 主ドメイン境界
     let (outer_idx, longest_outer) = contours
         .iter()
         .enumerate()
@@ -81,7 +81,7 @@ pub fn extract_contour_from_image(image_path: &str) -> ContourData {
         .map(|p| (p.x as f32, p.y as f32))
         .collect();
 
-    // Collect Hole contours whose parent is the main outer contour
+    // 主外部輪郭を親に持つ穴輪郭を収集
     let hole_contours: Vec<Vec<(f32, f32)>> = contours
         .iter()
         .filter(|c| c.border_type == BorderType::Hole && c.parent == Some(outer_idx))
@@ -104,7 +104,7 @@ pub fn extract_contour_from_image(image_path: &str) -> ContourData {
     }
 }
 
-/// Resample a contour to have at most `target_points` uniformly spaced points.
+/// 輪郭を最大 `target_points` 個の等間隔な点にリサンプリング。
 pub fn resample_contour(contour: &[(f32, f32)], target_points: usize) -> Vec<(f32, f32)> {
     if contour.len() <= target_points {
         return contour.to_vec();

@@ -1,14 +1,14 @@
-//! UI interaction state: drag operations on handles.
+//! UI インタラクション状態: ハンドルに対するドラッグ操作。
 
 use bevy::prelude::*;
 
-/// Tracks the current drag operation (separated from algorithm state
-/// to avoid shared mutable access between input and solver systems).
+/// 現在のドラッグ操作を追跡（入力システムとソルバーシステム間の
+/// 共有可変アクセスを避けるためアルゴリズム状態から分離）。
 #[derive(Resource, Default)]
 pub struct DragState {
-    /// Whether a drag operation is currently in progress.
+    /// ドラッグ操作が現在進行中かどうか。
     pub active: bool,
-    /// Index of the currently dragged handle, if any.
+    /// 現在ドラッグ中のハンドルインデックス（存在する場合）。
     pub handle_index: Option<usize>,
 }
 

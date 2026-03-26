@@ -1,13 +1,13 @@
-//! Distortion policy trait and concrete implementations.
+//! 歪みポリシートレイトと具象実装。
 //!
-//! The `DistortionPolicy` trait encapsulates the distortion-type-specific
-//! behaviour (isometric vs conformal) that varies in:
-//! - distortion value computation (Section 3)
-//! - SOCP constraint construction (Eq. 23/26 vs Eq. 28)
-//! - Strategy 2 fill distance computation (Eq. 14 vs Eq. 15)
+//! `DistortionPolicy` トレイトは歪みタイプ固有の動作
+//! （等長 vs 等角）をカプセル化する:
+//! - 歪み値の計算（Section 3）
+//! - SOCP制約の構築（Eq. 23/26 vs Eq. 28）
+//! - Strategy 2 充填距離の計算（Eq. 14 vs Eq. 15）
 //!
-//! This is `pub(crate)` — external consumers interact via `PlanarMapping`
-//! and factory functions.
+//! これは `pub(crate)` — 外部利用者は `PlanarMapping` と
+//! ファクトリ関数経由でアクセスする。
 
 use crate::basis::BasisFunction;
 use crate::distortion;
@@ -15,16 +15,16 @@ use crate::algorithm::strategy;
 use crate::model::types::{AlgorithmState, PrecomputedData};
 use crate::numerics::solver;
 
-/// Distortion-type-specific behaviour for the SOCP formulation.
+/// SOCP定式化のための歪みタイプ固有の動作。
 pub trait DistortionPolicy: Send + Sync {
-    /// Compute the distortion value from singular values (Section 3).
+    /// 特異値から歪み値を計算（Section 3）。
     fn distortion_value(&self, sigma_max: f64, sigma_min: f64) -> f64;
 
-    /// Number of extra decision variables per active point.
-    /// Isometric: 2 (t_i, s_i per Eq. 23).  Conformal: 0.
+    /// アクティブ点ごとの追加決定変数の数。
+    /// 等長: 2（Eq. 23 の t_i, s_i）。等角: 0。
     fn extra_vars_per_active(&self) -> usize;
 
-    /// Append distortion constraints to the SOCP (Eq. 23/26 or 28).
+    /// SOCPに歪み制約を追加（Eq. 23/26 または 28）。
     fn append_constraints(
         &self,
         state: &AlgorithmState,
@@ -39,19 +39,19 @@ pub trait DistortionPolicy: Send + Sync {
         cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
     );
 
-    /// Strategy 2: compute required fill distance h (Eq. 14 or 15).
-    /// Returns `None` if the computation is not possible.
+    /// Strategy 2: 必要な充填距離 h を計算（Eq. 14 または 15）。
+    /// 計算不可能な場合は `None` を返す。
     fn required_h(&self, k: f64, k_max: f64, c_norm: f64, basis: &dyn BasisFunction)
         -> Option<f64>;
 
-    /// Strategy 1: compute K_max from K and omega(h) (Eq. 11 or 13).
-    /// Returns `None` if injectivity cannot be guaranteed.
+    /// Strategy 1: K と omega(h) から K_max を計算（Eq. 11 または 13）。
+    /// 単射性が保証できない場合は `None` を返す。
     fn compute_k_max(&self, k: f64, omega_h: f64) -> Option<f64>;
 }
 
-/// Isometric distortion policy: D_iso(x) = max{Sigma(x), 1/sigma(x)}.
+/// 等長歪みポリシー: D_iso(x) = max{Σ(x), 1/σ(x)}。
 ///
-/// Constraints: Eq. 23a-c, 26.  Strategy 2: Eq. 14.
+/// 制約: Eq. 23a-c, 26。Strategy 2: Eq. 14。
 pub struct IsometricPolicy;
 
 impl DistortionPolicy for IsometricPolicy {
@@ -60,7 +60,7 @@ impl DistortionPolicy for IsometricPolicy {
     }
 
     fn extra_vars_per_active(&self) -> usize {
-        2 // t_i, s_i (Eq. 23)
+        2 // t_i, s_i（Eq. 23）
     }
 
     fn append_constraints(
@@ -94,10 +94,10 @@ impl DistortionPolicy for IsometricPolicy {
     }
 }
 
-/// Conformal distortion policy: D_conf(x) = Sigma(x) / sigma(x).
+/// 等角歪みポリシー: D_conf(x) = Σ(x) / σ(x)。
 ///
-/// Constraints: Eq. 28a-b.
-/// Strategy functions: Phase 3 -- falls back to isometric versions.
+/// 制約: Eq. 28a-b。
+/// Strategy 関数: Phase 3 — 等長バージョンにフォールバック。
 pub struct ConformalPolicy {
     pub delta: f64,
 }
@@ -108,7 +108,7 @@ impl DistortionPolicy for ConformalPolicy {
     }
 
     fn extra_vars_per_active(&self) -> usize {
-        0 // Conformal constraints (Eq. 28) need no extra variables
+        0 // 等角制約（Eq. 28）は追加変数不要
     }
 
     fn append_constraints(
@@ -131,19 +131,19 @@ impl DistortionPolicy for ConformalPolicy {
         );
     }
 
-    /// Phase 3: conformal strategy (Eq. 15) not yet implemented.
-    /// Falls back to isometric required_h (Eq. 14).
+    /// Phase 3: 等角 strategy（Eq. 15）は未実装。
+    /// 等長の required_h（Eq. 14）にフォールバック。
     fn required_h(&self, k: f64, k_max: f64, c_norm: f64, basis: &dyn BasisFunction)
         -> Option<f64>
     {
-        // Phase 3: implement Eq. 15 for conformal
+        // Phase 3: 等角用の Eq. 15 を実装
         strategy::required_h_isometric(k, k_max, c_norm, basis)
     }
 
-    /// Phase 3: conformal K_max (Eq. 13) not yet implemented.
-    /// Falls back to isometric K_max (Eq. 11).
+    /// Phase 3: 等角 K_max（Eq. 13）は未実装。
+    /// 等長の K_max（Eq. 11）にフォールバック。
     fn compute_k_max(&self, k: f64, omega_h: f64) -> Option<f64> {
-        // Phase 3: implement Eq. 13 for conformal
+        // Phase 3: 等角用の Eq. 13 を実装
         strategy::compute_k_max_isometric(k, omega_h)
     }
 }

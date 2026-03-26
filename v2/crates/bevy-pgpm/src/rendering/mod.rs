@@ -1,4 +1,4 @@
-//! Rendering module: mesh generation and CPU deformation.
+//! レンダリングモジュール: メッシュ生成と CPU 変形。
 
 pub mod mesh;
 pub mod cpu_deform;

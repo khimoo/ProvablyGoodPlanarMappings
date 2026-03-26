@@ -1,11 +1,11 @@
-//! Panel construction: spawns the right-side control panel at startup.
+//! パネル構築: 起動時に右側コントロールパネルを生成。
 
 use bevy::prelude::*;
 
 use crate::ui::{PANEL_BG, BTN_NORMAL, BTN_TEXT, LABEL_COLOR, VALUE_COLOR};
 use crate::ui::markers::*;
 
-/// Startup system: spawn the entire control panel.
+/// 起動システム: コントロールパネル全体を生成。
 pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer>) {
     let font: Handle<Font> = asset_server.load("fonts/FiraCodeNerdFontMono-Regular.ttf");
     commands.insert_resource(UiFont(font.clone()));
@@ -26,7 +26,7 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|panel| {
-            // Status text
+            // ステータステキスト
             panel.spawn((
                 Text::new("Mode: SETUP\nHandles: 0\nClick to add handles"),
                 TextFont { font: font.clone(), font_size: 14.0, ..default() },
@@ -36,29 +36,29 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
 
             separator(panel);
 
-            // Toggle mode
+            // モード切替
             wide_button(panel, "\u{f04b}  Start Deforming", ToggleModeButton, &font);
 
-            // Reset
+            // リセット
             wide_button(panel, "\u{f0e2}  Reset", ResetButton, &font);
 
             separator(panel);
 
-            // K bound
+            // K 上界
             label(panel, "Distortion bound K", &font);
             param_row(panel, "3.0", KBoundText, "\u{f068}", KMinusButton, "\u{f067}", KPlusButton, &font);
 
-            // Lambda
+            // Lambda（正則化係数）
             label(panel, "Regularization \u{03bb}", &font);
             param_row(panel, "1.0e-2", LambdaText, "/10", LambdaDownButton, "x10", LambdaUpButton, &font);
 
-            // Regularization type
+            // 正則化タイプ
             label(panel, "Regularization type", &font);
             wide_button(panel, "ARAP", RegModeButton, &font);
 
             separator(panel);
 
-            // Basis type
+            // 基底関数タイプ
             label(panel, "Basis function", &font);
             wide_button(panel, "Gaussian", BasisTypeButton, &font);
 
@@ -72,7 +72,7 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
 
             separator(panel);
 
-            // Image path
+            // 画像パス
             label(panel, "Image path", &font);
             panel.spawn((
                 Node {
@@ -93,7 +93,7 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
         });
 }
 
-// Builder helpers
+// ビルダーヘルパー
 
 fn separator(parent: &mut ChildSpawnerCommands) {
     parent.spawn((
@@ -158,7 +158,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
             ..default()
         })
         .with_children(|row| {
-            // Left button
+            // 左ボタン
             row.spawn((
                 Button,
                 Node {
@@ -179,7 +179,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
                 ));
             });
 
-            // Value text
+            // 値テキスト
             row.spawn((
                 Text::new(initial.to_string()),
                 TextFont { font: font.clone(), font_size: 14.0, ..default() },
@@ -187,7 +187,7 @@ fn param_row<TM: Component, LB: Component, RB: Component>(
                 text_marker,
             ));
 
-            // Right button
+            // 右ボタン
             row.spawn((
                 Button,
                 Node {

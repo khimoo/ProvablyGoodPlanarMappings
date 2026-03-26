@@ -1,18 +1,18 @@
-//! SOCP problem construction and solving.
+//! SOCP問題の構築と求解。
 //!
-//! Paper references:
-//! - Eq. 18: Overall optimization formulation
-//! - Eq. 23a-c, 26: Isometric constraints
-//! - Eq. 28a-b: Conformal constraints
-//! - Eq. 29-30: Position constraint energy
-//! - Eq. 31: Biharmonic regularization energy
-//! - Eq. 33: ARAP regularization energy
+//! 論文の参照:
+//! - Eq. 18: 全体の最適化定式化
+//! - Eq. 23a-c, 26: 等長制約
+//! - Eq. 28a-b: 等角制約
+//! - Eq. 29-30: 位置拘束エネルギー
+//! - Eq. 31: Biharmonic正則化エネルギー
+//! - Eq. 33: ARAP正則化エネルギー
 //!
-//! We use clarabel as the SOCP solver (replacing Mosek from Section 6).
-//! Clarabel standard form:
+//! SOCPソルバーとして clarabel を使用（Section 6 の Mosek を置換）。
+//! Clarabel の標準形:
 //!   min  ½x'Px + q'x
 //!   s.t. Ax + s = b,  s ∈ K
-//! where K is a product of cones.
+//! ここで K は錐の直積。
 
 use crate::basis::BasisFunction;
 use crate::model::types::*;
@@ -24,10 +24,10 @@ use clarabel::solver::{
 use nalgebra::{DMatrix, DVector, Vector2};
 
 // ─────────────────────────────────────────────
-// Public API
+// 公開API
 // ─────────────────────────────────────────────
 
-/// Solve the SOCP problem from Eq. 18.
+/// Eq. 18 のSOCP問題を求解する。
 ///
 /// min_c  E_pos(f) + λ E_reg(f)
 /// s.t.   D(f; z) ≤ K,  ∀z ∈ Z' ∪ Z''
@@ -50,15 +50,15 @@ pub fn solve_socp(
     let active_indices = collect_active_indices(state);
     let n_active = active_indices.len();
 
-    // Decision variable layout (Eq. 18):
-    // Common: [c¹(n), c²(n), r(L)]
-    // Isometric adds: [t(n_active), s(n_active)]  (Eq. 23)
+    // 決定変数のレイアウト (Eq. 18):
+    // 共通: [c¹(n), c²(n), r(L)]
+    // 等長の場合に追加: [t(n_active), s(n_active)]  (Eq. 23)
     let n_vars = 2 * n_basis + n_handles
         + policy.extra_vars_per_active() * n_active;
 
-    // === Build objective (Eq. 18, 30, 31, 33) ===
+    // === 目的関数の構築 (Eq. 18, 30, 31, 33) ===
     let mut q = vec![0.0; n_vars];
-    // Position energy (Eq. 30): min Σ r_l
+    // 位置エネルギー (Eq. 30): min Σ r_l
     for l in 0..n_handles {
         q[2 * n_basis + l] = 1.0;
     }
@@ -69,35 +69,35 @@ pub fn solve_socp(
         q[i] += q_reg[i];
     }
 
-    // === Build constraints ===
+    // === 制約の構築 ===
     let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
     let mut b_vec: Vec<f64> = Vec::new();
     let mut cones: Vec<clarabel::solver::SupportedConeT<f64>> = Vec::new();
 
-    // Position constraints (Eq. 30)
+    // 位置制約 (Eq. 30)
     append_position_constraints(
         source_handles, target_handles, basis, n_basis,
         &mut rows, &mut b_vec, &mut cones,
     );
 
-    // Distortion constraints (Eq. 23/26 or 28) — delegated to policy
+    // 歪み制約 (Eq. 23/26 または 28) — ポリシーに委譲
     policy.append_constraints(
         state, precomputed, n_basis, n_handles,
         &active_indices, n_active, params.k_bound,
         &mut rows, &mut b_vec, &mut cones,
     );
 
-    // === Assemble and solve ===
+    // === 組み立てと求解 ===
     assemble_and_solve(p_mat, &q, &rows, &b_vec, &cones, n_vars, n_basis, solver_config)
 }
 
 // ─────────────────────────────────────────────
-// Constraint builders
+// 制約ビルダー
 // ─────────────────────────────────────────────
 
-/// Position constraints (Eq. 30).
+/// 位置制約 (Eq. 30)。
 ///
-/// ||Σ c_i f_i(p_l) - q_l|| ≤ r_l   (SOC(3) per handle)
+/// ||Σ c_i f_i(p_l) - q_l|| ≤ r_l   (ハンドルごとに SOC(3))
 fn append_position_constraints(
     source_handles: &[Vector2<f64>],
     target_handles: &[Vector2<f64>],
@@ -139,9 +139,9 @@ fn append_position_constraints(
     }
 }
 
-/// Isometric distortion constraints (Eq. 23a-c, 26).
+/// 等長歪み制約 (Eq. 23a-c, 26)。
 ///
-/// Per active point i:
+/// アクティブ点 i ごとに:
 ///   ||J_S f(z_i)|| ≤ t_i          SOC(3)     (Eq. 23a)
 ///   ||J_A f(z_i)|| ≤ s_i          SOC(3)     (Eq. 23b)
 ///   t_i + s_i ≤ K                  NN         (Eq. 23c)
@@ -187,7 +187,7 @@ pub(crate) fn append_isometric_constraints(
 
         // (d) J_S f·d_i - s_i ≥ 1/K — NN (Eq. 26)
         // Clarabel: Ax + s = b, s ≥ 0  →  Ax ≤ b
-        // We want: J_S·d - s_i ≥ 1/K  →  -J_S·d + s_i ≤ -1/K
+        // J_S·d - s_i ≥ 1/K  →  -J_S·d + s_i ≤ -1/K
         let mut row = neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d);
         row.push((s_col, 1.0));
         rows.push(row);
@@ -197,9 +197,9 @@ pub(crate) fn append_isometric_constraints(
     }
 }
 
-/// Conformal distortion constraints (Eq. 28a-b).
+/// 等角歪み制約 (Eq. 28a-b)。
 ///
-/// Per active point i:
+/// アクティブ点 i ごとに:
 ///   ||J_A f(z_i)|| ≤ ((K-1)/(K+1)) · J_S f(z_i)·d_i   (Eq. 28a)
 ///   ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ                (Eq. 28b)
 pub(crate) fn append_conformal_constraints(
@@ -235,7 +235,7 @@ pub(crate) fn append_conformal_constraints(
         cones.push(SecondOrderConeT(3));
 
         // (b) ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ — SOC(3) (Eq. 28b)
-        // s_1 = J_S·d - δ = -δ - (-J_S·d terms · x)
+        // s_1 = J_S·d - δ = -δ - (-J_S·d項 · x)
         rows.push(neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d));
         b.push(-delta);
         rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
@@ -247,7 +247,7 @@ pub(crate) fn append_conformal_constraints(
 }
 
 // ─────────────────────────────────────────────
-// Jacobian decomposition row builders (Eq. 19)
+// ヤコビアン分解の行ビルダー (Eq. 19)
 // ─────────────────────────────────────────────
 
 /// J_S_x(z) = (1/2)(Σ c¹_i ∂f_i/∂x + Σ c²_i ∂f_i/∂y)  (Eq. 19)
@@ -298,10 +298,10 @@ fn j_a_y_row(precomputed: &PrecomputedData, pt_idx: usize, n_basis: usize) -> Ve
     row
 }
 
-/// Negated J_S·d row for constraint matrix (Eq. 25-26).
+/// 制約行列用の符号反転 J_S·d 行 (Eq. 25-26)。
 ///
 /// J_S·d = J_S_x · d_x + J_S_y · d_y
-/// Returns the negated coefficients: -(J_S·d) as A-matrix entries.
+/// 符号反転した係数: -(J_S·d) をA行列のエントリとして返す。
 fn neg_j_s_dot_d_row(
     precomputed: &PrecomputedData,
     pt_idx: usize,
@@ -322,14 +322,13 @@ fn neg_j_s_dot_d_row(
 }
 
 // ─────────────────────────────────────────────
-// Solver assembly and execution
+// ソルバーの組み立てと実行
 // ─────────────────────────────────────────────
 
-/// Assemble the SOCP from components and solve with Clarabel.
+/// 構成要素からSOCPを組み立て、Clarabelで求解する。
 ///
-/// Applies P matrix diagonal regularization (not part of paper, for
-/// numerical stability), converts to Clarabel sparse format, and
-/// extracts the coefficient matrix from the solution.
+/// P行列の対角正則化（論文由来ではなく、数値安定性のため）を適用し、
+/// Clarabelの疎形式に変換し、解から係数行列を抽出する。
 fn assemble_and_solve(
     mut p_mat: DMatrix<f64>,
     q: &[f64],
@@ -344,8 +343,8 @@ fn assemble_and_solve(
 
     check_problem_data(q, &a_csc, &b_arr, &p_mat)?;
 
-    // Diagonal regularization for numerical stability (not from the paper).
-    // Prevents near-singular KKT systems when λ_reg is very small.
+    // 数値安定性のための対角正則化（論文由来ではない）。
+    // λ_reg が非常に小さい場合のKKTシステムの特異近傍を防止する。
     for i in 0..n_vars {
         if i < 2 * n_basis {
             p_mat[(i, i)] += solver_config.p_reg_coefficient;
@@ -384,54 +383,54 @@ fn assemble_and_solve(
 }
 
 // ─────────────────────────────────────────────
-// Solver settings
+// ソルバー設定
 // ─────────────────────────────────────────────
 
-/// Build Clarabel solver settings with relaxed tolerances.
+/// 緩和された許容誤差でClarabelソルバー設定を構築する。
 ///
-/// The default Clarabel tolerances (1e-8) are too tight for SOCP problems
-/// constructed from pixel-coordinate-scale domains (e.g. 1000×1000 images).
-/// The constraint matrix mixes basis function gradients (small values, ~1/s²)
-/// with coordinate-scale position constraints, leading to poor conditioning.
+/// Clarabelのデフォルト許容誤差 (1e-8) は、ピクセル座標スケールの
+/// ドメイン（例: 1000×1000画像）から構築されたSOCP問題には厳しすぎる。
+/// 制約行列が基底関数の勾配（小さい値、~1/s²）と座標スケールの
+/// 位置制約を混在させるため、条件数が悪化する。
 ///
-/// Relaxing to 1e-6 / 1e-5 is standard practice for geometric optimization
-/// SOCPs where moderate precision suffices.
+/// 1e-6 / 1e-5 への緩和は、中程度の精度で十分な
+/// 幾何最適化SOCPの標準的手法。
 fn make_solver_settings() -> DefaultSettings<f64> {
     DefaultSettings {
         verbose: false,
-        // Relax convergence tolerances for numerical stability
+        // 数値安定性のための収束許容誤差の緩和
         tol_gap_abs: 1e-5,
         tol_gap_rel: 1e-5,
         tol_feas: 1e-5,
-        // Relax infeasibility detection so near-feasible problems
-        // aren't prematurely declared infeasible
+        // 実行可能に近い問題が早期に非実行可能と
+        // 宣言されないよう、非実行可能性検出を緩和
         tol_infeas_abs: 1e-5,
         tol_infeas_rel: 1e-5,
-        // Relax "AlmostSolved" reduced tolerances
+        // "AlmostSolved" の緩和許容誤差
         reduced_tol_gap_abs: 1e-3,
         reduced_tol_gap_rel: 1e-3,
         reduced_tol_feas: 1e-2,
-        // Allow more equilibration iterations for better scaling
+        // より良いスケーリングのため均衡化の反復回数を増加
         equilibrate_max_iter: 50,
-        // Widen the equilibration scaling range to handle
-        // the large scale differences in the constraint matrix
+        // 制約行列の大きなスケール差に対応するため
+        // 均衡化のスケーリング範囲を拡大
         equilibrate_min_scaling: 1e-6,
         equilibrate_max_scaling: 1e+6,
-        // Increase static regularization to stabilize the KKT system
+        // KKTシステムの安定化のため静的正則化を増加
         static_regularization_enable: true,
         static_regularization_constant: 1e-7,
-        // Increase iteration limit in case the relaxed tolerances
-        // need more iterations to converge
+        // 緩和された許容誤差で収束するために
+        // より多くの反復が必要な場合に備え反復上限を増加
         max_iter: 500,
         ..DefaultSettings::default()
     }
 }
 
 // ─────────────────────────────────────────────
-// Active index collection
+// アクティブインデックスの収集
 // ─────────────────────────────────────────────
 
-/// Collect unique active point indices from Z' ∪ Z''.
+/// Z' ∪ Z'' からユニークなアクティブ点インデックスを収集する。
 fn collect_active_indices(state: &AlgorithmState) -> Vec<usize> {
     let mut indices: Vec<usize> = state.active_set.clone();
     for &idx in &state.stable_set {
@@ -444,22 +443,22 @@ fn collect_active_indices(state: &AlgorithmState) -> Vec<usize> {
 }
 
 // ─────────────────────────────────────────────
-// Regularization energy (Eq. 31, 33)
+// 正則化エネルギー (Eq. 31, 33)
 // ─────────────────────────────────────────────
 
-/// Build the regularization quadratic form P and linear term q_reg.
+/// 正則化の二次形式 P と線形項 q_reg を構築する。
 ///
-/// Returns (P_matrix, q_linear) where:
-/// - P_matrix: n_vars × n_vars quadratic form (for ½x'Px)
-/// - q_linear: n_vars-length vector (for q'x, added to objective)
+/// (P_matrix, q_linear) を返す:
+/// - P_matrix: n_vars × n_vars の二次形式（½x'Px 用）
+/// - q_linear: 長さ n_vars のベクトル（q'x 用、目的関数に加算）
 ///
-/// Only the c¹, c² portion (first 2*n_basis entries) has nonzero entries.
+/// c¹, c² 部分（最初の 2*n_basis エントリ）のみ非ゼロエントリを持つ。
 ///
-/// Regularization types:
-/// - Biharmonic (Eq. 31): ∫∫ ||H_u||²_F + ||H_v||²_F dA (pure quadratic)
+/// 正則化の種類:
+/// - Biharmonic (Eq. 31): ∫∫ ||H_u||²_F + ||H_v||²_F dA（純二次）
 /// - ARAP (Eq. 33): Σ_s (||J_A f(r_s)||² + ||J_S f(r_s) - d_s||²)
-///   The ARAP energy expands to quadratic + linear + constant terms.
-///   The linear term (-2 d_s · J_S f) must be included in q.
+///   ARAPエネルギーは二次 + 線形 + 定数項に展開される。
+///   線形項 (-2 d_s · J_S f) を q に含める必要がある。
 fn build_regularization(
     _basis: &dyn BasisFunction,
     state: &AlgorithmState,
@@ -482,10 +481,10 @@ fn build_regularization(
         RegularizationType::Mixed { lambda_bh, lambda_arap } => (*lambda_bh, *lambda_arap),
     };
 
-    // Biharmonic energy (Eq. 31)
+    // Biharmonicエネルギー (Eq. 31)
     if lambda_bh > 0.0 {
         if let Some(ref bh) = precomputed.biharmonic_matrix {
-            // bh is (2n × 2n), add λ * λ_bh * bh to the c portion of P
+            // bh は (2n × 2n)、λ * λ_bh * bh を P の c 部分に加算
             let scale = lambda * lambda_bh;
             for i in 0..2 * n_basis {
                 for j in 0..2 * n_basis {
@@ -495,28 +494,28 @@ fn build_regularization(
         }
     }
 
-    // ARAP energy (Eq. 33)
+    // ARAPエネルギー (Eq. 33)
     // E_arap = Σ_s (||J_A f(r_s)||² + ||J_S f(r_s) - d_s||²)
     //
-    // Expanding ||J_S - d||²:
+    // ||J_S - d||² を展開:
     //   = ||J_S||² - 2 d·J_S + ||d||²
     //   = ||J_S||² - 2(d_x·J_S_x + d_y·J_S_y) + 1
     //
-    // So E_arap = Σ_s (||J_A||² + ||J_S||² - 2 d_s·J_S + 1)
+    // よって E_arap = Σ_s (||J_A||² + ||J_S||² - 2 d_s·J_S + 1)
     //
-    // Quadratic part → P matrix: ||J_A||² + ||J_S||²
-    // Linear part → q vector: -2 d_s·J_S
-    // Constant part (1 per sample): ignored (doesn't affect optimization)
+    // 二次部分 → P行列: ||J_A||² + ||J_S||²
+    // 線形部分 → qベクトル: -2 d_s·J_S
+    // 定数部分（サンプルあたり1）: 無視（最適化に影響しない）
     //
-    // Paper Eq. 33: sample points R'' are "a set of regularization sample points"
-    // We use all domain-interior collocation points for stable regularization.
-    // Points outside the domain contour are excluded (Section 4).
+    // 論文 Eq. 33: サンプル点 R'' は「正則化サンプル点の集合」
+    // 安定な正則化のため、全ドメイン内部コロケーション点を使用する。
+    // ドメイン輪郭外の点は除外される (Section 4)。
     if lambda_arap > 0.0 {
         let interior_indices: Vec<usize> = (0..state.collocation_points.len())
             .filter(|&i| state.domain_mask[i])
             .collect();
         let m_interior = interior_indices.len().max(1);
-        let scale = lambda * lambda_arap / m_interior as f64; // normalize by interior count
+        let scale = lambda * lambda_arap / m_interior as f64; // 内部点数で正規化
 
         for &pt_idx in &interior_indices {
             let d = state.frames[pt_idx];
@@ -547,7 +546,7 @@ fn build_regularization(
                 a_ja_y[n_basis + i] = 0.5 * gx;
             }
 
-            // Quadratic part: ||J_A||² + ||J_S||²
+            // 二次部分: ||J_A||² + ||J_S||²
             for i in 0..2 * n_basis {
                 for j in 0..2 * n_basis {
                     p[(i, j)] += scale * (
@@ -557,9 +556,9 @@ fn build_regularization(
                 }
             }
 
-            // Linear part: -2 d·J_S = -2(d_x·J_S_x + d_y·J_S_y)
+            // 線形部分: -2 d·J_S = -2(d_x·J_S_x + d_y·J_S_y)
             // J_S_x = a_js_x · c, J_S_y = a_js_y · c
-            // → q contribution: -2 * (d_x * a_js_x + d_y * a_js_y)
+            // → q への寄与: -2 * (d_x * a_js_x + d_y * a_js_y)
             for i in 0..2 * n_basis {
                 q_reg[i] += scale * (-2.0) * (d.x * a_js_x[i] + d.y * a_js_y[i]);
             }
@@ -569,15 +568,15 @@ fn build_regularization(
     (p, q_reg)
 }
 
-/// Build biharmonic energy matrix (Eq. 31) by numerical integration.
+/// 数値積分によるbiharmonicエネルギー行列の構築 (Eq. 31)。
 ///
 /// E_bh = ∫∫_Ω (||H_u||²_F + ||H_v||²_F) dA
 ///
-/// where H_u is the Hessian of u, ||H||²_F = h_xx² + 2*h_xy² + h_yy².
+/// H_u は u のヘシアン、||H||²_F = h_xx² + 2*h_xy² + h_yy²。
 ///
-/// This is a quadratic form in c:
+/// c の二次形式:
 /// E_bh = c^T M_bh c
-/// where M_bh is computed by numerically integrating over the domain.
+/// M_bh はドメイン上の数値積分で計算する。
 pub fn build_biharmonic_matrix(
     basis: &dyn BasisFunction,
     collocation_points: &[Vector2<f64>],
@@ -588,8 +587,8 @@ pub fn build_biharmonic_matrix(
     let dim = 2 * n_basis;
     let mut mat = DMatrix::zeros(dim, dim);
 
-    // Use collocation points as quadrature points with equal weights.
-    // Weight = domain area / number of points (simple quadrature)
+    // コロケーション点を等重み求積点として使用する。
+    // 重み = ドメイン面積 / 点数（単純求積）
     let area =
         (domain_bounds.x_max - domain_bounds.x_min) * (domain_bounds.y_max - domain_bounds.y_min);
     let weight = area / m as f64;
@@ -597,16 +596,16 @@ pub fn build_biharmonic_matrix(
     for pt in collocation_points {
         let (hxx, hxy, hyy) = basis.hessian(*pt);
 
-        // For u component (c¹): ||H_u||²_F = (Σ c¹_i h_xx_i)² + 2(Σ c¹_i h_xy_i)² + (Σ c¹_i h_yy_i)²
-        // This is a quadratic form: c¹^T (h_xx h_xx^T + 2 h_xy h_xy^T + h_yy h_yy^T) c¹
-        // Same for v component (c²) in the lower-right block.
+        // u成分 (c¹): ||H_u||²_F = (Σ c¹_i h_xx_i)² + 2(Σ c¹_i h_xy_i)² + (Σ c¹_i h_yy_i)²
+        // 二次形式: c¹^T (h_xx h_xx^T + 2 h_xy h_xy^T + h_yy h_yy^T) c¹
+        // v成分 (c²) も右下ブロックで同様。
 
         for i in 0..n_basis {
             for j in 0..n_basis {
                 let q = weight * (hxx[i] * hxx[j] + 2.0 * hxy[i] * hxy[j] + hyy[i] * hyy[j]);
-                // u-block (top-left)
+                // uブロック（左上）
                 mat[(i, j)] += q;
-                // v-block (bottom-right)
+                // vブロック（右下）
                 mat[(n_basis + i, n_basis + j)] += q;
             }
         }
@@ -616,10 +615,10 @@ pub fn build_biharmonic_matrix(
 }
 
 // ─────────────────────────────────────────────
-// Utility: sparse matrix construction for clarabel
+// ユーティリティ: clarabel用の疎行列構築
 // ─────────────────────────────────────────────
 
-/// Convert sparse row representation to CscMatrix for clarabel.
+/// 疎行表現をclarabel用のCscMatrixに変換する。
 fn sparse_rows_to_csc(
     rows: &[Vec<(usize, f64)>],
     b: &[f64],
@@ -627,7 +626,7 @@ fn sparse_rows_to_csc(
 ) -> (CscMatrix<f64>, Vec<f64>) {
     let n_rows = rows.len();
 
-    // Count entries per column
+    // 列ごとのエントリ数をカウント
     let mut col_counts = vec![0usize; n_cols];
     for row in rows {
         for &(col, _) in row {
@@ -635,17 +634,17 @@ fn sparse_rows_to_csc(
         }
     }
 
-    // Build colptr
+    // colptr を構築
     let mut colptr = vec![0usize; n_cols + 1];
     for j in 0..n_cols {
         colptr[j + 1] = colptr[j] + col_counts[j];
     }
     let nnz = colptr[n_cols];
 
-    // Fill rowval and nzval
+    // rowval と nzval を充填
     let mut rowval = vec![0usize; nnz];
     let mut nzval = vec![0.0f64; nnz];
-    let mut col_pos = vec![0usize; n_cols]; // current insert position per column
+    let mut col_pos = vec![0usize; n_cols]; // 列ごとの現在の挿入位置
 
     for (row_idx, row) in rows.iter().enumerate() {
         for &(col, val) in row {
@@ -656,7 +655,7 @@ fn sparse_rows_to_csc(
         }
     }
 
-    // Sort entries within each column by row index (required by CscMatrix)
+    // 各列内のエントリを行インデックスでソート（CscMatrixの要件）
     for j in 0..n_cols {
         let start = colptr[j];
         let end = colptr[j + 1];
@@ -676,8 +675,8 @@ fn sparse_rows_to_csc(
     (a, b.to_vec())
 }
 
-/// Convert a dense symmetric matrix to upper-triangular CscMatrix.
-/// Clarabel requires P to be upper triangular.
+/// 密な対称行列を上三角CscMatrixに変換する。
+/// Clarabel は P が上三角であることを要求する。
 fn dense_to_csc_upper_tri(mat: &DMatrix<f64>) -> CscMatrix<f64> {
     let n = mat.nrows();
     assert_eq!(n, mat.ncols());
@@ -700,7 +699,7 @@ fn dense_to_csc_upper_tri(mat: &DMatrix<f64>) -> CscMatrix<f64> {
     CscMatrix::new(n, n, colptr, rowval, nzval)
 }
 
-/// Check problem data for NaN/Inf values that would corrupt the solver.
+/// ソルバーを破壊するNaN/Inf値がないか問題データを検査する。
 fn check_problem_data(
     q: &[f64],
     a_csc: &CscMatrix<f64>,

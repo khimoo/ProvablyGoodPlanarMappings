@@ -1,19 +1,19 @@
-//! Core algorithm state: wraps pgpm-core's MappingBridge for Bevy resource use.
+//! コアアルゴリズム状態: Bevy リソースとして使用するために pgpm-core の MappingBridge をラップ。
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
 use pgpm_core::mapping::MappingBridge;
 
-/// Core algorithm state, used by the solver and rendering systems.
+/// コアアルゴリズム状態、ソルバーとレンダリングシステムで使用。
 #[derive(Resource)]
 pub struct AlgorithmState {
-    /// The pgpm-core mapping instance. Created on finalization.
+    /// pgpm-core の写像インスタンス。ファイナライズ時に作成。
     pub algorithm: Option<Box<dyn MappingBridge>>,
-    /// Source handle positions in domain (pixel) coordinates.
+    /// ドメイン（ピクセル）座標でのソースハンドル位置。
     pub source_handles: Vec<Vector2<f64>>,
-    /// Current target handle positions in domain (pixel) coordinates.
+    /// ドメイン（ピクセル）座標での現在のターゲットハンドル位置。
     pub target_handles: Vec<Vector2<f64>>,
-    /// Whether the algorithm needs to run a step (targets changed).
+    /// アルゴリズムがステップを実行する必要があるか（ターゲットが変更された）。
     pub needs_solve: bool,
 }
 
@@ -29,7 +29,7 @@ impl Default for AlgorithmState {
 }
 
 impl AlgorithmState {
-    /// Reset all state to default (used on image reload and reset button).
+    /// 全状態をデフォルトにリセット（画像再読み込みとリセットボタンで使用）。
     pub fn reset(&mut self) {
         self.source_handles.clear();
         self.target_handles.clear();
@@ -37,22 +37,22 @@ impl AlgorithmState {
         self.needs_solve = false;
     }
 
-    /// Set the mapping instance, initializing targets to source positions.
+    /// 写像インスタンスを設定し、ターゲットをソース位置に初期化。
     pub fn set_mapping(&mut self, algorithm: Box<dyn MappingBridge>) {
         self.target_handles = self.source_handles.clone();
         self.algorithm = Some(algorithm);
     }
 }
 
-/// Stores the original (undeformed) vertex positions.
+/// 元の（変形前の）頂点位置を格納。
 ///
-/// Created once when the mesh is spawned. Used by:
-/// - CPU deformation path: `pixel_positions` as input to `evaluate_mapping_at()`
-/// - Reset: `world_positions` to restore the mesh to its undeformed state
+/// メッシュ生成時に一度だけ作成。以下で使用:
+/// - CPU 変形パス: `pixel_positions` を `evaluate_mapping_at()` への入力として
+/// - リセット: `world_positions` でメッシュを変形前の状態に復元
 #[derive(Resource)]
 pub struct OriginalVertexPositions {
-    /// Vertex positions in domain (pixel) coordinates.
+    /// ドメイン（ピクセル）座標での頂点位置。
     pub pixel_positions: Vec<Vector2<f64>>,
-    /// Vertex positions in world coordinates (original undeformed).
+    /// ワールド座標での頂点位置（元の変形前）。
     pub world_positions: Vec<[f32; 3]>,
 }

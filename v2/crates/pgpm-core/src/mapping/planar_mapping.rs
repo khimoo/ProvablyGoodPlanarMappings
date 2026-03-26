@@ -1,15 +1,13 @@
-//! Planar mapping trait.
+//! 平面写像トレイト。
 //!
-//! [`PlanarMapping`] is the abstract definition of the full algorithm
-//! (Algorithm 1, Section 5). It includes both the mathematical evaluation
-//! (Eq. 3, Section 3) and the optimization procedure (SOCP, active set,
-//! Strategy 2).
+//! [`PlanarMapping`] はアルゴリズム全体（Algorithm 1, Section 5）の抽象定義。
+//! 数学的評価（Eq. 3, Section 3）と最適化手続き（SOCP、アクティブ集合、
+//! Strategy 2）の両方を含む。
 //!
-//! **Design**: The trait uses a `parts()`/`parts_mut()` pattern to split
-//! borrows between immutable context ([`MappingContext`]) and mutable state
-//! ([`AlgorithmState`]).  This allows *all* Algorithm 1 logic to live in
-//! default methods while concrete types only provide the borrow-splitting
-//! accessors and `set_params`.
+//! **設計**: `parts()`/`parts_mut()` パターンで不変コンテキスト
+//! ([`MappingContext`]) と可変状態 ([`AlgorithmState`]) の借用を分離。
+//! これにより Algorithm 1 のロジック全体をデフォルトメソッドに配置し、
+//! 具象型は借用分離アクセサと `set_params` のみを提供すれば良い。
 
 use crate::algorithm::active_set;
 use crate::algorithm::strategy;
@@ -23,107 +21,107 @@ use crate::numerics::solver;
 use log::warn;
 use nalgebra::{DMatrix, Vector2};
 
-/// Abstract definition of a provably good planar mapping (Algorithm 1, Section 5).
+/// 証明付き良好な平面写像の抽象定義（Algorithm 1, Section 5）。
 ///
-/// This trait captures the full algorithm: initialization, SOCP optimization,
-/// active set management, frame updates, and Strategy 2 refinement.
+/// このトレイトはアルゴリズム全体を捉える：初期化、SOCP最適化、
+/// アクティブ集合管理、フレーム更新、Strategy 2 精緻化。
 ///
-/// **Required methods** (3 only):
+/// **必須メソッド**（3つのみ）:
 /// - [`parts`](PlanarMapping::parts) / [`parts_mut`](PlanarMapping::parts_mut) —
-///   borrow-splitting accessors that return `(MappingContext, &AlgorithmState)`
-///   or `(MappingContext, &mut AlgorithmState)`.
-/// - [`set_params`](PlanarMapping::set_params) — update algorithm parameters.
+///   `(MappingContext, &AlgorithmState)` または `(MappingContext, &mut AlgorithmState)`
+///   を返す借用分離アクセサ。
+/// - [`set_params`](PlanarMapping::set_params) — アルゴリズムパラメータの更新。
 ///
-/// **Default methods**: the complete Algorithm 1 skeleton and
-/// mathematical evaluation (Eq. 3).
+/// **デフォルトメソッド**: Algorithm 1 の完全なスケルトンと
+/// 数学的評価（Eq. 3）。
 pub trait PlanarMapping: Send + Sync {
     // ─────────────────────────────────────────
-    // Required: borrow-splitting accessors
+    // 必須: 借用分離アクセサ
     // ─────────────────────────────────────────
 
-    /// Split self into immutable context and immutable state.
+    /// self を不変コンテキストと不変状態に分離。
     fn parts(&self) -> (MappingContext<'_>, &AlgorithmState);
 
-    /// Split self into immutable context and mutable state.
+    /// self を不変コンテキストと可変状態に分離。
     fn parts_mut(&mut self) -> (MappingContext<'_>, &mut AlgorithmState);
 
-    /// Store new algorithm parameters (K, lambda, regularization).
-    /// This mutates the params field which lives outside AlgorithmState.
+    /// 新しいアルゴリズムパラメータ（K, lambda, 正則化）を格納。
+    /// AlgorithmState の外部にある params フィールドを変更する。
     fn set_params(&mut self, params: MappingParams);
 
     // ─────────────────────────────────────────
-    // Default methods: Algorithm 1 skeleton
+    // デフォルトメソッド: Algorithm 1 スケルトン
     // ─────────────────────────────────────────
 
-    /// Get current coefficient matrix c (Eq. 3).
+    /// 現在の係数行列 c を取得（Eq. 3）。
     fn coefficients(&self) -> &CoefficientMatrix {
         let (_, state) = self.parts();
         &state.coefficients
     }
 
-    /// Get basis function reference (Table 1).
+    /// 基底関数の参照を取得（Table 1）。
     fn basis(&self) -> &dyn BasisFunction {
         let (ctx, _) = self.parts();
         ctx.basis
     }
 
-    /// Get current algorithm parameters.
+    /// 現在のアルゴリズムパラメータを取得。
     fn params(&self) -> MappingParams {
         let (ctx, _) = self.parts();
         ctx.params.clone()
     }
 
-    /// Get algorithm state (immutable) for external inspection.
+    /// 外部検査用にアルゴリズム状態（不変）を取得。
     fn state(&self) -> &AlgorithmState {
         let (_, state) = self.parts();
         state
     }
 
-    /// Maximum grid resolution for Strategy 2 refinement.
+    /// Strategy 2 精緻化の最大グリッド解像度。
     fn max_refinement_resolution(&self) -> usize {
         let (ctx, _) = self.parts();
         ctx.solver_config.max_refinement_resolution
     }
 
-    /// Grid resolution (width, height) for collocation grid (Section 4).
+    /// コロケーショングリッドの解像度（幅、高さ）（Section 4）。
     fn grid_resolution(&self) -> (usize, usize) {
         let (_, state) = self.parts();
         (state.grid_width, state.grid_height)
     }
 
-    /// Number of collocation points |Z| (Section 4).
+    /// コロケーション点の数 |Z|（Section 4）。
     fn num_collocation_points(&self) -> usize {
         let (_, state) = self.parts();
         state.collocation_points.len()
     }
 
-    /// Number of basis functions n (Table 1).
+    /// 基底関数の数 n（Table 1）。
     fn num_basis_functions(&self) -> usize {
         let (ctx, _) = self.parts();
         ctx.basis.count()
     }
 
-    /// Source handle positions {p_l} (Eq. 29).
+    /// ソースハンドル位置 {p_l}（Eq. 29）。
     fn source_handles(&self) -> Vec<Vector2<f64>> {
         let (ctx, _) = self.parts();
         ctx.source_handles.to_vec()
     }
 
-    /// Bounding box of domain Omega (Eq. 5).
+    /// ドメイン Ω のバウンディングボックス（Eq. 5）。
     fn domain_bounds_query(&self) -> DomainBounds {
         let (ctx, _) = self.parts();
         ctx.domain_bounds.clone()
     }
 
-    /// Precompute basis function values and gradients at all collocation points.
-    /// Algorithm 1: "if first step then" block.
+    /// 全コロケーション点で基底関数の値と勾配を事前計算。
+    /// Algorithm 1: "if first step then" ブロック。
     ///
-    /// No-op if `state.precomputed` is already `Some`.
+    /// `state.precomputed` が既に `Some` の場合は何もしない。
     ///
-    /// Procedural decomposition:
-    /// 1. [`Self::compute_basis_matrices`] — evaluate φ_i(z), ∇φ_i(z)
-    /// 2. Store as [`PrecomputedData`]
-    /// 3. Build Eq. 31 biharmonic matrix if needed
+    /// 手続き分解:
+    /// 1. [`Self::compute_basis_matrices`] — φ_i(z), ∇φ_i(z) を評価
+    /// 2. [`PrecomputedData`] として格納
+    /// 3. 必要なら Eq. 31 biharmonic 行列を構築
     fn ensure_precomputed(&mut self) {
         {
             let (_, state) = self.parts();
@@ -142,7 +140,7 @@ pub trait PlanarMapping: Send + Sync {
             biharmonic_matrix: None,
         });
 
-        // Build biharmonic matrix if needed by current regularization type
+        // 現在の正則化タイプが必要な場合、biharmonic行列を構築
         let needs_bh = matches!(
             ctx.params.regularization,
             RegularizationType::Biharmonic | RegularizationType::Mixed { .. }
@@ -152,13 +150,13 @@ pub trait PlanarMapping: Send + Sync {
         }
     }
 
-    /// Evaluate basis function values and gradients at all collocation points.
+    /// 全コロケーション点で基底関数の値と勾配を評価。
     ///
-    /// Returns (phi, grad_phi_x, grad_phi_y) matrices,
-    /// each of shape (num_collocation, num_basis).
+    /// (phi, grad_phi_x, grad_phi_y) 行列を返す。
+    /// 各行列の形状は (num_collocation, num_basis)。
     ///
-    /// NaN/Inf values (from shape-aware bases near domain boundaries) are
-    /// replaced with 0.0 and a warning is logged.
+    /// NaN/Inf 値（ドメイン境界付近の形状認識基底から発生）は
+    /// 0.0 に置換され、警告がログに記録される。
     fn compute_basis_matrices(&self) -> (DMatrix<f64>, DMatrix<f64>, DMatrix<f64>) {
         let (ctx, state) = self.parts();
         let m = state.collocation_points.len();
@@ -174,9 +172,8 @@ pub trait PlanarMapping: Send + Sync {
             let (gx, gy) = ctx.basis.gradient(*pt);
 
             for i in 0..n {
-                // Guard against NaN/Inf from basis functions (can happen
-                // with shape-aware bases near domain boundaries where
-                // geodesic distances are infinite).
+                // 基底関数からの NaN/Inf を防護（形状認識基底で
+                // ドメイン境界付近の測地距離が無限大になる場合に発生しうる）。
                 if !val[i].is_finite() || !gx[i].is_finite() || !gy[i].is_finite() {
                     nan_inf_count += 1;
                 }
@@ -196,20 +193,20 @@ pub trait PlanarMapping: Send + Sync {
         (phi, grad_phi_x, grad_phi_y)
     }
 
-    /// Algorithm 1: execute one step (Section 5).
+    /// Algorithm 1: 1ステップを実行（Section 5）。
     ///
-    /// Pseudocode correspondence:
-    /// 1. [first step only] Precompute phi(z), grad_phi(z)
-    /// 2. Evaluate D(z) for all z in Z
-    /// 3. Find Z_max (local maxima of D)
-    /// 4. Add z in Z_max with D(z) > K_high to Z'
-    /// 5. Remove z in Z' with D(z) < K_low from Z'
-    /// 6. Solve SOCP (Eq. 18) -> update c
-    /// 7. Update d_i (Eq. 27)
+    /// 擬似コードとの対応:
+    /// 1. [初回ステップのみ] phi(z), grad_phi(z) を事前計算
+    /// 2. 全 z ∈ Z で D(z) を評価
+    /// 3. Z_max（D の局所最大）を見つける
+    /// 4. D(z) > K_high となる z ∈ Z_max を Z' に追加
+    /// 5. D(z) < K_low となる z ∈ Z' を Z' から削除
+    /// 6. SOCP を求解（Eq. 18）→ c を更新
+    /// 7. d_i を更新（Eq. 27）
     fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
         self.ensure_precomputed();
 
-        // 2. Evaluate distortions (Eq. 19-20)
+        // 2. 歪みを評価（Eq. 19-20）
         let distortions = {
             let (ctx, state) = self.parts();
             let precomputed = state.precomputed.as_ref().ok_or_else(|| {
@@ -222,7 +219,7 @@ pub trait PlanarMapping: Send + Sync {
             )
         };
 
-        // 3-5. Update active set
+        // 3-5. アクティブ集合を更新
         let prev_active_set = {
             let (_, state) = self.parts();
             state.active_set.clone()
@@ -237,7 +234,7 @@ pub trait PlanarMapping: Send + Sync {
             .cloned()
             .fold(f64::NEG_INFINITY, f64::max);
 
-        // Check convergence
+        // 収束を確認
         let (n_active, converged) = {
             let (ctx, state) = self.parts_mut();
             let n_active = state.active_set.len();
@@ -252,7 +249,7 @@ pub trait PlanarMapping: Send + Sync {
             (n_active, converged)
         };
 
-        // 6. Solve SOCP (Eq. 18)
+        // 6. SOCP を求解（Eq. 18）
         let new_coefficients = {
             let (ctx, state) = self.parts();
             state.precomputed.as_ref().ok_or_else(|| {
@@ -269,13 +266,13 @@ pub trait PlanarMapping: Send + Sync {
             )?
         };
 
-        // 7. Update coefficients and frames (Eq. 27)
+        // 7. 係数とフレームを更新（Eq. 27）
         {
             let (_, state) = self.parts_mut();
             state.coefficients = new_coefficients;
         }
 
-        // Evaluate J_S at all points for frame update (Eq. 27)
+        // フレーム更新のため全点で J_S を評価（Eq. 27）
         let j_s_values = {
             let (_, state) = self.parts();
             let pre = state.precomputed.as_ref().ok_or_else(|| {
@@ -311,7 +308,7 @@ pub trait PlanarMapping: Send + Sync {
         })
     }
 
-    /// Update algorithm parameters at runtime (K, lambda, regularization).
+    /// 実行時にアルゴリズムパラメータを更新（K, lambda, 正則化）。
     fn update_params(&mut self, params: MappingParams) {
         let k = params.k_bound;
         {
@@ -341,7 +338,7 @@ pub trait PlanarMapping: Send + Sync {
         self.set_params(params);
     }
 
-    /// Strategy 2 post-hoc refinement (Section 5 "Strategies").
+    /// Strategy 2 事後精緻化（Section 5 "Strategies"）。
     fn refine_strategy2(
         &mut self,
         k_max: f64,
@@ -383,7 +380,7 @@ pub trait PlanarMapping: Send + Sync {
             new_resolution
         };
 
-        // Rebuild grid if needed
+        // 必要ならグリッドを再構築
         let needs_rebuild = {
             let (_, state) = self.parts();
             new_resolution > state.grid_width
@@ -426,10 +423,10 @@ pub trait PlanarMapping: Send + Sync {
         })
     }
 
-    /// Evaluate the forward mapping f(x) = Σ c_i φ_i(x) at multiple points (Eq. 3).
+    /// 複数点で順方向写像 f(x) = Σ c_i φ_i(x) を評価（Eq. 3）。
     ///
-    /// Takes a slice of domain-space points, returns the mapped positions.
-    /// Used by the CPU rendering path for any basis function type.
+    /// ドメイン空間の点のスライスを受け取り、写像後の位置を返す。
+    /// 任意の基底関数タイプに対する CPU レンダリングパスで使用。
     fn evaluate_mapping_at(&self, points: &[Vector2<f64>]) -> Vec<Vector2<f64>> {
         let (ctx, state) = self.parts();
         let c = &state.coefficients;
@@ -449,7 +446,7 @@ pub trait PlanarMapping: Send + Sync {
             .collect()
     }
 
-    /// Compute the Jacobian gradients (∇u, ∇v) at point x (Eq. 3 differentiated).
+    /// 点 x でヤコビアン勾配（∇u, ∇v）を計算（Eq. 3 を微分）。
     fn grad_uv_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
         let (ctx, state) = self.parts();
         let (gx, gy) = ctx.basis.gradient(x);
@@ -467,20 +464,20 @@ pub trait PlanarMapping: Send + Sync {
         (grad_u, grad_v)
     }
 
-    /// Compute J_S f(x) and J_A f(x) at point x (Eq. 19-20).
+    /// 点 x で J_S f(x) と J_A f(x) を計算（Eq. 19-20）。
     fn j_s_j_a_at(&self, x: Vector2<f64>) -> (Vector2<f64>, Vector2<f64>) {
         let (grad_u, grad_v) = self.grad_uv_at(x);
         distortion::compute_j_s_j_a(grad_u, grad_v)
     }
 
-    /// Compute singular values (Σ, σ) at point x (Eq. 20).
+    /// 点 x で特異値（Σ, σ）を計算（Eq. 20）。
     fn singular_values_at(&self, x: Vector2<f64>) -> (f64, f64) {
         let (j_s, j_a) = self.j_s_j_a_at(x);
         distortion::singular_values(j_s, j_a)
     }
 
-    /// Rebuild the collocation grid at a new resolution (for Strategy 2).
-    /// Preserves current coefficients. Resets active set, frames, precomputed data.
+    /// コロケーショングリッドを新しい解像度で再構築（Strategy 2 用）。
+    /// 現在の係数を保持。アクティブ集合、フレーム、事前計算データをリセット。
     fn rebuild_grid(&mut self, new_resolution: usize) {
         let (ctx, state) = self.parts_mut();
 
@@ -514,11 +511,11 @@ pub trait PlanarMapping: Send + Sync {
 }
 
 // ─────────────────────────────────────────────
-// Private helpers (used by default methods)
+// プライベートヘルパー（デフォルトメソッドで使用）
 // ─────────────────────────────────────────────
 
-/// Build biharmonic matrix (Eq. 31) into precomputed data.
-/// Free function to avoid &mut self borrow conflicts in trait default methods.
+/// 事前計算データに biharmonic 行列（Eq. 31）を構築。
+/// トレイトデフォルトメソッドでの &mut self 借用の衝突を避けるための自由関数。
 fn ensure_biharmonic_matrix_inner(
     basis: &dyn BasisFunction,
     domain_bounds: &crate::model::types::DomainBounds,
@@ -537,10 +534,9 @@ fn ensure_biharmonic_matrix_inner(
     }
 }
 
-/// Generate a uniform collocation grid within the domain bounds.
+/// ドメイン境界内に一様コロケーショングリッドを生成。
 ///
-/// Section 4: "consider all the points from a surrounding uniform grid
-/// that fall inside the domain"
+/// Section 4: 「ドメイン内に収まる周囲一様グリッドの全点を考慮する」
 pub(crate) fn generate_collocation_grid(
     bounds: &crate::model::types::DomainBounds,
     resolution: usize,
@@ -564,10 +560,9 @@ pub(crate) fn generate_collocation_grid(
     (points, res_x, res_y)
 }
 
-/// Build domain mask from collocation points and an optional domain.
+/// コロケーション点とオプションのドメインからドメインマスクを構築。
 ///
-/// Paper Section 4: "consider all the points from a surrounding uniform
-/// grid that fall inside the domain"
+/// 論文 Section 4: 「ドメイン内に収まる周囲一様グリッドの全点を考慮する」
 pub(crate) fn build_domain_mask(
     points: &[Vector2<f64>],
     domain: Option<&dyn crate::model::domain::Domain>,

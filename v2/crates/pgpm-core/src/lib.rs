@@ -1,10 +1,10 @@
 //! # pgpm-core
 //!
-//! Pure Rust implementation of "Provably Good Planar Mappings"
-//! (Poranne & Lipman, 2014).
+//! "Provably Good Planar Mappings" (Poranne & Lipman, 2014) の
+//! 純粋なRust実装。
 //!
-//! This crate contains **only** the algorithm described in the paper.
-//! No Bevy, no UI, no image processing dependencies.
+//! このクレートは論文に記述されたアルゴリズム**のみ**を含む。
+//! Bevy、UI、画像処理への依存は一切ない。
 
 pub mod model;
 pub mod basis;
@@ -14,14 +14,14 @@ pub mod mapping;
 #[doc(hidden)]
 pub mod policy;
 
-// Algorithm module is #[doc(hidden)] pub so that integration tests
-// (external crate scope) can access Algorithm<D> directly for testing,
-// while the primary public API is the MappingBridge trait + factories.
+// algorithmモジュールは #[doc(hidden)] pub にしている。
+// 結合テスト（外部クレートスコープ）から Algorithm<D> に直接アクセスできるようにするため。
+// 主要な公開APIは MappingBridge トレイト + ファクトリ関数。
 #[doc(hidden)]
 pub mod algorithm;
 
 // ─────────────────────────────────────────────
-// Factory functions: primary public API
+// ファクトリ関数: 主要な公開API
 // ─────────────────────────────────────────────
 
 use crate::algorithm::Algorithm;
@@ -32,11 +32,11 @@ use crate::model::types::{DomainBounds, MappingParams, SolverConfig};
 use crate::policy::{ConformalPolicy, IsometricPolicy};
 use nalgebra::Vector2;
 
-/// Create an isometric planar mapping (D_iso = max{Sigma, 1/sigma}).
+/// 等長写像を生成する (D_iso = max{Sigma, 1/sigma})。
 ///
-/// This is the main entry point for consumers of pgpm-core.
-/// Returns a `Box<dyn MappingBridge>` that hides the concrete
-/// `Algorithm<IsometricPolicy>` type.
+/// pgpm-core利用者のための主要なエントリーポイント。
+/// 具体的な `Algorithm<IsometricPolicy>` 型を隠蔽した
+/// `Box<dyn MappingBridge>` を返す。
 pub fn create_isometric_mapping(
     basis: Box<dyn BasisFunction>,
     params: MappingParams,
@@ -60,9 +60,9 @@ pub fn create_isometric_mapping(
     ))
 }
 
-/// Create a conformal planar mapping (D_conf = Sigma / sigma).
+/// 等角写像を生成する (D_conf = Sigma / sigma)。
 ///
-/// `delta` must satisfy delta > omega(h) (Eq. 13).
+/// `delta` は delta > omega(h) を満たす必要がある (Eq. 13)。
 pub fn create_conformal_mapping(
     basis: Box<dyn BasisFunction>,
     params: MappingParams,

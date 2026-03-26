@@ -1,10 +1,10 @@
-//! RBF scale parameter computation.
+//! RBF スケールパラメータの計算。
 
 use nalgebra::Vector2;
 
-/// Compute a reasonable RBF scale parameter s.
-/// Uses ~0.8 of the average nearest-neighbor distance if available,
-/// otherwise falls back to a fraction of the domain size.
+/// 適切な RBF スケールパラメータ s を計算。
+/// 可能であれば平均最近傍距離の ~0.8 倍を使用し、
+/// そうでなければドメインサイズの一部にフォールバック。
 pub fn compute_rbf_scale(centers: &[Vector2<f64>], width: f64, height: f64) -> f64 {
     if centers.len() < 2 {
         return (width.max(height)) / 4.0;

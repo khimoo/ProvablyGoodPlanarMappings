@@ -1,41 +1,41 @@
-//! Strategy 2: required fill distance computation and re-optimization.
+//! Strategy 2: 必要な充填距離の計算と再最適化。
 //!
-//! Paper reference: Section 4 (Eq. 14-15), Strategy 2.
+//! 論文参照: Section 4 (Eq. 14-15), Strategy 2。
 //!
-//! Strategy 2 computes the fill distance h required to guarantee that
-//! the distortion bound K_max holds everywhere in the domain, then
-//! re-optimizes on a denser grid to enforce this guarantee.
+//! Strategy 2 は歪み上界 K_max がドメイン全体で成立することを保証するために
+//! 必要な充填距離 h を計算し、より密なグリッド上で再最適化して
+//! この保証を強制する。
 //!
-//! Key equations:
+//! 主要な式:
 //! - Eq. 8: ω(h) = 2 |||c||| · ω_{∇F}(h)
-//! - Eq. 9: continuity modulus composition
-//! - Eq. 11: K_max(K, ω(h)) for isometric distortion
-//! - Eq. 14: h ≤ ω⁻¹(min{K_max - K, 1/K - 1/K_max}) (Strategy 2, isometric)
+//! - Eq. 9: 連続の度合いの合成
+//! - Eq. 11: 等長歪みの K_max(K, ω(h))
+//! - Eq. 14: h ≤ ω⁻¹(min{K_max - K, 1/K - 1/K_max})（Strategy 2、等長）
 
 use crate::basis::BasisFunction;
 use crate::model::types::{CoefficientMatrix, DomainBounds};
 
-/// Result of a Strategy 2 re-optimization.
+/// Strategy 2 再最適化の結果。
 pub struct Strategy2Result {
-    /// Required fill distance h (Eq. 14)
+    /// 必要な充填距離 h（Eq. 14）
     pub required_h: f64,
-    /// Required grid resolution to achieve h
+    /// h を達成するのに必要なグリッド解像度
     pub required_resolution: usize,
-    /// Current fill distance (before refinement)
+    /// 現在の充填距離（細分化前）
     pub current_h: f64,
-    /// Achieved K_max upper bound (Eq. 11)
+    /// 達成された K_max 上界（Eq. 11）
     pub k_max_achieved: f64,
-    /// |||c||| (Eq. 8)
+    /// |||c|||（Eq. 8）
     pub c_norm: f64,
-    /// Number of Algorithm 1 steps executed during re-optimization
+    /// 再最適化中に実行された Algorithm 1 ステップ数
     pub refinement_steps: usize,
 }
 
-/// Compute |||c||| = max{Σ|c¹ᵢ|, Σ|c²ᵢ|} (Eq. 8).
+/// |||c||| = max{Σ|c¹ᵢ|, Σ|c²ᵢ|} を計算（Eq. 8）。
 ///
-/// The coefficient matrix c has shape (2, n):
-/// - Row 0: c¹ coefficients (u component)
-/// - Row 1: c² coefficients (v component)
+/// 係数行列 c の形状は (2, n):
+/// - 行 0: c¹ 係数（u 成分）
+/// - 行 1: c² 係数（v 成分）
 pub fn compute_c_norm(coefficients: &CoefficientMatrix) -> f64 {
     let n = coefficients.ncols();
     let mut sum_row0 = 0.0;
@@ -47,12 +47,12 @@ pub fn compute_c_norm(coefficients: &CoefficientMatrix) -> f64 {
     sum_row0.max(sum_row1)
 }
 
-/// Compute the fill distance h of a uniform grid over the domain (Eq. 5).
+/// ドメイン上の一様グリッドの充填距離 h を計算（Eq. 5）。
 ///
-/// For a uniform square grid with `resolution` points per side on a
-/// rectangular domain, the fill distance is the half-diagonal of a grid cell:
+/// 矩形ドメイン上で1辺あたり `resolution` 点の一様正方グリッドの場合、
+/// 充填距離はグリッドセルの半対角線長:
 ///   h = √(dx² + dy²) / 2
-/// where dx = (x_max - x_min) / (resolution - 1).
+/// ここで dx = (x_max - x_min) / (resolution - 1)。
 pub fn fill_distance(bounds: &DomainBounds, resolution: usize) -> f64 {
     assert!(resolution >= 2, "Resolution must be at least 2");
     let dx = (bounds.x_max - bounds.x_min) / (resolution as f64 - 1.0);
@@ -60,14 +60,14 @@ pub fn fill_distance(bounds: &DomainBounds, resolution: usize) -> f64 {
     (dx * dx + dy * dy).sqrt() / 2.0
 }
 
-/// Strategy 2 (Eq. 14): compute the required fill distance h for isometric distortion.
+/// Strategy 2（Eq. 14）: 等長歪みに必要な充填距離 h を計算。
 ///
 /// h ≤ ω⁻¹(min{K_max - K, 1/K - 1/K_max})
 ///
-/// where ω(h) = 2 |||c||| · ω_{∇F}(h)  (Eq. 9)
-/// and ω⁻¹(v) = ω_{∇F}⁻¹(v / (2 |||c|||))
+/// ここで ω(h) = 2 |||c||| · ω_{∇F}(h)（Eq. 9）
+/// かつ ω⁻¹(v) = ω_{∇F}⁻¹(v / (2 |||c|||))
 ///
-/// Returns `None` if K_max ≤ K (precondition violated) or if c_norm ≈ 0.
+/// K_max ≤ K（前提条件違反）または c_norm ≈ 0 の場合は `None` を返す。
 pub fn required_h_isometric(
     k: f64,
     k_max: f64,
@@ -78,7 +78,7 @@ pub fn required_h_isometric(
         return None;
     }
     if c_norm < 1e-15 {
-        // Zero coefficients → identity-like mapping, any h works
+        // 零係数 → 恒等写像的、任意の h で可
         return Some(f64::INFINITY);
     }
 
@@ -86,7 +86,7 @@ pub fn required_h_isometric(
     let margin1 = k_max - k;
     let margin2 = 1.0 / k - 1.0 / k_max;
     if margin2 <= 0.0 {
-        // 1/K ≤ 1/K_max means K ≥ K_max, shouldn't happen given k_max > k
+        // 1/K ≤ 1/K_max は K ≥ K_max を意味、k_max > k なので発生しないはず
         return None;
     }
     let v = margin1.min(margin2);
@@ -98,15 +98,15 @@ pub fn required_h_isometric(
     Some(h)
 }
 
-/// Compute the grid resolution needed to achieve fill distance ≤ h.
+/// 充填距離 ≤ h を達成するために必要なグリッド解像度を計算。
 ///
-/// For a uniform square grid: h = √(dx² + dy²) / 2
-/// With square cells (dx = dy = d): h = d/√2
-/// So d = h·√2, and resolution = max(W, H) / d + 1
+/// 一様正方グリッドの場合: h = √(dx² + dy²) / 2
+/// 正方セル（dx = dy = d）では: h = d/√2
+/// よって d = h·√2、resolution = max(W, H) / d + 1
 ///
-/// For a rectangular domain with different W and H:
-///   N ≥ max(W/dx, H/dy) + 1, where we need √(dx² + dy²)/2 ≤ h
-///   Using a square grid (same N for both axes):
+/// 異なる W と H を持つ矩形ドメインの場合:
+///   N ≥ max(W/dx, H/dy) + 1、ここで √(dx² + dy²)/2 ≤ h が必要
+///   正方グリッド（両軸で同じ N）を使用:
 ///   dx = W/(N-1), dy = H/(N-1)
 ///   h_actual = √((W/(N-1))² + (H/(N-1))²) / 2 = √(W² + H²) / (2(N-1))
 ///   N ≥ √(W² + H²) / (2h) + 1
@@ -116,18 +116,18 @@ pub fn resolution_for_h(bounds: &DomainBounds, h: f64) -> usize {
     let h_domain = bounds.y_max - bounds.y_min;
     let diag = (w * w + h_domain * h_domain).sqrt();
     let n = (diag / (2.0 * h)).ceil() as usize + 1;
-    // Minimum resolution of 2
+    // 最小解像度は 2
     n.max(2)
 }
 
-/// Strategy 1 (Eq. 11): compute the distortion upper bound K_max given
-/// the optimization bound K and the continuity modulus ω(h).
+/// Strategy 1（Eq. 11）: 最適化上界 K と連続の度合い ω(h) から
+/// 歪み上界 K_max を計算。
 ///
-/// K_max = max{K + ω(h), 1/(1/K - ω(h))}   if 1/K > ω(h)
+/// K_max = max{K + ω(h), 1/(1/K - ω(h))}   ただし 1/K > ω(h)
 ///
-/// Returns `None` if ω(h) ≥ 1/K (injectivity cannot be guaranteed).
+/// ω(h) ≥ 1/K（単射性が保証できない）の場合は `None` を返す。
 pub fn compute_k_max_isometric(k: f64, omega_h: f64) -> Option<f64> {
-    // Eq. 11: requires 1/K > ω(h) for σ(x) > 0 guarantee
+    // Eq. 11: σ(x) > 0 の保証には 1/K > ω(h) が必要
     if omega_h >= 1.0 / k {
         return None;
     }
@@ -137,12 +137,12 @@ pub fn compute_k_max_isometric(k: f64, omega_h: f64) -> Option<f64> {
     Some(k_max1.max(k_max2))
 }
 
-/// Compute ω(h) = 2 |||c||| · ω_{∇F}(h) (Eq. 9).
+/// ω(h) = 2 |||c||| · ω_{∇F}(h) を計算（Eq. 9）。
 pub fn omega(h: f64, c_norm: f64, basis: &dyn BasisFunction) -> f64 {
     2.0 * c_norm * basis.gradient_modulus(h)
 }
 
-/// Maximum number of Algorithm 1 steps during re-optimization.
+/// 再最適化中の Algorithm 1 ステップの最大数。
 pub const MAX_REFINEMENT_STEPS: usize = 200;
 
 #[cfg(test)]
@@ -174,7 +174,7 @@ mod tests {
     fn test_compute_c_norm_identity() {
         let basis = make_basis();
         let c = basis.identity_coefficients();
-        // Identity: c¹ = [0,0,0,0, 0, 1, 0], c² = [0,0,0,0, 0, 0, 1]
+        // 恒等: c¹ = [0,0,0,0, 0, 1, 0], c² = [0,0,0,0, 0, 0, 1]
         // Σ|c¹| = 1, Σ|c²| = 1
         let norm = compute_c_norm(&c);
         assert!((norm - 1.0).abs() < 1e-12);
@@ -186,8 +186,8 @@ mod tests {
         c[(0, 0)] = 2.0;
         c[(0, 1)] = -3.0;
         c[(1, 2)] = 4.0;
-        // Row 0: |2| + |-3| = 5
-        // Row 1: |4| = 4
+        // 行 0: |2| + |-3| = 5
+        // 行 1: |4| = 4
         let norm = compute_c_norm(&c);
         assert!((norm - 5.0).abs() < 1e-12);
     }
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn test_fill_distance() {
         let bounds = make_bounds();
-        // 11 points on [0,1]²: dx = dy = 0.1
+        // [0,1]² 上に 11 点: dx = dy = 0.1
         // h = √(0.01 + 0.01) / 2 = √0.02 / 2 ≈ 0.0707
         let h = fill_distance(&bounds, 11);
         let expected = (0.02_f64).sqrt() / 2.0;
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_required_h_isometric_basic() {
         let basis = make_basis();
-        // With small c_norm, the required h should be large
+        // 小さい c_norm では、必要な h は大きくなるべき
         let h = required_h_isometric(2.0, 3.0, 0.1, &basis);
         assert!(h.is_some());
         assert!(h.unwrap() > 0.0);
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_compute_k_max_isometric_too_large_omega() {
-        // ω(h) ≥ 1/K → cannot guarantee injectivity
+        // ω(h) ≥ 1/K → 単射性を保証できない
         assert!(compute_k_max_isometric(2.0, 0.5).is_none());
         assert!(compute_k_max_isometric(2.0, 0.6).is_none());
     }

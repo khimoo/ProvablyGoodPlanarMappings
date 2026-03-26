@@ -1,8 +1,8 @@
-//! Mesh generation for the deformed image.
+//! 変形画像用のメッシュ生成。
 //!
-//! Creates a Delaunay-triangulated mesh from a dense grid of points,
-//! optionally clipped to a contour polygon. Each vertex stores its
-//! original position as UV for texture lookup.
+//! 密な点グリッドからドロネー三角形分割メッシュを作成し、
+//! オプションで輪郭ポリゴンにクリップ。各頂点はテクスチャ参照用に
+//! 元の位置を UV として格納。
 
 use bevy::prelude::*;
 use bevy::asset::RenderAssetUsages;
@@ -11,16 +11,15 @@ use bevy::render::render_resource::PrimitiveTopology;
 use delaunator::{triangulate, Point};
 use geo::{Contains, Coord, LineString, Polygon};
 
-/// Generate a contour-clipped mesh suitable for deformation rendering.
+/// 変形レンダリングに適した輪郭クリップメッシュを生成。
 ///
-/// Points are generated on a regular grid within `size`, then filtered
-/// to only those inside the contour polygon (if provided). A Delaunay
-/// triangulation is computed, and only triangles whose centroids are
-/// inside the polygon are kept.
+/// 点は `size` 内の規則的なグリッド上に生成され、輪郭ポリゴン内
+/// （指定された場合）のもののみにフィルタリング。ドロネー三角形分割を
+/// 計算し、重心がポリゴン内にある三角形のみを保持。
 ///
-/// Vertex attributes:
-/// - POSITION: world-space position (centered at origin)
-/// - UV_0: normalized texture coordinates [0,1]²
+/// 頂点属性:
+/// - POSITION: ワールド空間位置（原点を中心）
+/// - UV_0: 正規化テクスチャ座標 [0,1]²
 /// - NORMAL: (0, 0, 1)
 pub fn create_contour_mesh(
     size: Vec2,
@@ -50,21 +49,21 @@ pub fn create_contour_mesh(
 
     let mut valid_points = Vec::new();
 
-    // Add outer contour points (they are on the boundary)
+    // 外側輪郭点を追加（境界上にある）
     if has_contour {
         for &(x, y) in contour {
             valid_points.push(Vec2::new(x, y));
         }
     }
 
-    // Add hole contour points (they are on the hole boundaries)
+    // 穴輪郭点を追加（穴の境界上にある）
     for hole in holes {
         for &(x, y) in hole {
             valid_points.push(Vec2::new(x, y));
         }
     }
 
-    // Add grid interior points
+    // グリッド内部点を追加
     for y in 0..=height_segments {
         for x in 0..=width_segments {
             let px = (x as f32 / width_segments as f32) * size.x;
@@ -80,7 +79,7 @@ pub fn create_contour_mesh(
         }
     }
 
-    // Delaunay triangulation
+    // ドロネー三角形分割
     let delaunay_points: Vec<Point> = valid_points
         .iter()
         .map(|p| Point {
@@ -98,7 +97,7 @@ pub fn create_contour_mesh(
     for p in &valid_points {
         let u = p.x / size.x;
         let v = p.y / size.y;
-        // Convert to centered world coords
+        // 中央原点のワールド座標に変換
         let bx = p.x - size.x * 0.5;
         let by = size.y * 0.5 - p.y;
         positions.push([bx, by, 0.0]);
@@ -131,8 +130,8 @@ pub fn create_contour_mesh(
         }
     }
 
-    // MAIN_WORLD is needed for CPU-side mesh updates (shape-aware basis
-    // computes vertex positions on CPU). RENDER_WORLD for GPU rendering.
+    // CPU 側メッシュ更新に MAIN_WORLD が必要（形状認識基底は CPU で
+    // 頂点位置を計算）。GPU レンダリング用に RENDER_WORLD。
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,

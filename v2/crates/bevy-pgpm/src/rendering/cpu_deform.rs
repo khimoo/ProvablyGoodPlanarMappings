@@ -1,21 +1,20 @@
-//! CPU deformation path: evaluate mapping at mesh vertices via pgpm-core.
+//! CPU 変形パス: pgpm-core を介してメッシュ頂点で写像を評価。
 //!
-//! Works correctly with any basis function type (Euclidean Gaussian,
-//! Shape-Aware Gaussian, etc.) because all evaluation goes through
-//! pgpm-core's `MappingBridge::evaluate_mapping_at()`.
+//! すべての評価が pgpm-core の `MappingBridge::evaluate_mapping_at()` を
+//! 経由するため、任意の基底関数タイプ（ユークリッド Gaussian、
+//! Shape-Aware Gaussian 等）で正しく動作する。
 
 use bevy::prelude::*;
 
 use crate::domain::coords::ImageCoords;
 use crate::state::{AlgorithmState, DeformedImage, ImageInfo, OriginalVertexPositions};
 
-/// System: update mesh vertex positions based on the current mapping (Eq. 3).
+/// システム: 現在の写像に基づいてメッシュ頂点位置を更新 (Eq. 3)。
 ///
-/// Run condition: `DeformingSet` (only runs while deforming).
+/// 実行条件: `DeformingSet`（変形中のみ実行）。
 ///
-/// After each algorithm step, evaluates f(x) at the original pixel-space
-/// vertex positions and writes the deformed world-space positions into
-/// the mesh's `POSITION` attribute.
+/// 各アルゴリズムステップの後、元のピクセル空間頂点位置で f(x) を評価し、
+/// 変形後のワールド空間位置をメッシュの `POSITION` 属性に書き込む。
 pub fn update_cpu_deform(
     algo_state: Res<AlgorithmState>,
     image_info: Option<Res<ImageInfo>>,
@@ -29,10 +28,10 @@ pub fn update_cpu_deform(
     let Ok(mesh_handle) = query.single() else { return };
     let Some(mesh) = meshes.get_mut(&mesh_handle.0) else { return };
 
-    // Evaluate forward mapping f(x) at all original pixel positions (Eq. 3)
+    // 全ての元のピクセル位置で順方向写像 f(x) を評価 (Eq. 3)
     let deformed_pixels = algo.evaluate_mapping_at(&original_positions.pixel_positions);
 
-    // Convert deformed pixel coords -> world coords and update mesh
+    // 変形後ピクセル座標 -> ワールド座標に変換してメッシュを更新
     let coords = ImageCoords::new(image_info.width, image_info.height);
     let new_positions: Vec<[f32; 3]> = deformed_pixels
         .iter()

@@ -1,28 +1,28 @@
-//! Domain abstraction for the algorithm.
+//! アルゴリズム用のドメイン抽象化。
 //!
-//! Paper Section 3-4: the algorithm controls distortion and injectivity
-//! over a domain Ω ⊂ R². This module provides the `Domain` trait that
-//! abstracts the "x ∈ Ω" test, and a polygon-based implementation.
+//! 論文 Section 3-4: アルゴリズムはドメイン Ω ⊂ R² 上で
+//! 歪みと単射性を制御する。このモジュールは "x ∈ Ω" の判定を
+//! 抽象化する `Domain` トレイトと、ポリゴンベースの実装を提供する。
 
 use nalgebra::Vector2;
 
-/// Abstract domain Ω.
+/// 抽象ドメイン Ω。
 ///
-/// Paper Section 4: "consider all the points from a surrounding uniform
+/// 論文 Section 4: "consider all the points from a surrounding uniform
 /// grid that fall inside the domain"
 ///
-/// The algorithm only needs to test whether a point belongs to Ω.
-/// How the domain is defined (polygon, alpha channel, SDF, etc.) is
-/// the caller's concern.
+/// アルゴリズムが必要とするのは、点が Ω に属するかどうかの判定のみ。
+/// ドメインの定義方法（ポリゴン、アルファチャンネル、SDF等）は
+/// 呼び出し側の責任。
 pub trait Domain: Send + Sync {
-    /// Test if point `pt` is inside the domain Ω.
+    /// 点 `pt` がドメイン Ω の内部にあるかを判定する。
     fn contains(&self, pt: &Vector2<f64>) -> bool;
 }
 
-/// Domain defined by an outer polygon boundary with optional holes.
+/// 外側ポリゴン境界とオプションの穴で定義されるドメイン。
 ///
-/// A point is inside the domain if it is inside the outer contour
-/// and outside all hole contours.
+/// 点がドメイン内にあるとは、外側輪郭の内部かつ
+/// 全ての穴輪郭の外部にあること。
 pub struct PolygonDomain {
     outer: Vec<Vector2<f64>>,
     holes: Vec<Vec<Vector2<f64>>>,
@@ -41,9 +41,9 @@ impl Domain for PolygonDomain {
     }
 }
 
-/// Ray-casting point-in-polygon test.
+/// レイキャスティングによる点のポリゴン内包判定。
 ///
-/// Paper Section 4: "consider all the points from a surrounding uniform
+/// 論文 Section 4: "consider all the points from a surrounding uniform
 /// grid that fall inside the domain"
 pub(crate) fn point_in_polygon(pt: &Vector2<f64>, polygon: &[Vector2<f64>]) -> bool {
     let n = polygon.len();
@@ -94,14 +94,14 @@ mod tests {
 
     #[test]
     fn test_polygon_domain_with_hole() {
-        // Outer: 10×10 square
+        // 外側: 10×10の正方形
         let outer = vec![
             Vector2::new(0.0, 0.0),
             Vector2::new(10.0, 0.0),
             Vector2::new(10.0, 10.0),
             Vector2::new(0.0, 10.0),
         ];
-        // Hole: 3×3 square centered at (5, 5)
+        // 穴: (5, 5)を中心とした3×3の正方形
         let hole = vec![
             Vector2::new(3.5, 3.5),
             Vector2::new(6.5, 3.5),
@@ -110,11 +110,11 @@ mod tests {
         ];
         let domain = PolygonDomain::new(outer, vec![hole]);
 
-        // Inside outer, outside hole → inside domain
+        // 外側の内部、穴の外部 → ドメイン内
         assert!(domain.contains(&Vector2::new(1.0, 1.0)));
-        // Inside outer, inside hole → outside domain
+        // 外側の内部、穴の内部 → ドメイン外
         assert!(!domain.contains(&Vector2::new(5.0, 5.0)));
-        // Outside outer → outside domain
+        // 外側の外部 → ドメイン外
         assert!(!domain.contains(&Vector2::new(15.0, 5.0)));
     }
 }

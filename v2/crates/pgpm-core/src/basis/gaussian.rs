@@ -1,29 +1,28 @@
-//! Gaussian RBF basis functions.
+//! Gaussian RBF基底関数。
 //!
 //! Table 1: f_i(x) = exp(-|x - x_i|² / (2s²))
 //!          ω_{∇F}(t) = t / s²
 //!
-//! We augment the RBF basis with affine terms {1, x, y} to enable
-//! representation of the identity mapping. This is standard practice
-//! consistent with "bases mentioned above (and others)" in Section 3.
-//! Affine terms have ∇f = const, so ω_{∇f_i} = 0 and they do not
-//! affect ω_{∇F} in Eq. 8.
+//! RBF基底にアフィン項 {1, x, y} を追加して恒等写像を表現可能にしている。
+//! これは Section 3 の「上述の基底（および他の基底）」に準拠した標準的手法。
+//! アフィン項は ∇f = const であるため ω_{∇f_i} = 0 であり、
+//! Eq. 8 の ω_{∇F} に影響しない。
 
 use super::BasisFunction;
 use crate::model::types::CoefficientMatrix;
 use nalgebra::{DMatrix, DVector, Vector2};
 
-/// Gaussian RBF basis with affine augmentation.
+/// アフィン項を付加したGaussian RBF基底。
 ///
-/// Basis structure (n = num_centers + 3):
-/// - f_0 ... f_{num_centers-1}: Gaussian RBFs
-/// - f_{n-3}: constant 1
-/// - f_{n-2}: x coordinate
-/// - f_{n-1}: y coordinate
+/// 基底の構造 (n = num_centers + 3):
+/// - f_0 ... f_{num_centers-1}: Gaussian RBF
+/// - f_{n-3}: 定数 1
+/// - f_{n-2}: x座標
+/// - f_{n-1}: y座標
 pub struct GaussianBasis {
-    /// RBF centers {x_i}
+    /// RBF中心 {x_i}
     centers: Vec<Vector2<f64>>,
-    /// Scale parameter s (Table 1: f_i = exp(-|x-x_i|²/(2s²)))
+    /// スケールパラメータ s (Table 1: f_i = exp(-|x-x_i|²/(2s²)))
     s: f64,
 }
 
@@ -33,12 +32,12 @@ impl GaussianBasis {
         Self { centers, s }
     }
 
-    /// Number of RBF centers (excluding affine terms)
+    /// RBF中心の個数（アフィン項を除く）
     pub fn num_centers(&self) -> usize {
         self.centers.len()
     }
 
-    /// Scale parameter
+    /// スケールパラメータ
     pub fn scale(&self) -> f64 {
         self.s
     }
@@ -46,7 +45,7 @@ impl GaussianBasis {
 
 impl BasisFunction for GaussianBasis {
     fn count(&self) -> usize {
-        // RBF centers + 3 affine terms (1, x, y)
+        // RBF中心 + 3つのアフィン項 (1, x, y)
         self.centers.len() + 3
     }
 
@@ -55,18 +54,18 @@ impl BasisFunction for GaussianBasis {
         let mut result = DVector::zeros(n);
         let s2 = self.s * self.s;
 
-        // Gaussian RBFs: f_i(x) = exp(-|x - x_i|² / (2s²))
+        // Gaussian RBF: f_i(x) = exp(-|x - x_i|² / (2s²))
         for (i, center) in self.centers.iter().enumerate() {
             let diff = x - center;
             let r2 = diff.dot(&diff);
             result[i] = (-r2 / (2.0 * s2)).exp();
         }
 
-        // Affine terms
+        // アフィン項
         let nc = self.centers.len();
-        result[nc] = 1.0;     // constant
-        result[nc + 1] = x.x; // x coordinate
-        result[nc + 2] = x.y; // y coordinate
+        result[nc] = 1.0;     // 定数
+        result[nc + 1] = x.x; // x座標
+        result[nc + 2] = x.y; // y座標
 
         result
     }
@@ -86,12 +85,12 @@ impl BasisFunction for GaussianBasis {
             grad_y[i] = phi * (-diff.y / s2);
         }
 
-        // Affine terms: ∇1 = (0,0), ∇x = (1,0), ∇y = (0,1)
+        // アフィン項: ∇1 = (0,0), ∇x = (1,0), ∇y = (0,1)
         let nc = self.centers.len();
-        // grad_x[nc] = 0, grad_y[nc] = 0  (constant term, already zero)
+        // grad_x[nc] = 0, grad_y[nc] = 0  (定数項、既にゼロ)
         grad_x[nc + 1] = 1.0; // ∂x/∂x
-        // grad_y[nc + 1] = 0  (∂x/∂y, already zero)
-        // grad_x[nc + 2] = 0  (∂y/∂x, already zero)
+        // grad_y[nc + 1] = 0  (∂x/∂y、既にゼロ)
+        // grad_x[nc + 2] = 0  (∂y/∂x、既にゼロ)
         grad_y[nc + 2] = 1.0; // ∂y/∂y
 
         (grad_x, grad_y)
@@ -119,7 +118,7 @@ impl BasisFunction for GaussianBasis {
             hyy[i] = phi * (diff.y * diff.y - s2) / s4;
         }
 
-        // Affine terms: all second derivatives are zero (already zero)
+        // アフィン項: 2階微分は全てゼロ（既にゼロ）
 
         (hxx, hxy, hyy)
     }
@@ -135,9 +134,9 @@ impl BasisFunction for GaussianBasis {
     }
 
     fn identity_coefficients(&self) -> CoefficientMatrix {
-        // Identity mapping: f(x) = x
-        // c¹_{n-2} = 1 (x-coefficient for u), c²_{n-1} = 1 (y-coefficient for v)
-        // All other coefficients are 0.
+        // 恒等写像: f(x) = x
+        // c¹_{n-2} = 1 (u成分のx係数), c²_{n-1} = 1 (v成分のy係数)
+        // その他の係数は全て0。
         let n = self.count();
         let mut c = DMatrix::zeros(2, n);
         let nc = self.centers.len();
@@ -164,7 +163,7 @@ mod tests {
     #[test]
     fn test_count() {
         let basis = make_simple_basis();
-        // 4 RBF centers + 3 affine = 7
+        // 4つのRBF中心 + 3つのアフィン項 = 7
         assert_eq!(basis.count(), 7);
     }
 
@@ -172,10 +171,10 @@ mod tests {
     fn test_evaluate_at_center() {
         let basis = make_simple_basis();
         let val = basis.evaluate(Vector2::new(0.0, 0.0));
-        // f_0 at its own center should be 1.0
+        // f_0は自身の中心で1.0になるべき
         assert!((val[0] - 1.0).abs() < 1e-12);
-        // Affine terms at origin
-        assert!((val[4] - 1.0).abs() < 1e-12); // constant
+        // 原点でのアフィン項
+        assert!((val[4] - 1.0).abs() < 1e-12); // 定数
         assert!(val[5].abs() < 1e-12);          // x = 0
         assert!(val[6].abs() < 1e-12);          // y = 0
     }
@@ -187,7 +186,7 @@ mod tests {
         assert_eq!(c.nrows(), 2);
         assert_eq!(c.ncols(), 7);
 
-        // Evaluate f(x) = Σ c_i f_i(x) at a test point
+        // テスト点で f(x) = Σ c_i f_i(x) を評価
         let x = Vector2::new(0.3, 0.7);
         let phi = basis.evaluate(x);
         let u: f64 = c.row(0).dot(&phi.transpose());
@@ -201,12 +200,12 @@ mod tests {
     fn test_gradient_at_center() {
         let basis = make_simple_basis();
         let (gx, gy) = basis.gradient(Vector2::new(0.0, 0.0));
-        // ∂f_0/∂x at center (0,0): phi * (-0/s²) = 0
+        // 中心(0,0)での ∂f_0/∂x: phi * (-0/s²) = 0
         assert!(gx[0].abs() < 1e-12);
         assert!(gy[0].abs() < 1e-12);
-        // Affine x-term: ∂x/∂x = 1
+        // アフィンx項: ∂x/∂x = 1
         assert!((gx[5] - 1.0).abs() < 1e-12);
-        // Affine y-term: ∂y/∂y = 1
+        // アフィンy項: ∂y/∂y = 1
         assert!((gy[6] - 1.0).abs() < 1e-12);
     }
 

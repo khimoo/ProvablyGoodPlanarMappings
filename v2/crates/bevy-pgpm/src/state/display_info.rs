@@ -1,19 +1,19 @@
-//! Display information resource, updated each algorithm step.
+//! 表示情報リソース。各アルゴリズムステップで更新。
 
 use bevy::prelude::*;
 
-/// UI display information, updated each algorithm step.
+/// UI 表示情報。各アルゴリズムステップで更新。
 ///
-/// Contains only per-step results from pgpm-core. Algorithm parameters
-/// (K, lambda, regularization) are read from [`super::AlgoParams`] directly.
+/// pgpm-core からのステップ毎の結果のみを含む。アルゴリズムパラメータ
+/// （K、lambda、正則化）は [`super::AlgoParams`] から直接読み取る。
 #[derive(Resource, Default)]
 pub struct DeformationInfo {
     pub max_distortion: f64,
     pub active_set_size: usize,
     pub stable_set_size: usize,
     pub step_count: usize,
-    /// Algorithm 1 convergence flag from pgpm-core.
+    /// pgpm-core からの Algorithm 1 収束フラグ。
     pub converged: bool,
-    /// Strategy 2 result status message (None = not yet run)
+    /// Strategy 2 結果のステータスメッセージ（None = 未実行）
     pub strategy2_status: Option<String>,
 }

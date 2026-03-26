@@ -1,7 +1,7 @@
-//! Application state and resources.
+//! アプリケーション状態とリソース。
 //!
-//! Defines the AppState FSM, marker components, and re-exports all
-//! sub-module types for convenient `use crate::state::*` access.
+//! AppState FSM、マーカーコンポーネントを定義し、便利な
+//! `use crate::state::*` アクセスのために全サブモジュール型を再エクスポート。
 
 pub mod algorithm;
 pub mod display_info;
@@ -17,8 +17,8 @@ pub use params::{AlgoParams, BasisType, RegMode};
 
 use bevy::prelude::*;
 
-/// Application state machine.
-/// Setup -> Deforming (-> Verifying in Phase 3)
+/// アプリケーション状態機械。
+/// Setup -> Deforming (-> Phase 3 で Verifying)
 #[derive(States, Default, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum AppState {
     #[default]
@@ -27,10 +27,10 @@ pub enum AppState {
     // Phase 3: Verifying,
 }
 
-/// Marker for the main camera.
+/// メインカメラのマーカー。
 #[derive(Component)]
 pub struct MainCamera;
 
-/// Marker for the deformed image entity.
+/// 変形画像エンティティのマーカー。
 #[derive(Component)]
 pub struct DeformedImage;
