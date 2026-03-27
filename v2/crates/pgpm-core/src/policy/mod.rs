@@ -6,8 +6,7 @@
 //! - SOCP制約の構築（Eq. 23/26 vs Eq. 28）
 //! - Strategy 2 充填距離の計算（Eq. 14 vs Eq. 15）
 //!
-//! これは `pub(crate)` — 外部利用者は `PgpmAlgorithm` と
-//! ファクトリ関数経由でアクセスする。
+//! 外部利用者は `Algorithm` とファクトリ関数経由でアクセスする。
 
 use crate::basis::BasisFunction;
 use crate::distortion;

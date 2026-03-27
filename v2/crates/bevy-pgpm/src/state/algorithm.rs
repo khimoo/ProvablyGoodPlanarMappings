@@ -1,14 +1,14 @@
-//! コアアルゴリズム状態: Bevy リソースとして使用するために pgpm-core の MappingBridge をラップ。
+//! コアアルゴリズム状態: Bevy リソースとして使用するために pgpm-core の Algorithm をラップ。
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
-use pgpm_core::mapping::MappingBridge;
+use pgpm_core::algorithm::Algorithm;
 
 /// コアアルゴリズム状態、ソルバーとレンダリングシステムで使用。
 #[derive(Resource)]
 pub struct AlgorithmState {
     /// pgpm-core の写像インスタンス。ファイナライズ時に作成。
-    pub algorithm: Option<Box<dyn MappingBridge>>,
+    pub algorithm: Option<Algorithm>,
     /// ドメイン（ピクセル）座標でのソースハンドル位置。
     pub source_handles: Vec<Vector2<f64>>,
     /// ドメイン（ピクセル）座標での現在のターゲットハンドル位置。
@@ -38,7 +38,7 @@ impl AlgorithmState {
     }
 
     /// 写像インスタンスを設定し、ターゲットをソース位置に初期化。
-    pub fn set_mapping(&mut self, algorithm: Box<dyn MappingBridge>) {
+    pub fn set_mapping(&mut self, algorithm: Algorithm) {
         self.target_handles = self.source_handles.clone();
         self.algorithm = Some(algorithm);
     }

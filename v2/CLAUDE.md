@@ -7,6 +7,7 @@
 ### 絶対遵守事項
 
 1. **論文に書かれていることのみ実装する。**
+	1. /data配下に論文のpdfとmarkdownファイルがある
 2. **論文に書かれていないヒューリスティクス、独自ルール、"改良" は一切追加しない。**
 3. **実装の根拠は必ず論文の式番号・セクション番号で示す。**
 4. **論文と異なる挙動が観察された場合、まず実装のバグを疑い、独自の回避策を入れない。**
@@ -64,34 +65,118 @@ LLMへ: 変形結果で像が重なっているという報告を受けたとき
 | 実験パラメータ | Section 6 |
 | 基底関数と勾配モジュラス | Table 1, Appendix A |
 
+## 設計方針
+
+### trait は「振る舞いの差し替え点」にのみ使う
+
+論文で複数の実装が存在し、振る舞いが異なる概念にのみ trait を適用する。
+
+| trait | 論文の対応 | 差し替え対象 |
+|-------|----------|-----------|
+| `BasisFunction` | Table 1 | Gaussian, ShapeAwareGaussian, (BSpline, TPS) |
+| `DistortionPolicy` | Section 3 "Distortion", Section 5 | IsometricPolicy, ConformalPolicy |
+| `Domain` | Section 4 "Non-convex domains" | PolygonDomain, (将来の拡張) |
+
+### Algorithm は普通の構造体
+
+`Algorithm` は論文の Algorithm 1 を実装する**唯一の構造体**であり、trait にしない。
+実装が1つしかないものを trait で抽象化する必要はない。
+
+```rust
+pub struct Algorithm {
+    basis: Box<dyn BasisFunction>,
+    policy: Box<dyn DistortionPolicy>,
+    domain: Option<Box<dyn Domain>>,
+    state: AlgorithmState,
+    params: MappingParams,
+    config: SolverConfig,
+}
+
+impl Algorithm {
+    pub fn step(&mut self, targets: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError>;
+    pub fn evaluate_mapping_at(&self, points: &[Vector2<f64>]) -> Vec<Vector2<f64>>;
+    pub fn rebuild_grid(&mut self, new_resolution: usize);
+    pub fn params(&self) -> &MappingParams;
+    // ... Algorithm 1 に必要な操作
+}
+```
+
+trait にしないことで:
+- `parts()` / `parts_mut()` による借用分離ハックが不要（`self.basis`, `self.state` に直接アクセスできる）
+- `MappingBridge` trait (委譲ファサード) が不要
+- getter がtrait のデフォルトメソッドではなく普通の `pub fn` になる
+
+### Strategy は Algorithm の「上位ワークフロー」
+
+論文 Section 4 の Strategy 1/2/3 は Algorithm 1 の内部部品ではなく、
+Algorithm 1 を**どう使うか**の上位手順である。
+
+- Strategy 1: Algorithm 1 を1回実行後、Eq. 11/13 で K_max を計算（検証のみ）
+- Strategy 2: Eq. 14/15 で必要な h を計算 → グリッド再構築 → Algorithm 1 を収束まで実行
+- Strategy 3: Strategy 1 + 2 の反復
+
+これらは `strategy` モジュールの自由関数として実装し、`&mut Algorithm` を受け取る。
+Algorithm の impl に混ぜない（抽象レベルが異なるため凝集度が下がる）。
+
+```rust
+pub mod strategy {
+    pub fn verify_distortion_bound(alg: &Algorithm) -> VerificationResult;
+    pub fn refine_to_target(alg: &mut Algorithm, ...) -> Result<RefinementResult>;
+    pub fn verify_and_refine(alg: &mut Algorithm, ...) -> Result<RefinementResult>;
+}
+```
+
+### 正則化は enum で切り替え
+
+Biharmonic (Eq. 31) と ARAP (Eq. 32-33) は trait にせず enum で扱う。
+実装が2つで将来増えず、混合（Mixed）もある場合、enum + match の方がシンプル。
+
+```rust
+pub enum RegularizationType {
+    Biharmonic,
+    Arap,
+    Mixed { lambda_bh: f64, lambda_arap: f64 },
+}
+```
+
+### bevy-pgpm からの使用
+
+`MappingBridge` trait は廃止し、`Algorithm` 構造体を直接使用する。
+bevy-pgpm は `Algorithm` の pub API にのみ依存する。
+
 ## プロジェクト構成
 
 ```
 v2/
 ├── CLAUDE.md                    # このファイル
-├── DESIGN.md                    # 設計書
 ├── Cargo.toml                   # ワークスペースルート
 ├── crates/
 │   ├── pgpm-core/               # 論文アルゴリズムの純粋実装
 │   │   ├── Cargo.toml
 │   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── types.rs
+│   │   │   ├── lib.rs           # 公開API (ファクトリ関数, re-export)
 │   │   │   ├── basis/           # 基底関数 (Table 1)
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── gaussian.rs  # ✅ Phase 1: ユークリッド距離Gaussian
-│   │   │   │   ├── shape_aware_gaussian.rs # ✅ Phase 3: 測地距離Gaussian
+│   │   │   │   ├── mod.rs       # BasisFunction trait 定義
+│   │   │   │   ├── gaussian.rs  # ✅ ユークリッド距離Gaussian
+│   │   │   │   ├── shape_aware_gaussian.rs # ✅ 測地距離Gaussian
 │   │   │   │   ├── bspline.rs   # ⬜ Phase 3
 │   │   │   │   └── tps.rs       # ⬜ Phase 3
-│   │   │   ├── geodesic.rs      # ✅ FMM測地距離計算 (Section "Shape aware bases")
-│   │   │   ├── distortion.rs    # ✅ 歪み計算 (Eq. 19-20)
-│   │   │   ├── active_set.rs    # ✅ Active set管理 (Algorithm 1)
-│   │   │   ├── solver.rs        # ✅ SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
-│   │   │   ├── strategy.rs      # ✅ Strategy 2 (Eq. 11, 14); ⬜ Phase 3: Strategy 1/3 (Eq. 15-17)
-│   │   │   └── algorithm.rs     # ✅ Algorithm 1 統合
+│   │   │   ├── policy/          # 歪み種別 (Section 3, 5)
+│   │   │   │   └── mod.rs       # DistortionPolicy trait + IsometricPolicy, ConformalPolicy
+│   │   │   ├── model/           # データ型定義
+│   │   │   │   ├── domain.rs    # Domain trait + PolygonDomain
+│   │   │   │   └── types.rs     # AlgorithmState, MappingParams, etc.
+│   │   │   ├── algorithm/       # Algorithm 1 本体 + 周辺ロジック
+│   │   │   │   ├── mod.rs       # Algorithm 構造体 + impl (step, evaluate 等)
+│   │   │   │   ├── active_set.rs # Active set管理
+│   │   │   │   └── strategy.rs  # Strategy 1/2/3 (自由関数)
+│   │   │   ├── numerics/        # 数値計算
+│   │   │   │   ├── solver.rs    # SOCP構築・求解 (Eq. 18, 23, 26, 28, 30)
+│   │   │   │   └── geodesic.rs  # FMM測地距離計算
+│   │   │   └── distortion.rs    # 歪み計算 (Eq. 19-20)
 │   │   └── tests/
 │   │       └── integration_verify.rs
-│   └── bevy-pgpm/               # Phase 2: Bevy統合 (レンダリング・UI)
+│   └── bevy-pgpm/               # Bevy統合 (レンダリング・UI)
 │       ├── Cargo.toml
 │       ├── src/
 │       │   ├── main.rs          # Bevy app setup, カメラ
@@ -125,15 +210,15 @@ v2/
 
 ## 実装フェーズ
 
-| Phase | 内容 | 状態 |
-|-------|------|------|
-| **Phase 1** | pgpm-core 最小構成 (Gaussian + Isometric + Algorithm 1) | ✅ 完了 |
-| **Phase 2** | bevy-pgpm UI構築 (Gaussian + Isometric のみで動作) | ⬜ 次 |
-| **Phase 3** | pgpm-core 完成 (Strategy, B-Spline, TPS) + bevy-pgpm 拡張 | ⬜ |
+| Phase       | 内容                                                    | 状態   |
+| ----------- | ----------------------------------------------------- | ---- |
+| **Phase 1** | pgpm-core 最小構成 (Gaussian + Isometric + Algorithm 1)   | ✅ 完了 |
+| **Phase 2** | bevy-pgpm UI構築 (Gaussian + Isometric のみで動作)           | ✅ 完了 |
+| **Phase 3** | pgpm-core 完成 (Strategy, B-Spline, TPS) + bevy-pgpm 拡張 | ⬜ 次  |
 
-**Phase 2 の方針**: pgpm-core の Phase 1 成果物のみで動作するUIを構築する。
-Phase 3 の未実装機能はスタブ/無効化で対応し、UIレベルで制限を明示する。
-- Strategy 1/2/3 → `verify_and_refine()` は `CannotGuarantee` を返す → UIで「未検証」表示
+**Phase 3 の方針**: Phase 1,2 の成果物をベースに pgpm-core を完成させ、bevy-pgpm を拡張する。
+現時点で未実装の機能はスタブ/無効化で対応し、UIレベルで制限を明示している。
+- Strategy 1/2/3 → `strategy::verify_and_refine()` は `CannotGuarantee` を返す → UIで「未検証」表示
 - B-Spline / TPS → 基底選択UIでは Gaussian のみ有効
 - Conformal → Isometric モードのみ使用可能
 

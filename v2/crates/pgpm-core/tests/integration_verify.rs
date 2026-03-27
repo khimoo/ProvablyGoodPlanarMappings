@@ -12,7 +12,6 @@
 use pgpm_core::basis::gaussian::GaussianBasis;
 use pgpm_core::distortion;
 use pgpm_core::algorithm::Algorithm;
-use pgpm_core::mapping::PgpmAlgorithm;
 use pgpm_core::model::types::*;
 use pgpm_core::policy::IsometricPolicy;
 use nalgebra::Vector2;
@@ -45,7 +44,7 @@ fn make_verification_algorithm(
     k_bound: f64,
     handles_src: Vec<Vector2<f64>>,
     grid_res: usize,
-) -> Algorithm<IsometricPolicy> {
+) -> Algorithm {
     // 十分なカバレッジのための4x4 RBF中心グリッド
     let mut centers = Vec::new();
     for i in 0..4 {
@@ -73,7 +72,7 @@ fn make_verification_algorithm(
     };
 
     Algorithm::new(
-        basis, params, IsometricPolicy, domain, handles_src,
+        basis, params, Box::new(IsometricPolicy), domain, handles_src,
         grid_res, 8, None, pgpm_core::model::types::SolverConfig::default(),
     )
 }
@@ -138,12 +137,12 @@ fn verify_identity_target_converges() {
     );
 
     // 求解後の歪みも上界内であることを検証
-    let (ctx, state) = alg.parts();
+    let state = alg.state();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        ctx.policy,
+        alg.policy(),
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Post-solve max_D after 10 steps: {:.4}", max_d);
@@ -174,12 +173,12 @@ fn verify_distortion_bound_at_constrained_points() {
     }
 
     // SOCP求解後、制約点での歪みを確認
-    let (ctx, state) = alg.parts();
+    let state = alg.state();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        ctx.policy,
+        alg.policy(),
     );
 
     // アクティブ集合点を確認: D(z) <= K（数値許容誤差付き）
@@ -370,12 +369,12 @@ fn verify_k_bound_effect() {
         }
 
         // 求解後の歪みを測定
-        let (ctx, state) = alg.parts();
+        let state = alg.state();
         let precomputed = state.precomputed.as_ref().unwrap();
         let distortions = distortion::evaluate_distortion_all(
             &state.coefficients,
             precomputed,
-            ctx.policy,
+            alg.policy(),
         );
 
         let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -456,12 +455,12 @@ fn verify_two_handle_deformation() {
     assert!(err_b < HANDLE_TRACKING_TOL, "Handle B error {:.4} too large", err_b);
 
     // 歪み上界を検証
-    let (ctx, state) = alg.parts();
+    let state = alg.state();
     let precomputed = state.precomputed.as_ref().unwrap();
     let distortions = distortion::evaluate_distortion_all(
         &state.coefficients,
         precomputed,
-        ctx.policy,
+        alg.policy(),
     );
     let max_d = distortions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     println!("Final max distortion: {:.4}", max_d);

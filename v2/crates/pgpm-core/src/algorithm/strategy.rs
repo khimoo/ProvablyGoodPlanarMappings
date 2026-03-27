@@ -145,6 +145,82 @@ pub fn omega(h: f64, c_norm: f64, basis: &dyn BasisFunction) -> f64 {
 /// 再最適化中の Algorithm 1 ステップの最大数。
 pub const MAX_REFINEMENT_STEPS: usize = 200;
 
+/// Strategy 2 事後精緻化（Section 5 "Strategies"）。
+///
+/// `&mut Algorithm` を受け取る自由関数。Algorithm 側から委譲される。
+pub fn refine_to_target(
+    alg: &mut super::Algorithm,
+    k_max: f64,
+    target_handles: &[nalgebra::Vector2<f64>],
+) -> Result<Strategy2Result, crate::model::types::AlgorithmError> {
+    use crate::model::types::AlgorithmError;
+    use log::warn;
+
+    let k = alg.params().k_bound;
+    if k_max <= k {
+        return Err(AlgorithmError::InvalidInput(format!(
+            "Strategy 2 requires K_max ({}) > K ({})",
+            k_max, k
+        )));
+    }
+
+    let c_norm = compute_c_norm(&alg.state().coefficients);
+    let required_h = alg
+        .policy()
+        .required_h(k, k_max, c_norm, alg.basis())
+        .ok_or_else(|| {
+            AlgorithmError::InvalidInput(
+                "Strategy 2: cannot compute required h (K_max too close to K or c_norm issue)"
+                    .into(),
+            )
+        })?;
+    let current_h = fill_distance(alg.domain_bounds(), alg.state().grid_width);
+
+    let new_resolution = resolution_for_h(alg.domain_bounds(), required_h);
+    let max_res = alg.max_refinement_resolution();
+    if new_resolution > max_res {
+        return Err(AlgorithmError::ResolutionExceeded {
+            required: new_resolution,
+            max: max_res,
+        });
+    }
+
+    // 必要ならグリッドを再構築
+    if new_resolution > alg.state().grid_width {
+        alg.rebuild_grid(new_resolution);
+    }
+
+    let mut refinement_steps = 0;
+    for _ in 0..MAX_REFINEMENT_STEPS {
+        let info = alg.step(target_handles)?;
+        refinement_steps += 1;
+        if info.converged {
+            break;
+        }
+    }
+
+    let final_h = fill_distance(alg.domain_bounds(), alg.state().grid_width);
+    let final_omega = omega(final_h, c_norm, alg.basis());
+    let k_max_achieved = alg.policy().compute_k_max(k, final_omega).unwrap_or_else(|| {
+        warn!(
+            "Strategy 2: cannot guarantee finite K_max \
+             (omega(h)={:.4} >= 1/K={:.4})",
+            final_omega,
+            1.0 / k,
+        );
+        f64::INFINITY
+    });
+
+    Ok(Strategy2Result {
+        required_h,
+        required_resolution: new_resolution,
+        current_h,
+        k_max_achieved,
+        c_norm,
+        refinement_steps,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

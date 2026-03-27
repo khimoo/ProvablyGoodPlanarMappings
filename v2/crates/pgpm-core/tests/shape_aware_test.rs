@@ -5,7 +5,6 @@ use nalgebra::Vector2;
 use pgpm_core::algorithm::Algorithm;
 use pgpm_core::basis::shape_aware_gaussian::ShapeAwareGaussianBasis;
 use pgpm_core::basis::BasisFunction;
-use pgpm_core::mapping::PgpmAlgorithm;
 use pgpm_core::model::domain::PolygonDomain;
 use pgpm_core::model::types::{DomainBounds, MappingParams, RegularizationType};
 use pgpm_core::numerics::geodesic::{GeodesicField, build_domain_mask};
@@ -161,7 +160,7 @@ fn test_shape_aware_algorithm_step() {
 
     let domain = PolygonDomain::new(contour_v2, vec![]);
     let mut algo = Algorithm::new(
-        basis, params, IsometricPolicy, bounds, source_handles.clone(),
+        basis, params, Box::new(IsometricPolicy), bounds, source_handles.clone(),
         50, 8, Some(Box::new(domain)),
         pgpm_core::model::types::SolverConfig::default(),
     );

@@ -1,6 +1,6 @@
 //! CPU 変形パス: pgpm-core を介してメッシュ頂点で写像を評価。
 //!
-//! すべての評価が pgpm-core の `MappingBridge::evaluate_mapping_at()` を
+//! すべての評価が pgpm-core の `Algorithm::evaluate_mapping_at()` を
 //! 経由するため、任意の基底関数タイプ（ユークリッド Gaussian、
 //! Shape-Aware Gaussian 等）で正しく動作する。
 

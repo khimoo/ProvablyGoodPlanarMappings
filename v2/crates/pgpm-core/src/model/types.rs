@@ -5,9 +5,6 @@
 //! - Section 3: 歪みの種類
 //! - Algorithm 1: アルゴリズム状態
 
-use crate::basis::BasisFunction;
-use crate::model::domain::Domain;
-use crate::policy::DistortionPolicy;
 use nalgebra::{DMatrix, Vector2};
 
 // ───────────────────────────────────────────────────────────────
@@ -67,29 +64,6 @@ impl Default for SolverConfig {
             max_refinement_resolution: 1000,
         }
     }
-}
-
-/// Algorithm 1 (Section 5) の不変コンテキスト。
-///
-/// 単一のアルゴリズムステップ内で変化しない全データへの参照を束ねる。
-/// `&mut AlgorithmState` と共に [`PgpmAlgorithm::parts_mut`] から返され、
-/// トレイトのデフォルトメソッド内での借用分割を可能にする。
-pub struct MappingContext<'a> {
-    /// 基底関数 φ_i (Table 1)
-    pub basis: &'a dyn BasisFunction,
-    /// 歪みポリシー（等長 Eq. 23/26 または等角 Eq. 28）
-    pub policy: &'a dyn DistortionPolicy,
-    /// アルゴリズムパラメータ（K, λ, 正則化の種類）
-    pub params: &'a MappingParams,
-    /// ソースハンドル位置 {p_l} (Eq. 29) — 固定
-    pub source_handles: &'a [Vector2<f64>],
-    /// ドメイン Ω のバウンディングボックス (Eq. 5)
-    pub domain_bounds: &'a DomainBounds,
-    /// ドメイン Ω（"x ∈ Ω" 判定用、Section 4）。
-    /// `None` の場合はバウンディングボックス全体がドメインとなる。
-    pub domain: Option<&'a dyn Domain>,
-    /// SOCPソルバーの数値調整（論文由来ではない）
-    pub solver_config: &'a SolverConfig,
 }
 
 /// Algorithm 1 の内部状態。

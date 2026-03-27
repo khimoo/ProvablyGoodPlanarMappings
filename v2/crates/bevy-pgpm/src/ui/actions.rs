@@ -5,7 +5,7 @@ use bevy::mesh::{Indices, VertexAttributeValues};
 use log::{info, warn, error};
 
 use nalgebra::Vector2;
-use pgpm_core::mapping::MappingBridge;
+use pgpm_core::algorithm::Algorithm;
 use pgpm_core::model::domain::{Domain, PolygonDomain};
 use pgpm_core::model::types::{DomainBounds, MappingParams, SolverConfig};
 
@@ -410,7 +410,7 @@ fn build_mapping(
     algo_params: &AlgoParams,
     contour: &[(f32, f32)],
     holes: &[Vec<(f32, f32)>],
-) -> Box<dyn MappingBridge> {
+) -> Algorithm {
     let epsilon = algo_params.epsilon;
     let domain = DomainBounds {
         x_min: -epsilon,
