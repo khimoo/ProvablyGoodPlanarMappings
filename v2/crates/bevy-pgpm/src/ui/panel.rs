@@ -72,6 +72,11 @@ pub fn spawn_control_panel(mut commands: Commands, asset_server: Res<AssetServer
 
             separator(panel);
 
+            // 画像エクスポート
+            wide_button(panel, "\u{f0c7}  Save Image", ExportButton, &font);
+
+            separator(panel);
+
             // 画像パス
             label(panel, "Image path", &font);
             panel.spawn((

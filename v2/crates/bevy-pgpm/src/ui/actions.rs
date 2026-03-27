@@ -1,7 +1,8 @@
 //! ボタンアクションシステム: UI ボタンでのユーザーインタラクションを処理。
 
 use bevy::prelude::*;
-use log::{info, warn};
+use bevy::mesh::{Indices, VertexAttributeValues};
+use log::{info, warn, error};
 
 use nalgebra::Vector2;
 use pgpm_core::mapping::MappingBridge;
@@ -9,6 +10,7 @@ use pgpm_core::model::domain::{Domain, PolygonDomain};
 use pgpm_core::model::types::{DomainBounds, MappingParams, SolverConfig};
 
 use crate::domain::rbf::compute_rbf_scale;
+use crate::rendering::export::rasterize_deformed_image;
 use crate::state::{
     AlgoParams, AlgorithmState, AppState, BasisType, DeformationInfo, DeformedImage, DragState,
     ImageInfo, ImagePathConfig, OriginalVertexPositions,
@@ -277,6 +279,99 @@ pub fn on_strategy2(
                 warn!("Strategy 2 failed: {}", msg);
                 deform_info.strategy2_status = Some(msg);
             }
+        }
+    }
+}
+
+/// システム: "Save Image" ボタンクリックを処理。
+///
+/// 変形メッシュの頂点・UV・インデックスと元テクスチャからCPUでラスタライズし、
+/// 透過背景付きのPNG画像を保存する。
+///
+/// Bevyのオフスクリーンレンダリングはアルファを保持しないため
+/// (bevyengine/bevy#18229)、CPU ソフトウェアラスタライズを使用。
+pub fn on_export(
+    query: Query<&Interaction, (Changed<Interaction>, With<ExportButton>)>,
+    state: Res<State<AppState>>,
+    algo_state: Res<AlgorithmState>,
+    meshes: Res<Assets<Mesh>>,
+    mesh_query: Query<&Mesh2d, With<DeformedImage>>,
+    image_path: Res<ImagePathConfig>,
+) {
+    for interaction in &query {
+        if *interaction != Interaction::Pressed { continue; }
+
+        if *state.get() != AppState::Deforming {
+            info!("Save Image is only available in Deforming mode");
+            continue;
+        }
+
+        if algo_state.algorithm.is_none() {
+            info!("No algorithm instance");
+            continue;
+        }
+
+        // メッシュデータ取得
+        let Ok(mesh_handle) = mesh_query.single() else {
+            warn!("No deformed mesh found");
+            continue;
+        };
+        let Some(mesh) = meshes.get(&mesh_handle.0) else {
+            warn!("Mesh asset not found");
+            continue;
+        };
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            warn!("No position attribute on mesh");
+            continue;
+        };
+        let Some(VertexAttributeValues::Float32x2(uvs)) =
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            warn!("No UV attribute on mesh");
+            continue;
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            warn!("No U32 indices on mesh");
+            continue;
+        };
+
+        // 元テクスチャをディスクから読み込み
+        // (Bevy の Assets<Image> は RENDER_WORLD のみなので CPU 側で読み直す)
+        let src_img = match image::open(&image_path.abs_path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                error!("Failed to load source image '{}': {}", image_path.abs_path, e);
+                continue;
+            }
+        };
+        let (src_w, src_h) = src_img.dimensions();
+
+        // ファイルダイアログ（ラスタライズ前にキャンセル判定）
+        let dialog = rfd::FileDialog::new()
+            .add_filter("PNG Images", &["png"])
+            .set_title("Save Deformed Image")
+            .set_file_name("deformed.png");
+
+        let Some(save_path) = dialog.save_file() else {
+            continue;
+        };
+
+        info!("Rasterizing deformed image...");
+        let output = rasterize_deformed_image(
+            positions,
+            uvs,
+            indices,
+            src_img.as_raw(),
+            src_w,
+            src_h,
+        );
+
+        match output.save(&save_path) {
+            Ok(()) => info!("Saved deformed image to {:?} ({}x{})", save_path, output.width(), output.height()),
+            Err(e) => error!("Failed to save image: {}", e),
         }
     }
 }

@@ -115,6 +115,7 @@ fn main() {
             ui::on_image_path,
             ui::on_k_max,
             ui::on_strategy2,
+            ui::on_export,
             ui::update_status_text,
             ui::update_toggle_label,
             ui::update_k_text,

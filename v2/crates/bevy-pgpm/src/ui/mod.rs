@@ -13,6 +13,7 @@ pub use panel::spawn_control_panel;
 pub use actions::{
     on_toggle_mode, on_reset, on_k_bound, on_lambda,
     on_reg_mode, on_basis_type, on_image_path, on_k_max, on_strategy2,
+    on_export,
 };
 pub use display::{
     button_visuals, update_status_text, update_toggle_label,

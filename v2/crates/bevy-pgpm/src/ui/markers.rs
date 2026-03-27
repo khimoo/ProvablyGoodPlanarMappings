@@ -53,6 +53,9 @@ pub struct KMaxMinusButton;
 #[derive(Component)]
 pub struct KMaxPlusButton;
 
+#[derive(Component)]
+pub struct ExportButton;
+
 /// 起動時に読み込まれる共有フォントハンドル。
 #[derive(Resource)]
 pub struct UiFont(pub Handle<Font>);
