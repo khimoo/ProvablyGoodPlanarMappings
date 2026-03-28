@@ -17,6 +17,14 @@ use crate::policy::DistortionPolicy;
 use log::warn;
 use nalgebra::{DMatrix, Vector2};
 
+/// Algorithm 1 の Initialization フェーズの結果（内部用）。
+/// `step()` が `StepInfo` を構築するために使用する。
+struct InitResult {
+    max_distortion: f64,
+    active_set_size: usize,
+    converged: bool,
+}
+
 /// Algorithm 1: 歪みポリシーを動的ディスパッチで保持する完全実装。
 pub struct Algorithm {
     /// 基底関数 (Table 1)
@@ -266,27 +274,40 @@ impl Algorithm {
 
     /// Algorithm 1: 1ステップを実行（Section 5）。
     ///
-    /// 擬似コードとの対応:
-    /// 1. [初回ステップのみ] phi(z), grad_phi(z) を事前計算
-    /// 2. 全 z ∈ Z で D(z) を評価
-    /// 3. Z_max（D の局所最大）を見つける
-    /// 4. D(z) > K_high となる z ∈ Z_max を Z' に追加
-    /// 5. D(z) < K_low となる z ∈ Z' を Z' から削除
-    /// 6. SOCP を求解（Eq. 18）→ c を更新
-    /// 7. d_i を更新（Eq. 27）
+    /// 論文 Algorithm 1 の3フェーズを順に実行する:
+    /// 1. Initialization: 事前計算、D(z) 評価、Z' 更新、収束判定
+    /// 2. Optimization: SOCP 求解 (Eq. 18)
+    /// 3. Postprocessing: 係数適用、フレーム更新 (Eq. 27)
     pub fn step(&mut self, target_handles: &[Vector2<f64>]) -> Result<StepInfo, AlgorithmError> {
+        let init = self.initialize(target_handles)?;
+        let coefficients = self.optimize(target_handles)?;
+        self.postprocess(coefficients);
+
+        Ok(StepInfo {
+            max_distortion: init.max_distortion,
+            active_set_size: init.active_set_size,
+            stable_set_size: self.state.stable_set.len(),
+            converged: init.converged,
+        })
+    }
+
+    /// Algorithm 1 - Initialization (Section 5):
+    /// 事前計算、D(z) 評価、Z_max 検出、アクティブ集合 Z' の更新、収束判定。
+    fn initialize(
+        &mut self,
+        target_handles: &[Vector2<f64>],
+    ) -> Result<InitResult, AlgorithmError> {
+        // Algorithm 1: "if first step then" -- phi(z), grad_phi(z) を事前計算
         self.ensure_precomputed();
 
         // ハンドル数の整合性を検証
-        {
-            let n_src = self.source_handles.len();
-            let n_tgt = target_handles.len();
-            if n_src != n_tgt {
-                return Err(AlgorithmError::InvalidInput(format!(
-                    "source_handles ({}) and target_handles ({}) count mismatch",
-                    n_src, n_tgt,
-                )));
-            }
+        let n_src = self.source_handles.len();
+        let n_tgt = target_handles.len();
+        if n_src != n_tgt {
+            return Err(AlgorithmError::InvalidInput(format!(
+                "source_handles ({}) and target_handles ({}) count mismatch",
+                n_src, n_tgt,
+            )));
         }
 
         // 2. 歪みを評価（Eq. 19-20）
@@ -311,7 +332,7 @@ impl Algorithm {
             .fold(f64::NEG_INFINITY, f64::max);
 
         // 収束を確認
-        let n_active = self.state.active_set.len();
+        let active_set_size = self.state.active_set.len();
         let changed = self.state.prev_target_handles.as_deref() != Some(target_handles);
         self.state.prev_target_handles = Some(target_handles.to_vec());
 
@@ -319,33 +340,45 @@ impl Algorithm {
             && max_distortion <= self.params.k_bound
             && self.state.active_set == prev_active_set;
 
-        // 6. SOCP を求解（Eq. 18）
-        let new_coefficients = {
-            self.state.precomputed.as_ref().ok_or_else(|| {
-                AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
-            })?;
-            solver::solve_socp(
-                &self.source_handles,
-                target_handles,
-                self.basis.as_ref(),
-                &self.state,
-                &self.params,
-                self.policy.as_ref(),
-                &self.solver_config,
-            )?
-        };
+        Ok(InitResult {
+            max_distortion,
+            active_set_size,
+            converged,
+        })
+    }
 
-        // 7. 係数とフレームを更新（Eq. 27）
-        self.state.coefficients = new_coefficients;
+    /// Algorithm 1 - Optimization (Section 5):
+    /// SOCP を求解し係数 c を求める (Eq. 18)。
+    fn optimize(
+        &self,
+        target_handles: &[Vector2<f64>],
+    ) -> Result<CoefficientMatrix, AlgorithmError> {
+        Ok(solver::solve_socp(
+            &self.source_handles,
+            target_handles,
+            self.basis.as_ref(),
+            &self.state,
+            &self.params,
+            self.policy.as_ref(),
+            &self.solver_config,
+        )?)
+    }
+
+    /// Algorithm 1 - Postprocessing (Section 5):
+    /// 係数 c を適用し、フレーム d_i を更新 (Eq. 27)。
+    fn postprocess(&mut self, coefficients: CoefficientMatrix) {
+        self.state.coefficients = coefficients;
 
         // フレーム更新のため全点で J_S を評価（Eq. 27）
+        // precomputed は initialize() で保証されている
         let j_s_values = {
-            let pre = self.state.precomputed.as_ref().ok_or_else(|| {
-                AlgorithmError::InvalidInput("Precomputed data not available (bug)".into())
-            })?;
+            let pre = self.state.precomputed.as_ref().expect(
+                "Precomputed data must be available in postprocess (ensured by initialize)",
+            );
             distortion::evaluate_j_s_all(&self.state.coefficients, pre)
         };
 
+        // Eq. 27: d_i = J_S f(x_i) / ||J_S f(x_i)||
         let eps = 1e-10;
         let indices: Vec<usize> = self
             .state
@@ -361,14 +394,6 @@ impl Algorithm {
                 self.state.frames[idx] = j_s / norm;
             }
         }
-        let stable_set_size = self.state.stable_set.len();
-
-        Ok(StepInfo {
-            max_distortion,
-            active_set_size: n_active,
-            stable_set_size,
-            converged,
-        })
     }
 
     /// 実行時にアルゴリズムパラメータを更新（K, lambda, 正則化）。
