@@ -1,5 +1,7 @@
 # Build artifacts
 /target/
+/dist-windows/
+/.cross-win-stubs/
 /data/
 /.obsidian/
 

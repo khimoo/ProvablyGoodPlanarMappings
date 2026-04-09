@@ -20,6 +20,12 @@
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
+        # Windows クロスコンパイル用ツールチェーン
+        rustToolchainWin = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [ "rust-src" ];
+          targets = [ "x86_64-pc-windows-gnu" ];
+        };
+
         # ビルドツール
         nativeBuildInputs = with pkgs; [
           pkg-config
@@ -59,6 +65,40 @@
             export WGPU_BACKEND=vulkan
 
             # Nerd Fonts を assets/fonts/ にリンク
+            mkdir -p crates/bevy-pgpm/assets/fonts
+            ln -sfn ${nerdFonts}/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf \
+              crates/bevy-pgpm/assets/fonts/FiraCodeNerdFontMono-Regular.ttf
+          '';
+        };
+
+        # Windows クロスコンパイル用 devShell
+        devShells.cross-win = let
+          mingwCC = pkgs.pkgsCross.mingwW64.stdenv.cc;
+          mingwW64 = pkgs.pkgsCross.mingwW64.windows.mingw_w64;
+        in pkgs.mkShell {
+          nativeBuildInputs = [
+            rustToolchainWin
+            mingwCC
+            pkgs.pkg-config
+          ];
+
+          buildInputs = [
+            mingwW64
+          ];
+
+          shellHook = ''
+            echo "Rust (cross-win): $(rustc --version)"
+            echo "Target: x86_64-pc-windows-gnu"
+
+            # NixOS の mingw-w64 は mcfgthread を使うため libpthread.a が存在しない。
+            # Rust の std が -l:libpthread.a をリンクするので、空のスタブを作成する。
+            STUB_DIR="$PWD/.cross-win-stubs"
+            mkdir -p "$STUB_DIR"
+            if [ ! -f "$STUB_DIR/libpthread.a" ]; then
+              ${mingwCC}/bin/x86_64-w64-mingw32-ar rcs "$STUB_DIR/libpthread.a"
+            fi
+            export RUSTFLAGS="-L native=$STUB_DIR"
+
             mkdir -p crates/bevy-pgpm/assets/fonts
             ln -sfn ${nerdFonts}/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf \
               crates/bevy-pgpm/assets/fonts/FiraCodeNerdFontMono-Regular.ttf

@@ -29,34 +29,26 @@ use bevy_pgpm::{
     ui,
 };
 
-/// このクレート自身の assets/ ディレクトリの絶対パスを返す。
+/// assets/ ディレクトリの絶対パスを返す。
 ///
-/// 用途:
-/// - Bevy の `AssetPlugin` ルート（シェーダ、フォント）
-/// - デフォルト画像の絶対パス解決
-fn crate_asset_dir() -> String {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR not set (run via `cargo run`)");
-    let dir = std::path::PathBuf::from(&manifest).join("assets");
-    assert!(
-        dir.is_dir(),
-        "Assets directory not found: {}\n\
-         Expected crates/bevy-pgpm/assets/ to exist.",
-        dir.display(),
-    );
-    dir.to_string_lossy().into_owned()
-}
-
-/// デフォルトテクスチャ画像の絶対パスを解決。
-fn default_image_path(asset_dir: &str) -> String {
-    let p = std::path::PathBuf::from(asset_dir).join("texture.png");
-    assert!(
-        p.exists(),
-        "Default image not found: {}\n\
-         Place a texture.png in the crates/bevy-pgpm/assets/ directory.",
-        p.display(),
-    );
-    p.to_string_lossy().into_owned()
+/// 解決順:
+/// 1. `CARGO_MANIFEST_DIR/assets/` — `cargo run` 経由
+/// 2. 実行ファイルと同階層の `assets/` — 配布バイナリ
+fn resolve_asset_dir() -> std::path::PathBuf {
+    std::env::var("CARGO_MANIFEST_DIR")
+        .ok()
+        .map(|m| std::path::PathBuf::from(m).join("assets"))
+        .filter(|d: &std::path::PathBuf| d.is_dir())
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|p| p.join("assets")))
+                .filter(|d: &std::path::PathBuf| d.is_dir())
+        })
+        .expect(
+            "Assets directory not found.\n\
+             Place an assets/ directory next to the executable, or run via `cargo run`.",
+        )
 }
 
 /// 変形モードでのみ実行されるシステム。
@@ -64,9 +56,9 @@ fn default_image_path(asset_dir: &str) -> String {
 struct DeformingSet;
 
 fn main() {
-    let asset_dir = crate_asset_dir();
-    let default_image = default_image_path(&asset_dir);
-    info!("Asset root: {}", asset_dir);
+    let asset_dir = resolve_asset_dir();
+    let default_image = asset_dir.join("texture.png");
+    info!("Asset root: {}", asset_dir.display());
 
     App::new()
         .add_plugins(DefaultPlugins
@@ -79,7 +71,7 @@ fn main() {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: asset_dir,
+                file_path: asset_dir.to_string_lossy().into_owned(),
                 ..default()
             })
         )
@@ -88,7 +80,7 @@ fn main() {
         .init_resource::<DragState>()
         .init_resource::<DeformationInfo>()
         .init_resource::<AlgoParams>()
-        .insert_resource(ImagePathConfig::new(default_image))
+        .insert_resource(ImagePathConfig::new(default_image.to_string_lossy()))
         .configure_sets(Update, DeformingSet.run_if(in_state(AppState::Deforming)))
         .add_systems(Startup, (setup_camera, ui::spawn_control_panel))
         .add_systems(Update, (
