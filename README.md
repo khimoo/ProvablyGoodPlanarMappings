@@ -1,136 +1,195 @@
-# Provably Good Planar Mappings
+# プログラム概要
 
-サマーインターンでRoiらによるリアルタイム画像変形のアルゴリズムを実装しました.
+[Poranne & Lipman (2014) Provably Good Planar Mappings](https://doi.org/10.1145/2601097.2601123) をRustで実装しました。
 
-論文： https://scholar.google.com/citations?view_op=view_citation&hl=en&user=xC6XLaYAAAAJ&citation_for_view=xC6XLaYAAAAJ:UeHWp8X0CEIC
+![デモ](screenshots/demo.gif)
+<!-- TODO: screenshots/ にデモ GIF を配置 -->
 
-[v1](./v1/README.md)は2週間インターンで実装したものをそのまま公開してます.
+Provably Good Planar Mapingsは画像変形のアルゴリズムで、特に非凸な空間の変形に焦点を当てています。非凸領域上に離散的に存在する計算点で最適化を実行するだけで、非凸領域全体で画像の裏返りが発生しないことを数学的に保証しています。
+このアルゴリズムを使用し、背景透過png画像をマウスで変形させ新たにpng画像として保存するツールとして実装しました。
 
-[v2](./v2/README.md)はv1のコードをより良いものに修正しつつインターフェースも実装したものです.
+## 実行方法
 
-それぞれ以下のコマンドで実行してください。(Nixは各自インストールしてください。)
-```Bash
-$ nix run github:khimoo/ProvablyGoodPlanarMappings?dir=v1
-$ nix run github:khimoo/ProvablyGoodPlanarMappings?dir=v2
+[Nix](https://nixos.org/download/) をインストールし、Flakesを有効化してください。
+
+Flakes の有効化:
+```bash
+# ~/.config/nix/nix.conf に追記
+mkdir -p ~/.config/nix
+echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
 
-# アルゴリズムについて
+nix runでプログラムが起動します。
+```bash
+nix run
+```
 
-画像をマウスを使ってぐにゃぐにゃ動かすためのアルゴリズムです。\
-この手法の優れている部分は、メッシュの裏返りが発生しないことを数学的に保証しつつ、どの程度の歪みまで許容するのかなどをある程度自由に設定できる点です。しかも、それらの式を工夫することで最終的に凸最適化問題に落とし込んでおり、既存のソルバーを使用することで簡単にリアルタイム性を保証することができます。
+## 操作方法
+
+## 操作の流れ
+
+1. **画像読み込み**: 右パネルの「Load Image」で背景透過PNG等を読み込む(デフォルトの画像でも大丈夫)
+2. **ハンドル配置**: 画像上を左クリックしてハンドル（制御点）を配置する
+3. **変形開始**: 「Start Deforming」を押すと変形モードに切り替わる
+4. **ドラッグ変形**: ハンドルを左ドラッグして画像を変形する
+5. **保存**: 「Save Image」で変形後の画像をPNGとして保存する
+
+## パネル操作
+
+各パラメータの意味は後述の論文概要を参照してください。
+
+| 操作                      | 説明                                              |
+| ----------------------- | ----------------------------------------------- |
+| **K ±**                 | 歪み上界 K を調整（デフォルト 3.0、±0.5刻み）                    |
+| **λ ÷10 / ×10**         | 正則化係数を対数スケールで調整                                 |
+| **Reg. Mode**           | 正則化タイプを切替（ARAP / Biharmonic / Mixed）            |
+| **Basis Function**      | 基底関数を選択（Setup時のみ。Gaussian / ShapeAwareGaussian） |
+| **Refine (Strategy 2)** | 後述の論文概要セクションを参照してください                           |
+| **Reset**               | ハンドルを全消去して Setup モードに戻る                         |
+
+# 実装で工夫した点
+
+実装の際工夫した点は、論文で提示される抽象的に定義されたアルゴリズムや、その定義に必要な諸概念の定義をなるべくそのままコーディングしたことです。traitと構造体を適切に使いわけることで、論文が唯一無二の情報源になることを目指しました。
+
+## 論文のアルゴリズムと実装の方針
+
+<!-- TODO: Algorithm 1 のスクショを配置 -->
+<!-- ![Algorithm 1](screenshots/paper_algorithm1.png) -->
+<!-- *Figure from Poranne & Lipman, "Provably Good Planar Mappings," ACM Trans. Graph. (SIGGRAPH), 2014. (c) ACM.* -->
+
+制御点をマウスによって操作するとき、毎stepで画像のAlgorithm1が実行されます。
+また、Algorithm1を実行するためには、条件を満たした基底関数や歪み尺度をプログラマが与える必要があります。
+そのため、基底関数や歪み尺度などをtraitによりモデル化した上で、Algorithm1の構造体はそれらの具象実装を注入する設計が最も論文に沿った実装だと判断しました。
+
+```rust
+// 基底関数 (Table 1) — Gaussian, ShapeAwareGaussian 等が実装
+trait BasisFunction {
+    fn evaluate(&self, x: Vector2) -> DVector;              // Eq. 3: f_i(x)
+    fn gradient(&self, x: Vector2) -> (DVector, DVector);   // ∇f_i(x), ヤコビアン計算用 (Eq. 19-20)
+    fn gradient_modulus(&self, t: f64) -> f64;              // Table 1: ω_{∇F}(t), 歪み上界の理論的保証 (Eq. 9)
+    fn identity_coefficients(&self) -> CoefficientMatrix;   // f(x) = x となる係数, Algorithm 1 の初期解
+    ...
+}
+```
+
+```rust
+// 歪みポリシー (Section 3 "Distortion") — IsometricPolicy, ConformalPolicy が実装
+trait DistortionPolicy {
+    fn distortion_value(&self, sigma_max: f64, sigma_min: f64) -> f64;  // 歪み定義: iso=max{Σ,1/σ}, conf=Σ/σ
+    fn append_constraints(&self, ...);  // SOCP歪み制約: iso (Eq. 23, 26) vs conf (Eq. 28)
+    ...
+}
+```
+
+```rust
+// Algorithm 1 (Section 5) — trait の具象実装を注入される
+struct Algorithm {
+    basis: Box<dyn BasisFunction>,       // 差し替え可能な基底関数
+    policy: Box<dyn DistortionPolicy>,   // 差し替え可能な歪みポリシー
+    domain: Option<Box<dyn Domain>>,     // 差し替え可能なドメイン (Section 4)
+    state: AlgorithmState,               // 内部状態 (係数 c, アクティブ集合 Z', フレーム d_i)
+    params: MappingParams,               // パラメータ (K, λ, 正則化タイプ)
+    ...
+}
+impl Algorithm {...}
+```
+
+また、Algorithm1を実行するメソッドではinitialize, optimize, postprocessメソッドを実行することで、論文のAlgorithm1の表記方法と対応を取りました。手続き的凝集となりますが、論文に沿うという実装方針を優先した結果です。
+
+``` Rust
+impl Algorithm {
+    // Algorithm 1 の1ステップを実行
+    fn step(&mut self, target_handles: &[Vector2]) -> Result<StepInfo, AlgorithmError> {
+        let init = self.initialize(target_handles)?;        // D(z) 評価, Z' 更新
+        let coefficients = self.optimize(target_handles)?;  // SOCP 求解 (Eq. 18)
+        self.postprocess(coefficients);                     // 係数適用, フレーム d_i 更新 (Eq. 27)
+        Ok(StepInfo { max_distortion: init.max_distortion, ... })
+    }
+}
+```
 
 
+# 論文概要
 
-これ以降はまだ書きかけです。AIに書かせた内容をまだ確認してない。
+### 写像の構成 (Eq. 3)
 
-## 問題設定
+画像の変形は写像 f: Ω → ℝ²（Ω ⊂ ℝ²）として表現されます。この写像は基底関数 f_i: Ω → ℝ の線形結合で構成されます（Table 1）。
 
-ユーザーが平面上の関心領域 $\Omega \subset \mathbb{R}^2$（画像や2Dキャラクターなど）を、ハンドルを動かすことで変形させたいとします。理想的な変形写像 $f : \Omega \to \mathbb{R}^2$ は以下の最適化問題の解として定式化されます：
+```
+f(x) = Σ c_i f_i(x)    (Eq. 3)
+```
 
-$$\min_f E_{\text{pos}}(f) + \lambda E_{\text{reg}}(f) \quad \text{s.t.} \quad D(f; x) \le K_{\max}, \quad \forall x \in \Omega$$
+位置拘束エネルギー（Eq. 29-30）と正則化エネルギー（Eq. 31-33）を目的関数とし、歪みの上界制約を課した最適化問題を解くというのが主な方針なのですが、数式を工夫することで最適化問題がSOCPに帰着され（Eq. 18）、リアルタイムでインタラクティブな画像変形が可能になります。
 
-ここで $E_{\text{pos}}$ はハンドルの位置拘束エネルギー、$E_{\text{reg}}$ は正則化項、$D(f; x)$ は点 $x$ における歪み指標です。しかしこの問題は無限次元かつ無限個の制約を持つため、直接解くことはできません。
+### 最適化問題の構造 (Eq. 18, 29-33)
 
-## 基底関数による写像の構成
+Algorithm 1 は各ステップで以下の最適化問題を解きます。
 
-写像 $f$ を有限個の基底関数 $\{f_i\}_{i=1}^{n}$ の線形結合で表現します：
+```
+min_c  E_pos(f) + λ E_reg(f)
+s.t.   D(f; z) ≤ K   ∀z ∈ Z'
+       f = Σ c_i f_i
+```
 
-$$f(x) = \sum_{i=1}^n c_i f_i(x)$$
+- **E_pos** (Eq. 29-30): 位置拘束エネルギー。制御点 p_l での写像値 f(p_l) が目標位置 q_l に近いことを要求する
+- **E_reg**: 正則化エネルギー。変形の滑らかさを制御する
+  - **Biharmonic** (Eq. 31): ∬_Ω ‖H_u‖_F² + ‖H_v‖_F² dA を最小化。高い滑らかさ（C² 的）を促進する
+  - **ARAP** (Eq. 32-33): Σ ‖J_f(r_s) - Q(r_s)‖_F² を最小化。局所的に剛体に近い変形を得る
+- **λ**: 正則化の重み。大きいほど滑らかさを優先し、小さいほど位置拘束を優先する
+- **K**: 歪みの上界。K = 1 が最も厳しく（無歪み）、大きくするほど歪みを許容する
+- **D**: 歪み関数（前節参照）
 
-これにより問題は有限次元の係数 $c$ に対する最適化に帰着します。基底関数には B-Spline、Thin-Plate Spline (TPS)、Gaussian などの滑らかな関数が使えます。基底関数自体が滑らかなので、生成される写像も自動的に滑らかになります（メッシュベース手法との大きな違い）。
+ヤコビアンの特異値分解とフレーム d_i の導入により、この問題は SOCP（二次錐計画問題）に帰着され（Eq. 18）、凸最適化ソルバーで係数 c を求解できます。
 
-## 歪みの定義と裏返りの条件
+本プログラムでは K（`MappingParams::k_bound`）、λ（`MappingParams::lambda_reg`）、正則化タイプ（`RegularizationType`）を UI パネルから調整できます。
 
-写像 $f$ の点 $x$ におけるヤコビ行列 $J_f(x)$ の最大・最小特異値をそれぞれ $\Sigma(x)$, $\sigma(x)$ とすると、歪み指標は以下のように定義されます：
+### 歪み上界の理論的保証と Strategy (Section 4, Eq. 9-15)
 
-- **等長歪み（isometric distortion）**: $D_{\text{iso}}(x) = \max\{\Sigma(x), 1/\sigma(x)\}$
-  - 長さの保存度合いを測る。$D_{\text{iso}} = 1$ のとき剛体変換に近い
-- **等角歪み（conformal distortion）**: $D_{\text{conf}}(x) = \Sigma(x) / \sigma(x)$
-  - 角度の保存度合いを測る。$D_{\text{conf}} = 1$ のとき相似変換に近い
+Algorithm 1 は離散的な計算点 z ∈ Z' 上でのみ D(z) ≤ K を制約します。しかし局所単射性の保証には、計算点だけでなく**全域** x ∈ Ω で σ(x) > 0（det J_f > 0）が成り立つ必要があります。
 
-**裏返りが発生しない条件**は $\sigma(x) > 0$（すべての $x \in \Omega$ について）です。$\sigma(x) > 0$ ならば $\det J_f(x) \neq 0$ であり、連続性から符号が変わることはないため、局所的な単射性が保証されます。
+論文はこのギャップを、基底関数の勾配モジュラス ω_{∇F}(t)（Table 1）と計算点の充填距離 h（Eq. 5: ドメイン内の任意の点から最近の計算点までの最大距離）を用いて埋めます。特異値関数 Σ(x), σ(x) が ω-連続であることから（Lemma 2, Eq. 9）、離散点での制約が全域での歪み上界 K_max に変換されます（Eq. 11/13）。
 
-## なぜ裏返りが発生しない歪み上界を自動で求められるのか
+論文 Section 4 "Controlling the distortion of f" では、この理論に基づき歪みを制御する3つの戦略が提示されています（"one can control the distortion of the map f in one of three strategies"の直後の箇条書きの部分）。以下ではこれらを Strategy 1, 2, 3 と呼びます。
 
-本手法の核心は、**コロケーション点（配置点）上での有限個の制約から、領域全体の歪みと単射性を数学的に保証できる**ことにあります。そのメカニズムは以下のとおりです。
+本プログラムでは Strategy 2 のみ実装しており（`crates/pgpm-core/src/algorithm/strategy.rs`）、論文の実験（Section 6）と同じ運用を採用しています。インタラクション中は固定解像度（200² グリッド）で Algorithm 1 を実行し、変形結果に満足した後に UI パネルの「Refine (Strategy 2)」を手動で実行することで、全域での歪み上界の理論的保証を得ます。Strategy 1, 3 は未実装です。
+#### Strategy 1: 検証 (Eq. 11/13)
 
-### 1. 連続の度合い（modulus of continuity）の利用
+Algorithm 1 を実行した後、現在の充填距離 h と勾配モジュラス ω から、全域での歪み上界 K_max を事後的に計算します。Isometric の場合 K_max = max{K + ω(h), 1/(1/K − ω(h))}（Eq. 11）で、K_max が有限であれば全域で σ(x) > 0 が保証されます。計算点の追加は行わず、現在の結果がどの程度の保証を持つかを確認するだけです。
 
-特異値関数 $\Sigma(x)$, $\sigma(x)$ が**ω-連続**であること、すなわち
+#### Strategy 2: 精緻化 (Eq. 14/15)
 
-$$|\sigma(x) - \sigma(z)| \le \omega(\|x - z\|)$$
+目標の K_max を達成するために必要な充填距離 h を逆算し（Eq. 14/15）、その h を満たすように計算点グリッドの解像度を上げてから Algorithm 1 を再実行します。計算コストは増加しますが、より厳しい歪み上界を全域で保証できます。
 
-が成り立つことを示します。ここで $\omega$ は連続かつ単調増加で $\omega(0) = 0$ を満たす関数です。
+#### Strategy 3: 反復 (Strategy 1 + 2)
 
-### 2. 基底関数の勾配からの ω の計算
+Strategy 1 で検証し、不十分であれば Strategy 2 で精緻化するという手順を交互に繰り返します。
 
-Lemma 2 により、$\nabla u$ と $\nabla v$ が $\omega$-連続ならば特異値関数は $2\omega$-連続です。さらに写像の係数 $c$ と基底関数の勾配の連続度 $\omega_{\nabla \mathcal{F}}$ から、具体的に
+# 設計概要
+## アーキテクチャ
 
-$$\omega = 2\, |||c|||\, \omega_{\nabla \mathcal{F}}$$
+```
+pgpm-core (論文アルゴリズム)          bevy-pgpm (インタラクティブUI)
+┌─────────────────────────┐         ┌──────────────────────┐
+│ BasisFunction (trait)    │         │ Bevy App             │
+│ DistortionPolicy (trait) │◄────────│   input / rendering  │
+│ Domain (trait)           │  pub API│   state / ui         │
+│ Algorithm (struct)       │         │                      │
+│ strategy (自由関数)       │         │                      │
+└─────────────────────────┘         └──────────────────────┘
+```
 
-と計算できます。$\omega_{\nabla \mathcal{F}}$ は基底関数ごとに解析的に求まります：
+### pgpm-core
+バックエンドで、論文のAlgorithm1はほぼ全てこちら側で実装されています。
 
-| 基底関数 | $\omega_{\nabla \mathcal{F}}(t)$ |
-|----------|----------------------------------|
-| B-Spline | $\frac{4}{3\Delta^2} t$（$\Delta$ はグリッド間隔） |
-| TPS | $t(5.8 + 5|\ln t|)$（局所的） |
-| Gaussian | $t / s^2$（$s$ はスケールパラメータ） |
+`algorithm/mod.rs` ファイルで `Algorithm` 構造体が実装されており、`step()` メソッドが Section 5 の Algorithm 1 と対応しています。
 
-### 3. 充填距離を介した全域保証
+### bevy-pgpm
+Bevyで作成したフロントエンドです。
 
-コロケーション点集合 $Z$ の**充填距離** $h = \max_{x \in \Omega} \min_{z \in Z} \|x - z\|$（領域内の任意の点からコロケーション点への最大距離）を用いると、Lemma 1 により：
+主なファイルは以下となります。
+`lifecycle.rs`ファイルで画像読み込みと毎フレームの `Algorithm::step()` 呼び出しを行なっています。
 
-$$\sigma(x) \ge \sigma(z) - \omega(h), \qquad \Sigma(x) \le \Sigma(z) + \omega(h)$$
+# 参考資料
 
-が成り立ちます。つまり、コロケーション点上で $D_{\text{iso}}(z) \le K$（すなわち $\Sigma(z) \le K$ かつ $\sigma(z) \ge 1/K$）を強制すれば、**領域内の任意の点**で
-
-$$D_{\text{iso}}(x) \le \max\left\{ K + \omega(h),\; \frac{1}{1/K - \omega(h)} \right\}$$
-
-が保証されます。特に $1/K > \omega(h)$ が成り立てば $\sigma(x) > 0$ となり、**裏返りが発生しないことが証明**されます。
-
-### 4. 歪み制御の3つの戦略
-
-上記の関係式から、以下の3通りの使い方ができます：
-
-1. **コロケーション点 $Z$ と制約 $K$ が与えられたとき**：全域の最大歪み $K_{\max}$ を計算する
-2. **$K$ と所望の $K_{\max}$ が与えられたとき**：必要な充填距離 $h$（＝コロケーション点の密度）を逆算する
-3. **$Z$ と所望の $K_{\max}$ が与えられたとき**：コロケーション点上で強制すべき $K$ を逆算する
-
-このように、基底関数の性質と係数から $\omega$ を計算し、コロケーション点の充填距離 $h$ との関係式を通じて、**裏返りを防ぐための適切な歪み上界が自動的かつ理論的に導出**されます。
-
-## なぜリアルタイム性が維持できるのか
-
-### 1. SOCP（二次錐計画法）による凸最適化
-
-ヤコビ行列 $J_f(x)$ は係数 $c$ に対して**線形**です。この性質を利用し、歪み制約を **Second-Order Cone Program (SOCP)** として定式化します。
-
-具体的には、$J_f$ の類似部分 $J_S f$ と反類似部分 $J_A f$ に分解し、特異値の制約を凸な錐制約に変換します。非凸になる部分（$\|J_S f\| \ge r$ の形の制約）は、**フレーム** $d_i$（単位ベクトル）を導入して半平面制約 $J_S f \cdot d_i \ge r$ に凸化します。フレームは各最適化ステップ後に $d_i = J_S f / \|J_S f\|$ と更新され、次のステップでの実行可能領域を最大化します。
-
-SOCP は内点法で効率的に解くことができ、制約数・変数数に対してほぼ線形の計算時間で解が得られます。
-
-### 2. アクティブセット法による制約の削減
-
-すべてのコロケーション点（例：$200^2 = 40000$ 点）に対して同時に制約を課すのは計算コストが高すぎます。実際には、**大部分の点では歪みが十分小さく、制約が非活性**です。
-
-本手法では**アクティブセット法**を採用し、以下のように動的に制約を管理します：
-
-- コロケーション点の歪みを毎ステップ評価し、**局所最大値**を検出
-- 歪みが閾値 $K_{\text{high}}$ を超えた点のみをアクティブセットに追加
-- 歪みが $K_{\text{low}}$ を下回った点はアクティブセットから除去
-- 安定化のため、少数の等間隔な点は常にアクティブに保持
-
-この結果、**実際にアクティブになるコロケーション点は全体のごく一部**（典型的には数十〜数百点）であり、最適化問題のサイズが大幅に削減されます。すべての点が同時にアクティブになるのは、歪みが全域で一様に閾値を超えるという極めて稀な場合のみです。
-
-### 3. ソフト位置拘束による実行可能性の保証
-
-位置拘束をハード制約にすると、歪み上界との矛盾で実行不可能になる場合があります（例：2つのハンドルを $K$ 倍以上引き離した場合）。本手法では位置拘束を**ソフト制約**（エネルギー最小化）として扱うことで、常に実行可能な解が存在することを保証し、インタラクションの途切れを防ぎます。
-
-### まとめ
-
-| 課題 | 本手法の解決策 |
-|------|---------------|
-| 滑らかさ | メッシュレスな滑らかな基底関数を使用 |
-| 裏返り防止の保証 | 連続の度合い $\omega$ と充填距離 $h$ の理論的関係式により全域で $\sigma(x) > 0$ を保証 |
-| 歪み上界の自動決定 | $\omega$ を基底関数の解析的性質から計算し、3つの戦略で $K$ と $h$ を相互に導出 |
-| リアルタイム性 | SOCP による凸最適化 ＋ アクティブセット法で制約数を大幅に削減 |
-| 操作の安定性 | ソフト位置拘束 ＋ フレームの逐次更新による実行可能性の維持 |
+- R. Poranne and Y. Lipman, "Provably Good Planar Mappings," *ACM Transactions on Graphics (SIGGRAPH)*, 2014.
+  - DOI: [10.1145/2601097.2601123](https://doi.org/10.1145/2601097.2601123)
