@@ -410,7 +410,7 @@ impl Algorithm {
             .state
             .precomputed
             .as_ref()
-            .map_or(false, |p| p.biharmonic_matrix.is_some());
+            .is_some_and(|p| p.biharmonic_matrix.is_some());
 
         if needs_bh && !has_bh {
             ensure_biharmonic_matrix_inner(

@@ -128,12 +128,12 @@ fn main() {
 ///     エンティティなし）で IsDefaultUiCamera 経由で UI オーバーレイのみをレンダリング。
 fn setup_camera(mut commands: Commands) {
     // シーンカメラ: デフォルトレンダーレイヤー0、ビューポートは setup_camera_viewport で設定。
-    commands.spawn((Camera2d::default(), MainCamera));
+    commands.spawn((Camera2d, MainCamera));
 
     // UIカメラ: レンダーレイヤー1（空）で Mesh2d の二重レンダリングを防止。
     // IsDefaultUiCamera は全てのUIノードをこのカメラに向ける。
     commands.spawn((
-        Camera2d::default(),
+        Camera2d,
         Camera {
             order: 1,
             clear_color: ClearColorConfig::None,

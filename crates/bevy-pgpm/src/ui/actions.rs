@@ -75,7 +75,7 @@ pub fn on_reset(
         next_state.set(AppState::Setup);
 
         // メッシュ頂点位置を元の（変形前）位置にリセット
-        if let (Some(ref orig), Ok(mesh_handle)) = (original_positions.as_ref(), mesh_query.single()) {
+        if let (Some(orig), Ok(mesh_handle)) = (original_positions.as_ref(), mesh_query.single()) {
             if let Some(mesh) = meshes.get_mut(&mesh_handle.0) {
                 mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, orig.world_positions.clone());
             }

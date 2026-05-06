@@ -19,10 +19,7 @@ use nalgebra::Vector2;
 ///
 /// **重要**: fold-over 予防、σ チェック、サイズ制限なし。
 /// 論文は局所最大フィルタで十分としている。
-pub fn update_active_set(
-    state: &mut AlgorithmState,
-    distortions: &[f64],
-) {
+pub fn update_active_set(state: &mut AlgorithmState, distortions: &[f64]) {
     // ステップ1: グリッド上の局所最大を見つける
     let local_maxima = find_local_maxima(distortions, state.grid_width, state.grid_height);
 
@@ -30,16 +27,19 @@ pub fn update_active_set(
     // 「D(z) > K_high となる各 z ∈ Z_max を Z' に挿入」
     // 論文 Section 4: ドメイン内の点のみが制約される。
     for &idx in &local_maxima {
-        if distortions[idx] > state.k_high && state.domain_mask[idx] {
-            if !state.active_set.contains(&idx) {
-                state.active_set.push(idx);
-            }
+        if distortions[idx] > state.k_high
+            && state.domain_mask[idx]
+            && !state.active_set.contains(&idx)
+        {
+            state.active_set.push(idx);
         }
     }
 
     // ステップ3: K_low 未満の点を削除
     // 「D(z) < K_low となる各 z ∈ Z' を Z' から削除」
-    state.active_set.retain(|&idx| distortions[idx] >= state.k_low);
+    state
+        .active_set
+        .retain(|&idx| distortions[idx] >= state.k_low);
 }
 
 /// 矩形グリッド上の局所最大を検出（8近傍比較）。
@@ -49,11 +49,7 @@ pub fn update_active_set(
 ///
 /// 点は、その歪みが全近傍（グリッド上で最大8つ）より
 /// 厳密に大きい場合に局所最大となる。
-fn find_local_maxima(
-    distortions: &[f64],
-    grid_width: usize,
-    grid_height: usize,
-) -> Vec<usize> {
+fn find_local_maxima(distortions: &[f64], grid_width: usize, grid_height: usize) -> Vec<usize> {
     let mut maxima = Vec::new();
 
     for row in 0..grid_height {
@@ -71,11 +67,7 @@ fn find_local_maxima(
                     }
                     let nr = row as i32 + dr;
                     let nc = col as i32 + dc;
-                    if nr >= 0
-                        && nr < grid_height as i32
-                        && nc >= 0
-                        && nc < grid_width as i32
-                    {
+                    if nr >= 0 && nr < grid_height as i32 && nc >= 0 && nc < grid_width as i32 {
                         let nidx = nr as usize * grid_width + nc as usize;
                         if distortions[nidx] >= val {
                             is_max = false;
@@ -141,7 +133,8 @@ pub fn initialize_stable_set(
         }
 
         // 最小距離が最大となる候補を選択
-        let best = candidates.iter()
+        let best = candidates
+            .iter()
             .copied()
             .filter(|i| !selected.contains(i))
             .max_by(|&a, &b| min_dists[a].total_cmp(&min_dists[b]))
@@ -275,9 +268,7 @@ mod tests {
     #[test]
     fn test_fps_selects_spread_points() {
         // 点の列、FPSは両端と中央を選ぶべき
-        let points: Vec<Vector2<f64>> = (0..11)
-            .map(|i| Vector2::new(i as f64, 0.0))
-            .collect();
+        let points: Vec<Vector2<f64>> = (0..11).map(|i| Vector2::new(i as f64, 0.0)).collect();
         let mask = vec![true; 11];
 
         let selected = initialize_stable_set(&points, 3, &mask);
@@ -303,8 +294,10 @@ mod tests {
 
         update_active_set(&mut state, &distortions);
         // 中央 (idx=4) は局所最大で D=5.0 > K_high だが domain_mask[4]=false
-        assert!(!state.active_set.contains(&4),
-            "Exterior point should not be added to active set");
+        assert!(
+            !state.active_set.contains(&4),
+            "Exterior point should not be added to active set"
+        );
     }
 
     #[test]
@@ -322,7 +315,9 @@ mod tests {
         let selected = initialize_stable_set(&points, 3, &mask);
         assert_eq!(selected.len(), 3);
         // 点2は選択されないべき
-        assert!(!selected.contains(&2),
-            "Exterior point should not be in stable set");
+        assert!(
+            !selected.contains(&2),
+            "Exterior point should not be in stable set"
+        );
     }
 }

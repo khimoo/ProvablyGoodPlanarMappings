@@ -5,7 +5,7 @@ use nalgebra::Vector2;
 use pgpm_core::algorithm::Algorithm;
 
 /// コアアルゴリズム状態、ソルバーとレンダリングシステムで使用。
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct AlgorithmState {
     /// pgpm-core の写像インスタンス。ファイナライズ時に作成。
     pub algorithm: Option<Algorithm>,
@@ -15,17 +15,6 @@ pub struct AlgorithmState {
     pub target_handles: Vec<Vector2<f64>>,
     /// アルゴリズムがステップを実行する必要があるか（ターゲットが変更された）。
     pub needs_solve: bool,
-}
-
-impl Default for AlgorithmState {
-    fn default() -> Self {
-        Self {
-            algorithm: None,
-            source_handles: Vec::new(),
-            target_handles: Vec::new(),
-            needs_solve: false,
-        }
-    }
 }
 
 impl AlgorithmState {
