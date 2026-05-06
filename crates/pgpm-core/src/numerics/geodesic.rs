@@ -11,8 +11,8 @@
 
 use crate::model::types::DomainBounds;
 use nalgebra::Vector2;
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// 単一ソースからFMMで計算された測地距離場。
 pub struct GeodesicField {
@@ -50,17 +50,24 @@ struct FmmEntry {
 }
 
 impl PartialEq for FmmEntry {
-    fn eq(&self, other: &Self) -> bool { self.idx == other.idx }
+    fn eq(&self, other: &Self) -> bool {
+        self.idx == other.idx
+    }
 }
 impl Eq for FmmEntry {}
 
 impl PartialOrd for FmmEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for FmmEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // 最小ヒープのための逆順（BinaryHeap はデフォルトで最大ヒープ）
-        other.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
+        other
+            .dist
+            .partial_cmp(&self.dist)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -148,14 +155,23 @@ impl GeodesicField {
                 }
 
                 let new_dist = solve_eikonal_2d(
-                    &distances, &states, nr as usize, nc as usize,
-                    width, height, dx, dy,
+                    &distances,
+                    &states,
+                    nr as usize,
+                    nc as usize,
+                    width,
+                    height,
+                    dx,
+                    dy,
                 );
 
                 if new_dist < distances[nidx] {
                     distances[nidx] = new_dist;
                     states[nidx] = CellState::Narrow;
-                    heap.push(FmmEntry { dist: new_dist, idx: nidx });
+                    heap.push(FmmEntry {
+                        dist: new_dist,
+                        idx: nidx,
+                    });
                 }
             }
         }
@@ -326,12 +342,24 @@ fn solve_eikonal_2d(
     let tx = {
         let left = if col > 0 {
             let i = row * width + col - 1;
-            if states[i] == CellState::Frozen { distances[i] } else { f64::INFINITY }
-        } else { f64::INFINITY };
+            if states[i] == CellState::Frozen {
+                distances[i]
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            f64::INFINITY
+        };
         let right = if col + 1 < width {
             let i = row * width + col + 1;
-            if states[i] == CellState::Frozen { distances[i] } else { f64::INFINITY }
-        } else { f64::INFINITY };
+            if states[i] == CellState::Frozen {
+                distances[i]
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            f64::INFINITY
+        };
         left.min(right)
     };
 
@@ -339,12 +367,24 @@ fn solve_eikonal_2d(
     let ty = {
         let up = if row > 0 {
             let i = (row - 1) * width + col;
-            if states[i] == CellState::Frozen { distances[i] } else { f64::INFINITY }
-        } else { f64::INFINITY };
+            if states[i] == CellState::Frozen {
+                distances[i]
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            f64::INFINITY
+        };
         let down = if row + 1 < height {
             let i = (row + 1) * width + col;
-            if states[i] == CellState::Frozen { distances[i] } else { f64::INFINITY }
-        } else { f64::INFINITY };
+            if states[i] == CellState::Frozen {
+                distances[i]
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            f64::INFINITY
+        };
         up.min(down)
     };
 
@@ -406,8 +446,7 @@ pub fn build_domain_mask(
         for col in 0..width {
             let x = bounds.x_min + col as f64 * dx;
             let y = bounds.y_min + row as f64 * dy;
-            mask[row * width + col] =
-                point_in_polygon_f64(x, y, polygon)
+            mask[row * width + col] = point_in_polygon_f64(x, y, polygon)
                 || point_near_polygon_edge(x, y, polygon, margin);
         }
     }
@@ -479,8 +518,10 @@ mod tests {
     fn test_fmm_open_domain() {
         // 単純な正方形ドメイン、障害物なし
         let bounds = DomainBounds {
-            x_min: 0.0, x_max: 1.0,
-            y_min: 0.0, y_max: 1.0,
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
         };
         let w = 21;
         let h = 21;
@@ -495,16 +536,22 @@ mod tests {
 
         // 角 (0,0) での距離は ~sqrt(0.5) ≈ 0.707 であるべき
         let corner_dist = field.distance_at_index(0);
-        assert!((corner_dist - 0.5_f64.sqrt()).abs() < 0.1,
-            "Corner distance: {}, expected ~{}", corner_dist, 0.5_f64.sqrt());
+        assert!(
+            (corner_dist - 0.5_f64.sqrt()).abs() < 0.1,
+            "Corner distance: {}, expected ~{}",
+            corner_dist,
+            0.5_f64.sqrt()
+        );
     }
 
     #[test]
     fn test_fmm_with_wall() {
         // 迂回を強いる壁のあるドメイン
         let bounds = DomainBounds {
-            x_min: 0.0, x_max: 4.0,
-            y_min: 0.0, y_max: 4.0,
+            x_min: 0.0,
+            x_max: 4.0,
+            y_min: 0.0,
+            y_max: 4.0,
         };
         let w = 41;
         let h = 41;
@@ -512,7 +559,8 @@ mod tests {
 
         // x=2 に y=0 から y=3 までの壁を作成（y=3..4 にギャップを残す）
         let wall_col = 20; // x = 2.0
-        for row in 0..31 { // y = 0.0 から 3.0
+        for row in 0..31 {
+            // y = 0.0 から 3.0
             mask[row * w + wall_col] = false;
         }
 
@@ -526,7 +574,10 @@ mod tests {
         let geodesic_dist = field.distance_at_index(target_row * w + target_col);
 
         // 測地距離はユークリッド距離より大幅に大きいはず
-        assert!(geodesic_dist > 2.5,
-            "Geodesic distance {} should be > 2.5 (Euclidean = 2.0)", geodesic_dist);
+        assert!(
+            geodesic_dist > 2.5,
+            "Geodesic distance {} should be > 2.5 (Euclidean = 2.0)",
+            geodesic_dist
+        );
     }
 }

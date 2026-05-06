@@ -14,8 +14,8 @@
 //! 3. K 上限、正則化タイプ、lambda をパネルボタンで調整。
 
 use bevy::{
-    prelude::*,
     camera::{ClearColorConfig, Viewport},
+    prelude::*,
     window::WindowResized,
 };
 
@@ -61,19 +61,20 @@ fn main() {
     info!("Asset root: {}", asset_dir.display());
 
     App::new()
-        .add_plugins(DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "PGPM - Provably Good Planar Mappings".into(),
-                    resolution: bevy::window::WindowResolution::new(1280, 800),
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "PGPM - Provably Good Planar Mappings".into(),
+                        resolution: bevy::window::WindowResolution::new(1280, 800),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    file_path: asset_dir.to_string_lossy().into_owned(),
                     ..default()
                 }),
-                ..default()
-            })
-            .set(AssetPlugin {
-                file_path: asset_dir.to_string_lossy().into_owned(),
-                ..default()
-            })
         )
         .init_state::<AppState>()
         .init_resource::<AlgorithmState>()
@@ -83,39 +84,40 @@ fn main() {
         .insert_resource(ImagePathConfig::new(default_image.to_string_lossy()))
         .configure_sets(Update, DeformingSet.run_if(in_state(AppState::Deforming)))
         .add_systems(Startup, (setup_camera, ui::spawn_control_panel))
-        .add_systems(Update, (
-            load_image,
-            setup_camera_scale,
-            handle_input,
-        ))
-        .add_systems(Update, (
-            update_deformation
-                .in_set(DeformingSet)
-                .before(update_cpu_deform),
-            update_cpu_deform
-                .in_set(DeformingSet),
-        ))
-        .add_systems(Update, (
-            ui::draw_handles,
-            ui::button_visuals,
-            ui::on_toggle_mode,
-            ui::on_reset,
-            ui::on_k_bound,
-            ui::on_lambda,
-            ui::on_reg_mode,
-            ui::on_basis_type,
-            ui::on_image_path,
-            ui::on_k_max,
-            ui::on_strategy2,
-            ui::on_export,
-            ui::update_status_text,
-            ui::update_toggle_label,
-            ui::update_k_text,
-            ui::update_lambda_text,
-            ui::update_reg_mode_label,
-            ui::update_basis_type_label,
-            ui::update_k_max_text,
-        ))
+        .add_systems(Update, (load_image, setup_camera_scale, handle_input))
+        .add_systems(
+            Update,
+            (
+                update_deformation
+                    .in_set(DeformingSet)
+                    .before(update_cpu_deform),
+                update_cpu_deform.in_set(DeformingSet),
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                ui::draw_handles,
+                ui::button_visuals,
+                ui::on_toggle_mode,
+                ui::on_reset,
+                ui::on_k_bound,
+                ui::on_lambda,
+                ui::on_reg_mode,
+                ui::on_basis_type,
+                ui::on_image_path,
+                ui::on_k_max,
+                ui::on_strategy2,
+                ui::on_export,
+                ui::update_status_text,
+                ui::update_toggle_label,
+                ui::update_k_text,
+                ui::update_lambda_text,
+                ui::update_reg_mode_label,
+                ui::update_basis_type_label,
+                ui::update_k_max_text,
+            ),
+        )
         .run();
 }
 
@@ -161,7 +163,9 @@ fn setup_camera_scale(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Ok((mut camera, mut projection)) = camera_q.single_mut() else { return };
+    let Ok((mut camera, mut projection)) = camera_q.single_mut() else {
+        return;
+    };
 
     // 物理ピクセルでビューポートを計算（Bevy の Viewport に必要）。
     let scale_factor = window.scale_factor();
