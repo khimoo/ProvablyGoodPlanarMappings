@@ -24,6 +24,42 @@ use clarabel::solver::{
 use nalgebra::{DMatrix, DVector, Vector2};
 
 // ─────────────────────────────────────────────
+// SOCP制約の書き込みバッファ
+// ─────────────────────────────────────────────
+
+/// SOCP制約行列の構築用バッファと決定変数レイアウト。
+///
+/// 制約バッファ (`rows`, `b_vec`, `cones`) と決定変数の列配置情報を
+/// 一つの構造体にまとめることで、制約ビルダー関数のシグネチャを簡潔にする。
+///
+/// 決定変数レイアウト (Eq. 18):
+///   [c¹(n_basis), c²(n_basis), r(n_handles), t(n_active)?, s(n_active)?]
+pub struct SocpSystem {
+    pub rows: Vec<Vec<(usize, f64)>>,
+    pub b_vec: Vec<f64>,
+    pub cones: Vec<clarabel::solver::SupportedConeT<f64>>,
+    /// 基底関数の数 n (Table 1)
+    pub n_basis: usize,
+    /// ハンドル数 L (Eq. 29)
+    pub n_handles: usize,
+    /// アクティブ制約点の数 |Z' ∪ Z''| (Section 5)
+    pub n_active: usize,
+}
+
+impl SocpSystem {
+    fn new(n_basis: usize, n_handles: usize, n_active: usize) -> Self {
+        Self {
+            rows: Vec::new(),
+            b_vec: Vec::new(),
+            cones: Vec::new(),
+            n_basis,
+            n_handles,
+            n_active,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
 // 公開API
 // ─────────────────────────────────────────────
 
@@ -70,25 +106,23 @@ pub fn solve_socp(
     }
 
     // === 制約の構築 ===
-    let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
-    let mut b_vec: Vec<f64> = Vec::new();
-    let mut cones: Vec<clarabel::solver::SupportedConeT<f64>> = Vec::new();
+    let mut system = SocpSystem::new(n_basis, n_handles, n_active);
 
     // 位置制約 (Eq. 30)
     append_position_constraints(
-        source_handles, target_handles, basis, n_basis,
-        &mut rows, &mut b_vec, &mut cones,
+        source_handles, target_handles, basis,
+        &mut system,
     );
 
     // 歪み制約 (Eq. 23/26 または 28) — ポリシーに委譲
     policy.append_constraints(
-        state, precomputed, n_basis, n_handles,
-        &active_indices, n_active, params.k_bound,
-        &mut rows, &mut b_vec, &mut cones,
+        state, precomputed,
+        &active_indices, params.k_bound,
+        &mut system,
     );
 
     // === 組み立てと求解 ===
-    assemble_and_solve(p_mat, &q, &rows, &b_vec, &cones, n_vars, n_basis, solver_config)
+    assemble_and_solve(p_mat, &q, &system, n_vars, n_basis, solver_config)
 }
 
 // ─────────────────────────────────────────────
@@ -102,18 +136,16 @@ fn append_position_constraints(
     source_handles: &[Vector2<f64>],
     target_handles: &[Vector2<f64>],
     basis: &dyn BasisFunction,
-    n_basis: usize,
-    rows: &mut Vec<Vec<(usize, f64)>>,
-    b: &mut Vec<f64>,
-    cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+    system: &mut SocpSystem,
 ) {
+    let n_basis = system.n_basis;
     for l in 0..source_handles.len() {
         let phi_l = basis.evaluate(source_handles[l]);
         let r_col = 2 * n_basis + l;
 
         // s_1 = r_l
-        rows.push(vec![(r_col, -1.0)]);
-        b.push(0.0);
+        system.rows.push(vec![(r_col, -1.0)]);
+        system.b_vec.push(0.0);
 
         // s_2 = q_l_x - Σ c¹_i f_i(p_l)
         let mut row = Vec::new();
@@ -122,8 +154,8 @@ fn append_position_constraints(
                 row.push((i, phi_l[i]));
             }
         }
-        rows.push(row);
-        b.push(target_handles[l].x);
+        system.rows.push(row);
+        system.b_vec.push(target_handles[l].x);
 
         // s_3 = q_l_y - Σ c²_i f_i(p_l)
         let mut row = Vec::new();
@@ -132,10 +164,10 @@ fn append_position_constraints(
                 row.push((n_basis + i, phi_l[i]));
             }
         }
-        rows.push(row);
-        b.push(target_handles[l].y);
+        system.rows.push(row);
+        system.b_vec.push(target_handles[l].y);
 
-        cones.push(SecondOrderConeT(3));
+        system.cones.push(SecondOrderConeT(3));
     }
 }
 
@@ -149,51 +181,49 @@ fn append_position_constraints(
 pub(crate) fn append_isometric_constraints(
     state: &AlgorithmState,
     precomputed: &PrecomputedData,
-    n_basis: usize,
-    n_handles: usize,
     active_indices: &[usize],
-    n_active: usize,
     k: f64,
-    rows: &mut Vec<Vec<(usize, f64)>>,
-    b: &mut Vec<f64>,
-    cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+    system: &mut SocpSystem,
 ) {
+    let n_basis = system.n_basis;
+    let n_handles = system.n_handles;
+    let n_active = system.n_active;
     for (ai, &pt_idx) in active_indices.iter().enumerate() {
         let t_col = 2 * n_basis + n_handles + ai;
         let s_col = 2 * n_basis + n_handles + n_active + ai;
         let d = state.frames[pt_idx]; // Eq. 27
 
         // (a) ||J_S f(z_i)|| ≤ t_i — SOC(3) (Eq. 23a)
-        rows.push(vec![(t_col, -1.0)]);
-        b.push(0.0);
-        rows.push(j_s_x_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        rows.push(j_s_y_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        cones.push(SecondOrderConeT(3));
+        system.rows.push(vec![(t_col, -1.0)]);
+        system.b_vec.push(0.0);
+        system.rows.push(j_s_x_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.rows.push(j_s_y_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.cones.push(SecondOrderConeT(3));
 
         // (b) ||J_A f(z_i)|| ≤ s_i — SOC(3) (Eq. 23b)
-        rows.push(vec![(s_col, -1.0)]);
-        b.push(0.0);
-        rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        cones.push(SecondOrderConeT(3));
+        system.rows.push(vec![(s_col, -1.0)]);
+        system.b_vec.push(0.0);
+        system.rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.cones.push(SecondOrderConeT(3));
 
         // (c) t_i + s_i ≤ K — NN: K - t_i - s_i ≥ 0 (Eq. 23c)
-        rows.push(vec![(t_col, 1.0), (s_col, 1.0)]);
-        b.push(k);
+        system.rows.push(vec![(t_col, 1.0), (s_col, 1.0)]);
+        system.b_vec.push(k);
 
         // (d) J_S f·d_i - s_i ≥ 1/K — NN (Eq. 26)
         // Clarabel: Ax + s = b, s ≥ 0  →  Ax ≤ b
         // J_S·d - s_i ≥ 1/K  →  -J_S·d + s_i ≤ -1/K
         let mut row = neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d);
         row.push((s_col, 1.0));
-        rows.push(row);
-        b.push(-1.0 / k);
+        system.rows.push(row);
+        system.b_vec.push(-1.0 / k);
 
-        cones.push(NonnegativeConeT(2));
+        system.cones.push(NonnegativeConeT(2));
     }
 }
 
@@ -205,14 +235,12 @@ pub(crate) fn append_isometric_constraints(
 pub(crate) fn append_conformal_constraints(
     state: &AlgorithmState,
     precomputed: &PrecomputedData,
-    n_basis: usize,
     active_indices: &[usize],
     k: f64,
     delta: f64,
-    rows: &mut Vec<Vec<(usize, f64)>>,
-    b: &mut Vec<f64>,
-    cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+    system: &mut SocpSystem,
 ) {
+    let n_basis = system.n_basis;
     let ratio = (k - 1.0) / (k + 1.0);
 
     for &pt_idx in active_indices {
@@ -225,24 +253,24 @@ pub(crate) fn append_conformal_constraints(
             for entry in &mut row {
                 entry.1 *= ratio;
             }
-            rows.push(row);
-            b.push(0.0);
+            system.rows.push(row);
+            system.b_vec.push(0.0);
         }
-        rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        cones.push(SecondOrderConeT(3));
+        system.rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.cones.push(SecondOrderConeT(3));
 
         // (b) ||J_A f(z_i)|| ≤ J_S f(z_i)·d_i - δ — SOC(3) (Eq. 28b)
         // s_1 = J_S·d - δ = -δ - (-J_S·d項 · x)
-        rows.push(neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d));
-        b.push(-delta);
-        rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
-        b.push(0.0);
-        cones.push(SecondOrderConeT(3));
+        system.rows.push(neg_j_s_dot_d_row(precomputed, pt_idx, n_basis, d));
+        system.b_vec.push(-delta);
+        system.rows.push(j_a_x_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.rows.push(j_a_y_row(precomputed, pt_idx, n_basis));
+        system.b_vec.push(0.0);
+        system.cones.push(SecondOrderConeT(3));
     }
 }
 
@@ -332,14 +360,12 @@ fn neg_j_s_dot_d_row(
 fn assemble_and_solve(
     mut p_mat: DMatrix<f64>,
     q: &[f64],
-    rows: &[Vec<(usize, f64)>],
-    b_vec: &[f64],
-    cones: &[clarabel::solver::SupportedConeT<f64>],
+    system: &SocpSystem,
     n_vars: usize,
     n_basis: usize,
     solver_config: &SolverConfig,
 ) -> Result<CoefficientMatrix, SolverError> {
-    let (a_csc, b_arr) = sparse_rows_to_csc(rows, b_vec, n_vars);
+    let (a_csc, b_arr) = sparse_rows_to_csc(&system.rows, &system.b_vec, n_vars);
 
     check_problem_data(q, &a_csc, &b_arr, &p_mat)?;
 
@@ -356,7 +382,7 @@ fn assemble_and_solve(
     let p_csc = dense_to_csc_upper_tri(&p_mat);
     let settings = make_solver_settings();
 
-    let mut solver = DefaultSolver::new(&p_csc, q, &a_csc, &b_arr, cones, settings);
+    let mut solver = DefaultSolver::new(&p_csc, q, &a_csc, &b_arr, &system.cones, settings);
     solver.solve();
 
     match solver.solution.status {

@@ -12,7 +12,7 @@ use crate::basis::BasisFunction;
 use crate::distortion;
 use crate::algorithm::strategy;
 use crate::model::types::{AlgorithmState, PrecomputedData};
-use crate::numerics::solver;
+use crate::numerics::solver::{self, SocpSystem};
 
 /// SOCP定式化のための歪みタイプ固有の動作。
 pub trait DistortionPolicy: Send + Sync {
@@ -28,14 +28,9 @@ pub trait DistortionPolicy: Send + Sync {
         &self,
         state: &AlgorithmState,
         precomputed: &PrecomputedData,
-        n_basis: usize,
-        n_handles: usize,
         active_indices: &[usize],
-        n_active: usize,
         k: f64,
-        rows: &mut Vec<Vec<(usize, f64)>>,
-        b: &mut Vec<f64>,
-        cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+        system: &mut SocpSystem,
     );
 
     /// Strategy 2: 必要な充填距離 h を計算（Eq. 14 または 15）。
@@ -66,19 +61,14 @@ impl DistortionPolicy for IsometricPolicy {
         &self,
         state: &AlgorithmState,
         precomputed: &PrecomputedData,
-        n_basis: usize,
-        n_handles: usize,
         active_indices: &[usize],
-        n_active: usize,
         k: f64,
-        rows: &mut Vec<Vec<(usize, f64)>>,
-        b: &mut Vec<f64>,
-        cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+        system: &mut SocpSystem,
     ) {
         solver::append_isometric_constraints(
-            state, precomputed, n_basis, n_handles,
-            active_indices, n_active, k,
-            rows, b, cones,
+            state, precomputed,
+            active_indices, k,
+            system,
         );
     }
 
@@ -114,19 +104,14 @@ impl DistortionPolicy for ConformalPolicy {
         &self,
         state: &AlgorithmState,
         precomputed: &PrecomputedData,
-        n_basis: usize,
-        _n_handles: usize,
         active_indices: &[usize],
-        _n_active: usize,
         k: f64,
-        rows: &mut Vec<Vec<(usize, f64)>>,
-        b: &mut Vec<f64>,
-        cones: &mut Vec<clarabel::solver::SupportedConeT<f64>>,
+        system: &mut SocpSystem,
     ) {
         solver::append_conformal_constraints(
-            state, precomputed, n_basis,
+            state, precomputed,
             active_indices, k, self.delta,
-            rows, b, cones,
+            system,
         );
     }
 
