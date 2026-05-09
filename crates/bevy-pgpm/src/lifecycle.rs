@@ -16,6 +16,7 @@ use crate::state::{
 };
 
 /// システム: `ImagePathConfig.needs_reload` が設定されたときに画像を読み込む（または再読み込み）。
+#[allow(clippy::too_many_arguments)]
 pub fn load_image(
     mut commands: Commands,
     mut path_config: ResMut<ImagePathConfig>,

@@ -56,6 +56,7 @@ pub fn on_toggle_mode(
 }
 
 /// システム: 全状態をリセットして Setup に戻る。
+#[allow(clippy::too_many_arguments)]
 pub fn on_reset(
     query: Query<&Interaction, (Changed<Interaction>, With<ResetButton>)>,
     mut algo_state: ResMut<AlgorithmState>,

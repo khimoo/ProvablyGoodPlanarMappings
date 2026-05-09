@@ -61,6 +61,7 @@ impl Algorithm {
     ///   true を返すグリッド点のみがアクティブ/安定集合と ARAP 正則化の
     ///   対象となる。矩形グリッド構造は局所最大検出用に保持される
     ///   (Section 5)。`None` の場合、全グリッド点がドメイン内とみなされる。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         basis: Box<dyn BasisFunction>,
         params: MappingParams,

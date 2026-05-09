@@ -143,6 +143,7 @@ fn wide_button<M: Component>(parent: &mut ChildSpawnerCommands, text: &str, mark
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn param_row<TM: Component, LB: Component, RB: Component>(
     parent: &mut ChildSpawnerCommands,
     initial: &str,

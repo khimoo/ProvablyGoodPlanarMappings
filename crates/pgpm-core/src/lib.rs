@@ -28,6 +28,7 @@ use nalgebra::Vector2;
 ///
 /// pgpm-core利用者のための主要なエントリーポイント。
 /// `Algorithm` 構造体を直接返す。
+#[allow(clippy::too_many_arguments)]
 pub fn create_isometric_mapping(
     basis: Box<dyn BasisFunction>,
     params: MappingParams,
@@ -54,6 +55,7 @@ pub fn create_isometric_mapping(
 /// 等角写像を生成する (D_conf = Sigma / sigma)。
 ///
 /// `delta` は delta > omega(h) を満たす必要がある (Eq. 13)。
+#[allow(clippy::too_many_arguments)]
 pub fn create_conformal_mapping(
     basis: Box<dyn BasisFunction>,
     params: MappingParams,

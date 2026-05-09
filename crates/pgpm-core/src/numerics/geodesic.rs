@@ -328,6 +328,7 @@ impl GeodesicField {
 ///
 /// 標準FMM更新: ((T - T_x)/dx)² + ((T - T_y)/dy)² = 1 を解く。
 /// T_x, T_y は最小の確定済みx/y方向近傍距離。
+#[allow(clippy::too_many_arguments)]
 fn solve_eikonal_2d(
     distances: &[f64],
     states: &[CellState],

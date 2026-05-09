@@ -18,6 +18,7 @@ const HANDLE_CLICK_RADIUS: f32 = 15.0;
 const MIN_HANDLE_DISTANCE: f32 = 20.0;
 
 /// システム: キャンバス上のマウス入力を処理（ハンドル配置 & ドラッグ）。
+#[allow(clippy::too_many_arguments)]
 pub fn handle_input(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,

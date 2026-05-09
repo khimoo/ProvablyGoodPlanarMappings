@@ -7,6 +7,7 @@ use crate::ui::markers::*;
 use crate::state::{AlgoParams, AlgorithmState, AppState, DeformationInfo};
 
 /// システム: ボタンホバー/プレスの視覚フィードバック。
+#[allow(clippy::type_complexity)]
 pub fn button_visuals(
     mut query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<Button>)>,
 ) {
