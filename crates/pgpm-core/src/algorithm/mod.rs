@@ -16,6 +16,7 @@ use crate::numerics::solver;
 use crate::policy::DistortionPolicy;
 use log::warn;
 use nalgebra::{DMatrix, Vector2};
+use rayon::prelude::*;
 
 /// Algorithm 1 の Initialization フェーズの結果（内部用）。
 /// `step()` が `StepInfo` を構築するために使用する。
@@ -242,26 +243,45 @@ impl Algorithm {
         let m = self.state.collocation_points.len();
         let n = self.basis.count();
 
+        // 各コロケーション点の基底関数評価を並列に実行。
+        // 点ごとに独立な計算なので data race は発生しない。
+        let per_point: Vec<(Vec<f64>, Vec<f64>, Vec<f64>, usize)> = self
+            .state
+            .collocation_points
+            .par_iter()
+            .map(|pt| {
+                let val = self.basis.evaluate(*pt);
+                let (gx, gy) = self.basis.gradient(*pt);
+                let mut bad = 0usize;
+                let mut row_phi = Vec::with_capacity(n);
+                let mut row_gx = Vec::with_capacity(n);
+                let mut row_gy = Vec::with_capacity(n);
+                for i in 0..n {
+                    if !val[i].is_finite() || !gx[i].is_finite() || !gy[i].is_finite() {
+                        bad += 1;
+                    }
+                    row_phi.push(if val[i].is_finite() { val[i] } else { 0.0 });
+                    row_gx.push(if gx[i].is_finite() { gx[i] } else { 0.0 });
+                    row_gy.push(if gy[i].is_finite() { gy[i] } else { 0.0 });
+                }
+                (row_phi, row_gx, row_gy, bad)
+            })
+            .collect();
+
         let mut phi = DMatrix::zeros(m, n);
         let mut grad_phi_x = DMatrix::zeros(m, n);
         let mut grad_phi_y = DMatrix::zeros(m, n);
-
         let mut nan_inf_count = 0usize;
-        for (idx, pt) in self.state.collocation_points.iter().enumerate() {
-            let val = self.basis.evaluate(*pt);
-            let (gx, gy) = self.basis.gradient(*pt);
 
+        for (idx, (row_phi, row_gx, row_gy, bad)) in per_point.into_iter().enumerate() {
+            nan_inf_count += bad;
             for i in 0..n {
-                // 基底関数からの NaN/Inf を防護（形状認識基底で
-                // ドメイン境界付近の測地距離が無限大になる場合に発生しうる）。
-                if !val[i].is_finite() || !gx[i].is_finite() || !gy[i].is_finite() {
-                    nan_inf_count += 1;
-                }
-                phi[(idx, i)] = if val[i].is_finite() { val[i] } else { 0.0 };
-                grad_phi_x[(idx, i)] = if gx[i].is_finite() { gx[i] } else { 0.0 };
-                grad_phi_y[(idx, i)] = if gy[i].is_finite() { gy[i] } else { 0.0 };
+                phi[(idx, i)] = row_phi[i];
+                grad_phi_x[(idx, i)] = row_gx[i];
+                grad_phi_y[(idx, i)] = row_gy[i];
             }
         }
+
         if nan_inf_count > 0 {
             warn!(
                 "Precompute: {} NaN/Inf basis values replaced with 0.0 \
@@ -443,7 +463,7 @@ impl Algorithm {
         let c = &self.state.coefficients;
         let n = self.basis.count();
         points
-            .iter()
+            .par_iter()
             .map(|&x| {
                 let phi = self.basis.evaluate(x);
                 let mut u = 0.0;

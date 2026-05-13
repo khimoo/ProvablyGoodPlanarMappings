@@ -8,6 +8,7 @@
 use crate::model::types::{CoefficientMatrix, PrecomputedData};
 use crate::policy::DistortionPolicy;
 use nalgebra::Vector2;
+use rayon::prelude::*;
 
 /// Eq. 19: ∇u と ∇v の勾配から J_S f(x) と J_A f(x) を計算する。
 ///
@@ -105,6 +106,7 @@ pub fn evaluate_distortion_all(
     let m = precomputed.grad_phi_x.nrows(); // コロケーション点の数
 
     (0..m)
+        .into_par_iter()
         .map(|idx| {
             let (grad_u, grad_v) = grad_uv_at(coefficients, precomputed, idx);
             let (j_s, j_a) = compute_j_s_j_a(grad_u, grad_v);
@@ -123,6 +125,7 @@ pub fn evaluate_j_s_all(
     let m = precomputed.grad_phi_x.nrows();
 
     (0..m)
+        .into_par_iter()
         .map(|idx| {
             let (grad_u, grad_v) = grad_uv_at(coefficients, precomputed, idx);
             let (j_s, _) = compute_j_s_j_a(grad_u, grad_v);
