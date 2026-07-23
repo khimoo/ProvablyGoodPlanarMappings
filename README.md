@@ -3,7 +3,6 @@
 [Poranne & Lipman (2014) Provably Good Planar Mappings](https://doi.org/10.1145/2601097.2601123) をRustで実装しました。
 
 ![デモ](screenshots/demo.gif)
-<!-- TODO: screenshots/ にデモ GIF を配置 -->
 
 Provably Good Planar Mapingsは画像変形のアルゴリズムで、特に非凸な空間の変形に焦点を当てています。非凸領域上に離散的に存在する計算点で最適化を実行するだけで、非凸領域全体で画像の裏返りが発生しないことを数学的に保証しています。
 このアルゴリズムを使用し、背景透過png画像をマウスで変形させ新たにpng画像として保存するツールとして実装しました。
@@ -53,9 +52,9 @@ nix run
 
 ## 論文のアルゴリズムと実装の方針
 
-<!-- TODO: Algorithm 1 のスクショを配置 -->
-<!-- ![Algorithm 1](screenshots/paper_algorithm1.png) -->
-<!-- *Figure from Poranne & Lipman, "Provably Good Planar Mappings," ACM Trans. Graph. (SIGGRAPH), 2014. (c) ACM.* -->
+![Algorithm 1](screenshots/paper_algorithm1.png)
+
+*Figure from Poranne & Lipman, "Provably Good Planar Mappings," ACM Trans. Graph. (SIGGRAPH), 2014. (c) ACM.*
 
 制御点をマウスによって操作するとき、毎stepで画像のAlgorithm1が実行されます。
 また、Algorithm1を実行するためには、条件を満たした基底関数や歪み尺度をプログラマが与える必要があります。
